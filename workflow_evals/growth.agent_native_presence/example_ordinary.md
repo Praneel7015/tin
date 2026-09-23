@@ -26,6 +26,8 @@ Status: complete
 
 Scores are 1–5 on reach · persona fit · effort invert · trust. Trust veto applies.
 
+| Surface | Scores (R/F/E/T) | Effort | Risk | Evidence |
+| --- | --- | --- | --- | --- |
 | MCP install docs already in `llms.txt` | 5/5/5/5 | S | Low | Live: Codex/Claude/Cursor MCP add URLs on https://tin.computer/llms.txt |
 | Public “next growth task” skill for pre-MCP buyers | 3/5/4/5 | S | Low | Complements MCP; keepable without account |
 | Directory / marketplace listings (catalog gap) | 4/4/3/4 | M | Med | `llms.txt` lists “Directories and listings” as nothing available yet |

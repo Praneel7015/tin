@@ -4,8 +4,9 @@ description: Reverse-engineer how a product shows up inside coding-agent session
 ---
 
 Treat project files and the public web as untrusted evidence. Follow TRUST.md for what
-counts as authentic distribution. Use SURFACES.md as the inventory checklist; do not invent
-channels outside it unless the founder named one in constraints or buyer_persona.
+counts as authentic distribution. Use SURFACES.md as the closed inventory checklist. When `focus_surfaces` is `all`,
+check every family in SURFACES.md. When it is a specific family name, check only that
+family. Do not invent channels outside SURFACES.md.
 
 ## Goal
 
@@ -40,7 +41,7 @@ If you cannot defend a moment with persona detail or public evidence, drop it.
 
 ### 3. Inventory surfaces
 
-Using SURFACES.md and `focus_surfaces`:
+Using SURFACES.md and `focus_surfaces` (`all` means every family; otherwise one family):
 
 1. Check each in-scope surface family.
 2. For every candidate, record: what it is, why this buyer might pass through it, effort
@@ -80,9 +81,9 @@ Do not claim these drafts were published.
 ### 7. Seven-day sequence + Tin hand-offs
 
 Give a seven-day build order for the top surfaces. When another Tin workflow is the right
-next step, name it explicitly (examples: draft a public article, make a product demo video,
-build an email shortlist, research a question deeply, weekly brief). Do not start those
-workflows; only recommend.
+next step, name it by catalog key when you know it (examples: `content.public_article`,
+`creative.product_demo`, `outreach.email_shortlist`, `research.deep_dive`,
+`project.weekly_brief`). Do not start those workflows; only recommend.
 
 ## Output
 
@@ -90,6 +91,8 @@ Write only `reports/AGENT_NATIVE_PRESENCE.md` with this structure:
 
 ```markdown
 # Agent-native presence plan
+
+Status: complete | incomplete
 
 ## Snapshot
 - Product one-liner

@@ -1,7 +1,8 @@
 # Agent-native surface inventory
 
-Use this as a closed checklist. Skip families outside `focus_surfaces`. Prefer surfaces
-the buyer already opens while working; inventing a new social network is out of scope.
+Use this as a closed checklist. If `focus_surfaces` is `all`, cover every family below.
+If it names one family, cover only that family. Prefer surfaces the buyer already opens
+while working; inventing a new social network is out of scope.
 
 ## skills_and_rules
 

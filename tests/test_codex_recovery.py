@@ -146,6 +146,45 @@ async def test_failed_attempt_preserves_relay_reason_revokes_and_never_rebuys(
         assert "timed out" in str(attempt_failure({**record, "stop_reason": None}))
 
 
+@pytest.mark.parametrize("relay_reason", [None, "request_limit"])
+async def test_controller_token_stop_is_named_unless_the_relay_stopped_first(
+    publication_db, relay_reason
+):
+    db = publication_db
+    _, _, run, _ = await activity_fixture(db)
+    await pin_api(db, run, PROCEDURE_CONTRACT)
+    failure = RuntimeError("Codex procedure reached its observed token limit")
+
+    async def call(input):
+        if relay_reason:
+            await db.pool.execute(
+                "UPDATE effect_receipts SET result=result || jsonb_build_object("
+                "'stop_reason', $2::text) WHERE execution_key=$1",
+                attempt_key(run.id),
+                relay_reason,
+            )
+        await input.usage_sink({"source": "isolated_codex_controller", "limit_reached": False})
+        await input.usage_sink({"source": "isolated_codex_controller", "limit_reached": True})
+        await input.failure_sink(failure)
+        raise failure
+
+    async with db.pool.acquire() as conn:
+        with pytest.raises(RuntimeError):
+            await run_api_attempt(
+                db=db,
+                conn=conn,
+                run=run,
+                sandbox_id=run.sandbox_id,
+                run_input=procedure_input(),
+                call=AsyncMock(side_effect=call),
+            )
+    record = (await db.get_effect(attempt_key(run.id))).result
+    assert record["outcome"] == "failed"
+    assert record["stop_reason"] == (relay_reason or "token_limit")
+    expected = "request limit" if relay_reason else "pinned token limit"
+    assert expected in str(attempt_failure(record))
+
+
 async def test_retry_recovers_completed_revision_when_discovery_branch_is_gone(publication_db):
     db = publication_db
     activities, storage, run, checkpoint = await activity_fixture(db)
@@ -370,7 +409,7 @@ async def test_activity_recovers_partial_ack_then_reports_failure(publication_db
     assert "quoted spending maximum" in receipt.error_message
 
 
-def test_frozen_reader_skips_old_missing_oversize_and_linked_files(tmp_path):
+def test_frozen_reader_skips_old_missing_oversize_and_linked_files(tmp_path, make_symlink):
     root = tmp_path / "checkout"
     root.mkdir()
     subprocess.run(["git", "init", str(root)], check=True, capture_output=True)  # noqa: S603,S607
@@ -410,7 +449,7 @@ def test_frozen_reader_skips_old_missing_oversize_and_linked_files(tmp_path):
     assert read() == b""
     target = tmp_path / "secret"
     target.write_text("must not read")
-    output.symlink_to(target)
+    make_symlink(output, target)
     assert read() == b""
     output.unlink()
     output.hardlink_to(target)
@@ -501,3 +540,28 @@ async def test_runtime_revokes_freezes_captures_then_kills_even_on_capture_error
             ),
         )
     assert order == ["revoke", "freeze", "read", "save", "kill"]
+
+
+async def test_narration_projects_bounded_progress_only_for_unstepped_active_runs(publication_db):
+    db = publication_db
+    _, _, run, _ = await activity_fixture(db)
+    # While Codex works a procedure has no product step; saving the result adds one.
+    await db.pool.execute(
+        "UPDATE workflow_runs SET status='running', progress_mode='indeterminate', "
+        "progress_step=NULL, progress_current=NULL, progress_total=NULL WHERE id=$1",
+        run.id,
+    )
+    assert await db.project_run_narration(run_id=run.id, summary="Signed in.\n Writing  it.")
+    assert (await db.get_run(run.id)).progress_summary == "Signed in. Writing it."
+    assert await db.project_run_narration(run_id=run.id, summary="y" * 400)
+    summary = (await db.get_run(run.id)).progress_summary
+    assert len(summary) == 240 and summary.endswith("…")
+    await db.project_run_progress(
+        run_id=run.id, mode="steps", current=1, total=3, step="draft", summary="Drafting."
+    )
+    assert not await db.project_run_narration(run_id=run.id, summary="Agent text")
+    assert (await db.get_run(run.id)).progress_summary == "Drafting."
+    await db.pool.execute(
+        "UPDATE workflow_runs SET status='failed', progress_step=NULL WHERE id=$1", run.id
+    )
+    assert not await db.project_run_narration(run_id=run.id, summary="Too late")

@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "assumptions": [
+    "The caller fills the topic and product summary from the Feature map, the audience from the growth plan and voice notes from the writing style guide.",
+    "Fixture pytest covers schema, band, link and escaping validation offline; these cases judge live model quality."
+  ],
+  "cost_drivers": [
+    "Two gpt-6-luna calls at most, each with at most 16000 input bytes and small outputs."
+  ],
+  "effects": [
+    "Writes reports/SCORE_QUIZ.md in this project. The widget is not deployed anywhere and makes no network calls."
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "A readiness quiz for a developer tool with a real signup link.",
+      "inputs": {
+        "product_name": "Loopwire",
+        "quiz_topic": "is your API ready for production traffic",
+        "audience": "backend engineers at early-stage startups",
+        "signup_url": "https://loopwire.example/signup",
+        "product_summary": "Loopwire shows why each API request was rate limited and lets teams tune limits per client.",
+        "voice_notes": "Plain words, short sentences, no exclamation marks."
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "# Loopwire score quiz",
+          "```html",
+          "var DATA = ",
+          "\"signup_url\": \"https://loopwire.example/signup\"",
+          "{score}",
+          "link.href = DATA.signup_url;"
+        ],
+        "excludes": ["http://"]
+      }
+    },
+    {
+      "id": "unsafe_signup_url",
+      "description": "A signup link that could break out of the anchor is rejected before any model call.",
+      "inputs": {
+        "product_name": "Loopwire",
+        "quiz_topic": "is your API ready for production traffic",
+        "signup_url": "https://loopwire.example/signup\" onmouseover=\"alert(1)"
+      },
+      "expected_status": "failed"
+    }
+  ],
+  "rubric": [
+    {"id": "discriminates", "question": "Do the questions and point values actually separate visitors in different situations, with honest verdicts?"},
+    {"id": "grounding", "question": "Do the CTA and verdicts avoid promising more than the product summary states?"},
+    {"id": "voice", "question": "Does the copy follow the voice notes?"}
+  ]
+}

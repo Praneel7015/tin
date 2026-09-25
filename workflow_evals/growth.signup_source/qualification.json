@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "assumptions": [
+    "The connected GitHub repository is the one that creates accounts for the product.",
+    "The repository already has one of: auth-provider user metadata, a JSON profile column, a migration tool with a users table, or an analytics identify call at signup.",
+    "The question is optional and additive; it cannot measure accounts created before the PR is merged and deployed."
+  ],
+  "effects": [
+    "Opens one unmerged GitHub pull request of at most three files, or none for a no-change result.",
+    "Writes the receipt reports/signup-source/{run_id}/RESULT.md in this project."
+  ],
+  "cost_drivers": [
+    "Repository size and the number of signup paths the procedure has to trace.",
+    "Running the repository's own lint, type and test commands."
+  ],
+  "rubric": [
+    {"id": "optional", "question": "Can a new user still sign up exactly as before without answering, with no new validation or error?"},
+    {"id": "with_the_account", "question": "Is the answer written where the account lives, by the file that creates it, following PLACEMENT.md's sink order?"},
+    {"id": "grounded_answers", "question": "Is every answer beyond the core three backed by a path or URL showing this product uses that channel?"},
+    {"id": "readable", "question": "Could the founder copy the 'How to read them' query or export and see the answers without asking anyone?"}
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "A custom Supabase sign-up form (Next.js with-supabase starter): question added to the form, answers kept in user metadata.",
+      "inputs": {
+        "expected_repository": "example/next-supabase-app",
+        "signup_url": "https://app.example.test/auth/sign-up"
+      },
+      "expect": {
+        "contains": ["## Outcome", "patch", "signup_source", "## How to read them", "## Verification"],
+        "excludes": ["## Outcome\n\nno_change"]
+      }
+    },
+    {
+      "id": "hosted_signup_without_first_screen",
+      "description": "Boundary: a drop-in hosted signup widget and no screen the repository owns after it; no files change and the result names the unblocking step.",
+      "inputs": {
+        "expected_repository": "example/hosted-auth-site",
+        "context": "Signup is the provider's hosted page; the app redirects straight to the dashboard."
+      },
+      "expect": {
+        "contains": ["no_change", "hosted signup", "first-run screen", "## Not changed"]
+      }
+    },
+    {
+      "id": "marketing_site_only",
+      "description": "Plausible but unusable input: the connected repository is the marketing site, while accounts are created in another repository. It must not invent a form.",
+      "inputs": {
+        "expected_repository": "example/marketing-site"
+      },
+      "expect": {
+        "contains": ["no_change", "signup is not in this repository"],
+        "excludes": ["signup_source_detail"]
+      }
+    }
+  ]
+}

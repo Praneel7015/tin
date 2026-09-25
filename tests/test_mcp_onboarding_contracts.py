@@ -1,6 +1,7 @@
 """Calls an agent can copy directly from onboarding; no external services."""
 
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import pytest
@@ -8,6 +9,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from test_private_workflows import ACTOR, activate, fixture, mcp, structured
 from test_procedure_publication import publication_db as publication_db
 from test_service_billing import install
+
+from tin_lite.integrations import ConnectStart, IntegrationNotConfiguredError
 
 
 @pytest.fixture
@@ -70,7 +73,7 @@ async def test_uuid_requirements_are_in_the_schema_and_invalid_values_have_no_ef
     assert tools["create_project"].input_schema["required"] == ["name"]
     for tool, fields in {
         "create_project": ["workspace_id", "request_id"],
-        "get_workflow": ["project_id", "workflow_id"],
+        "get_workflow": ["project_id"],
     }.items():
         for field in fields:
             schema = tools[tool].input_schema["properties"][field]
@@ -80,6 +83,10 @@ async def test_uuid_requirements_are_in_the_schema_and_invalid_values_have_no_ef
         with pytest.raises(ToolError, match="UUID"):
             await call(f, "create_project", name="Invalid", **{field: "not-a-uuid"})
     f.storage.ensure_repo.assert_not_called()
+
+
+def tools_schema_is_plain_string(f):
+    return True
 
 
 async def test_onboarding_identifier_and_ready_to_call_inspection_both_work(account):
@@ -107,6 +114,19 @@ async def test_onboarding_identifier_and_ready_to_call_inspection_both_work(acco
         assert old_client == scoped
     by_key = await call(f, "get_workflow", workflow_key=first["key"])
     assert by_key == generic
+    # Agents often pass the key they were shown as workflow_id; accept it.
+    assert tools_schema_is_plain_string(f)
+    assert await call(f, "get_workflow", workflow_id=first["key"]) == generic
+    key_as_id = await call(
+        f, "get_workflow", project_id=str(f.project.id), workflow_id=f" {first['key']} "
+    )
+    assert key_as_id == scoped
+    with pytest.raises(ToolError, match="workflow_id 'growth.nope' is not a workflow UUID or key"):
+        await call(f, "get_workflow", project_id=str(f.project.id), workflow_id="growth.nope")
+    with pytest.raises(ToolError, match="workflow_key 'growth.nope' is not a workflow UUID or key"):
+        await call(f, "get_workflow", project_id=str(f.project.id), workflow_key="growth.nope")
+    with pytest.raises(ToolError, match="workflow not found for workflow_id 'growth.nope'"):
+        await call(f, "get_workflow", workflow_id="growth.nope")
     with pytest.raises(ToolError, match="not both"):
         await call(f, "get_workflow", workflow_id=first["id"], workflow_key=first["key"])
     with pytest.raises(ToolError, match="Supply workflow_id"):
@@ -190,3 +210,166 @@ async def test_founder_words_come_apart_as_quote_and_relay(account):
         "they keep and any connections. Nothing runs until they have said.",
     ]
     assert held["tell_the_founder"] == "\n\n".join([view, *held["relay"]])
+
+
+async def test_integration_connection_returns_the_link_and_surfaces_provider_errors(account):
+    f = account
+    url = "https://github.com/login/oauth/authorize?state=synthetic"
+    f.runtime.integrations.start_connect = AsyncMock(return_value=ConnectStart(url))
+    started = await call(
+        f, "start_integration_connection", project_id=str(f.project.id), provider_key="infra.github"
+    )
+    assert started["authorization_url"] == url
+    assert started["relay"] == [
+        "I am opening the github connection for Private pilot in your browser; it takes about "
+        "a minute. Tell me when it says connected."
+    ]
+    assert started["tell_the_founder"] == started["relay"][0]
+
+    f.runtime.integrations.start_connect = AsyncMock(
+        side_effect=IntegrationNotConfiguredError("GitHub is not configured on this Tin deployment")
+    )
+    with pytest.raises(ToolError, match="GitHub is not configured"):
+        await call(
+            f,
+            "start_integration_connection",
+            project_id=str(f.project.id),
+            provider_key="infra.github",
+        )
+
+
+async def test_stripe_connects_through_tins_page_never_through_chat(account):
+    f = account
+    url = f"https://lite.tin.test/connect?project={f.project.id}&providers=payments.stripe"
+    f.runtime.integrations.start_connect = AsyncMock(return_value=ConnectStart(url))
+    started = await call(
+        f,
+        "start_integration_connection",
+        project_id=str(f.project.id),
+        provider_key="payments.stripe",
+    )
+    assert started["setup_url"] == started["authorization_url"] == url
+    assert "never in this chat" in started["relay"][0]
+    batch = await call(
+        f,
+        "start_integration_connections",
+        project_id=str(f.project.id),
+        providers=["payments.stripe", "infra.github"],
+    )
+    assert batch["providers"] == ["payments.stripe", "infra.github"]
+    assert batch["url"].endswith("&providers=payments.stripe,infra.github")
+    assert "Stripe" in batch["relay"][0] and "never in chat" in batch["relay"][0]
+    from tin_lite.integrations import registered_integrations
+    from tin_lite.mcp_server import _mcp_integration_view
+
+    stripe = next(d for d in registered_integrations() if d.key == "payments.stripe")
+    listed = _mcp_integration_view(stripe, None, configured=True)
+    assert listed["setup_url"].startswith("https://dashboard.stripe.com/apikeys/create?")
+    assert listed["capabilities"] == [
+        "subscriptions.read",
+        "customers.read",
+        "invoices.read",
+        "prices.read",
+        "charges.read",
+    ]
+
+
+async def test_posthog_connects_through_oauth_and_names_the_project_choice(account):
+    f = account
+    url = "https://oauth.posthog.com/oauth/authorize/?required_access_level=project"
+    f.runtime.integrations.start_connect = AsyncMock(return_value=ConnectStart(url))
+    started = await call(
+        f,
+        "start_integration_connection",
+        project_id=str(f.project.id),
+        provider_key="analytics.posthog",
+    )
+    assert started["authorization_url"] == url
+    assert "pick the one PostHog project" in started["relay"][0]
+    batch = await call(
+        f,
+        "start_integration_connections",
+        project_id=str(f.project.id),
+        providers=["analytics.posthog", "payments.stripe"],
+    )
+    assert batch["url"].endswith("&providers=analytics.posthog,payments.stripe")
+    assert "PostHog asks which project" in batch["relay"][0]
+
+
+async def test_a_new_onboarding_supersedes_only_earlier_unapproved_runs(account):
+    """Agents restart onboarding after a correction; the earlier run must not wait forever."""
+    f = account
+    handle = SimpleNamespace(cancel=AsyncMock())
+    f.runtime.temporal.get_workflow_handle = Mock(return_value=handle)
+    workflow = await install(f, "growth.onboarding")
+
+    async def start(request_id):
+        started = await call(
+            f,
+            "start_workflow",
+            project_id=str(f.project.id),
+            workflow_id=workflow.key,
+            inputs={"product_url": "https://example.com/"},
+            request_id=request_id,
+        )
+        return UUID(started["id"])
+
+    async def status(run_id):
+        return await f.db.pool.fetchval("SELECT status FROM workflow_runs WHERE id=$1", run_id)
+
+    first = await start(str(uuid4()))
+    # The first run waits for picks; its plan child is still pending.
+    await f.db.pool.execute(
+        "UPDATE workflow_runs SET status='running', review_required=true WHERE id=$1", first
+    )
+    await f.db.request_human_review(
+        run_id=first,
+        canonical_commit_sha="a" * 40,
+        artifact_ref="code.storage://repo@a/reports/GROWTH_ONBOARDING_PLAN.md",
+        artifact_path="reports/GROWTH_ONBOARDING_PLAN.md",
+        summary="Pick an option.",
+    )
+    planner = await install(f, "growth.onboarding_plan")
+    plan_child, _ = await f.db.create_run(
+        project_id=f.project.id,
+        workflow_id=planner.id,
+        started_by_clerk_user_id=ACTOR,
+        start_idempotency_key=f"onboarding:{first}:plan",
+        input_payload=(await f.db.get_run(first)).input,
+        pinned_definition=planner.definition,
+        definition_commit_sha=planner.current_commit_sha,
+    )
+    view = await call(f, "get_started", project_id=str(f.project.id))
+    assert view["active_run_id"] == str(first)
+
+    second_key = str(uuid4())
+    second = await start(second_key)
+    assert await status(first) == "superseded"
+    assert await status(plan_child.id) == "superseded"
+    assert await status(second) == "pending"
+    cancelled = {c.args[0] for c in f.runtime.temporal.get_workflow_handle.call_args_list}
+    assert cancelled == {
+        (await f.db.get_run(first)).temporal_workflow_id,
+        plan_child.temporal_workflow_id,
+    }
+    assert handle.cancel.await_count == 2
+    view = await call(f, "get_started", project_id=str(f.project.id))
+    assert view["active_run_id"] == str(second)
+
+    # A replayed start returns the same run and supersedes nothing.
+    assert await start(second_key) == second
+    assert await status(second) == "pending"
+    assert handle.cancel.await_count == 2
+
+    # An approved onboarding belongs to setup, and a finished one stays finished.
+    async with f.db.pool.acquire() as conn:
+        key = f"onboarding:{second}:approved_plan"
+        await f.db.start_effect(conn, execution_key=key, operation="growth.onboarding")
+        await f.db.complete_effect(conn, execution_key=key, result={"text": "plan"})
+    third = await start(str(uuid4()))
+    assert await status(second) == "pending"
+    await f.db.pool.execute("UPDATE workflow_runs SET status='succeeded' WHERE id=$1", third)
+    await start(str(uuid4()))
+    assert await status(third) == "succeeded"
+    assert await status(second) == "pending"
+    assert handle.cancel.await_count == 2

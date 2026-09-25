@@ -35,6 +35,22 @@ def keyword_plan_gate(settings: Any) -> str | None:
     return None
 
 
+def paid_ads_gate(settings: Any) -> str | None:
+    if (
+        not getattr(settings, "dataforseo_login", None)
+        or not getattr(settings, "dataforseo_password", None)
+        or not getattr(settings, "luna_api_key", None)
+        or not getattr(settings, "gak_url", None)
+        or not getattr(settings, "gak_token", None)
+        or getattr(settings, "paid_ads_max_cost_usd", 0) < 3
+    ):
+        return (
+            "Paid ads assessment requires DataForSEO, the Keyword Planner service, the native "
+            "model and an enabled ceiling of at least $3."
+        )
+    return None
+
+
 def organic_system_gate(settings: Any, *, keyword_max_cost_usd: float = 9) -> str | None:
     if (
         not getattr(settings, "dataforseo_login", None)
@@ -47,5 +63,23 @@ def organic_system_gate(settings: Any, *, keyword_max_cost_usd: float = 9) -> st
         return (
             "Enable audit, keyword research and the $1 content-planning allowance first. "
             "No child workflow was started."
+        )
+    return None
+
+
+def google_ads_gate(settings: Any) -> str | None:
+    from tin_lite.google_ads import manager_oauth_client
+
+    client_id, client_secret = manager_oauth_client(settings)
+    if (
+        not getattr(settings, "google_ads_manager_customer_id", None)
+        or not getattr(settings, "google_ads_manager_refresh_token", None)
+        or not client_id
+        or client_secret is None
+        or not getattr(settings, "luna_api_key", None)
+    ):
+        return (
+            "Google Ads workflows require Tin's manager account credentials, the Google OAuth "
+            "client and the native model."
         )
     return None

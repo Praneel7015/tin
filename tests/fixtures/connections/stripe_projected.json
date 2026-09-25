@@ -1,0 +1,398 @@
+{
+  "_comment": "Tin's projected responses for stripe_objects.json with default arguments and a 64000-byte bound. Regenerate deliberately when a projection changes.",
+  "subscriptions.list": {
+    "livemode": false,
+    "records": [
+      {
+        "id": "sub_Fixture0004",
+        "status": "trialing",
+        "created": 1778272000,
+        "start_date": 1778272000,
+        "current_period_end": 1782073600,
+        "cancel_at_period_end": false,
+        "canceled_at": null,
+        "ended_at": null,
+        "trial_start": 1778272000,
+        "trial_end": 1779481600,
+        "cancellation_details": {
+          "reason": null,
+          "feedback": null
+        },
+        "livemode": false,
+        "metadata": {},
+        "discount_ids": [],
+        "coupon_id": null,
+        "items": [
+          {
+            "price_id": "price_FixtureProMonthly",
+            "product_id": "prod_FixturePro",
+            "unit_amount": 2900,
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 1,
+            "quantity": 1
+          }
+        ],
+        "customer": {
+          "id": "cus_Fixture0004",
+          "email": "margaret@apollo.example",
+          "name": "Margaret H.",
+          "email_domain": "apollo.example",
+          "country": "US",
+          "created": 1776544000,
+          "metadata": {}
+        }
+      },
+      {
+        "id": "sub_Fixture0003",
+        "status": "active",
+        "created": 1773088000,
+        "start_date": 1773088000,
+        "current_period_end": 1776889600,
+        "cancel_at_period_end": false,
+        "canceled_at": null,
+        "ended_at": null,
+        "trial_start": 1773088000,
+        "trial_end": 1774297600,
+        "cancellation_details": {
+          "reason": null,
+          "feedback": null
+        },
+        "livemode": false,
+        "metadata": {},
+        "discount_ids": [],
+        "coupon_id": null,
+        "items": [
+          {
+            "price_id": "price_FixtureProMonthly",
+            "product_id": "prod_FixturePro",
+            "unit_amount": 2900,
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 1,
+            "quantity": 1
+          }
+        ],
+        "customer": {
+          "id": "cus_Fixture0003",
+          "email": "linus@kernel.example",
+          "name": "Linus T.",
+          "email_domain": "kernel.example",
+          "country": "FI",
+          "created": 1772224000,
+          "metadata": {
+            "utm_source": "newsletter"
+          }
+        }
+      },
+      {
+        "id": "sub_Fixture0002",
+        "status": "canceled",
+        "created": 1767904000,
+        "start_date": 1767904000,
+        "current_period_end": 1770496000,
+        "cancel_at_period_end": false,
+        "canceled_at": 1773260800,
+        "ended_at": 1773260800,
+        "trial_start": null,
+        "trial_end": null,
+        "cancellation_details": {
+          "reason": "cancellation_requested",
+          "feedback": "too_expensive"
+        },
+        "livemode": false,
+        "metadata": {},
+        "discount_ids": [
+          "di_FixtureLaunch"
+        ],
+        "coupon_id": null,
+        "items": [
+          {
+            "price_id": "price_FixtureProMonthly",
+            "product_id": "prod_FixturePro",
+            "unit_amount": 2900,
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 1,
+            "quantity": 1
+          }
+        ],
+        "customer": {
+          "id": "cus_Fixture0002",
+          "email": "grace@hopper.example",
+          "name": "Grace Hopper",
+          "email_domain": "hopper.example",
+          "country": "US",
+          "created": 1767040000,
+          "metadata": {}
+        }
+      },
+      {
+        "id": "sub_Fixture0001",
+        "status": "active",
+        "created": 1763584000,
+        "start_date": 1763584000,
+        "current_period_end": 1795120000,
+        "cancel_at_period_end": false,
+        "canceled_at": null,
+        "ended_at": null,
+        "trial_start": null,
+        "trial_end": null,
+        "cancellation_details": {
+          "reason": null,
+          "feedback": null
+        },
+        "livemode": false,
+        "metadata": {
+          "campaign": "launch"
+        },
+        "discount_ids": [],
+        "coupon_id": null,
+        "items": [
+          {
+            "price_id": "price_FixtureProYearly",
+            "product_id": "prod_FixturePro",
+            "unit_amount": 29000,
+            "currency": "usd",
+            "interval": "year",
+            "interval_count": 1,
+            "quantity": 3
+          }
+        ],
+        "customer": {
+          "id": "cus_Fixture0001",
+          "email": "ada@lovelace.example",
+          "name": "Ada Lovelace",
+          "email_domain": "lovelace.example",
+          "country": "GB",
+          "created": 1762720000,
+          "metadata": {
+            "plan_source": "launch",
+            "seats": "3"
+          }
+        }
+      }
+    ],
+    "has_more": false,
+    "truncated": false,
+    "next_cursor": null
+  },
+  "customers.list": {
+    "livemode": false,
+    "records": [
+      {
+        "id": "cus_Fixture0004",
+        "email": "margaret@apollo.example",
+        "name": "Margaret H.",
+        "email_domain": "apollo.example",
+        "country": "US",
+        "created": 1776544000,
+        "metadata": {},
+        "currency": "usd",
+        "delinquent": false
+      },
+      {
+        "id": "cus_Fixture0003",
+        "email": "linus@kernel.example",
+        "name": "Linus T.",
+        "email_domain": "kernel.example",
+        "country": "FI",
+        "created": 1772224000,
+        "metadata": {
+          "utm_source": "newsletter"
+        },
+        "currency": "usd",
+        "delinquent": false
+      },
+      {
+        "id": "cus_Fixture0002",
+        "email": "grace@hopper.example",
+        "name": "Grace Hopper",
+        "email_domain": "hopper.example",
+        "country": "US",
+        "created": 1767040000,
+        "metadata": {},
+        "currency": "usd",
+        "delinquent": false
+      },
+      {
+        "id": "cus_Fixture0001",
+        "email": "ada@lovelace.example",
+        "name": "Ada Lovelace",
+        "email_domain": "lovelace.example",
+        "country": "GB",
+        "created": 1762720000,
+        "metadata": {
+          "plan_source": "launch",
+          "seats": "3"
+        },
+        "currency": "usd",
+        "delinquent": false
+      }
+    ],
+    "has_more": false,
+    "truncated": false,
+    "next_cursor": null
+  },
+  "invoices.list": {
+    "livemode": false,
+    "records": [
+      {
+        "id": "in_Fixture0004",
+        "customer": "cus_Fixture0003",
+        "subscription": null,
+        "status": "open",
+        "billing_reason": "manual",
+        "amount_due": 49000,
+        "amount_paid": 0,
+        "currency": "usd",
+        "created": 1774816000,
+        "period_start": 1772224000,
+        "period_end": 1774816000,
+        "attempt_count": 1
+      },
+      {
+        "id": "in_Fixture0003",
+        "customer": "cus_Fixture0002",
+        "subscription": "sub_Fixture0002",
+        "status": "uncollectible",
+        "billing_reason": "subscription_cycle",
+        "amount_due": 2900,
+        "amount_paid": 0,
+        "currency": "usd",
+        "created": 1773088000,
+        "period_start": 1770496000,
+        "period_end": 1773088000,
+        "attempt_count": 4
+      },
+      {
+        "id": "in_Fixture0002",
+        "customer": "cus_Fixture0002",
+        "subscription": "sub_Fixture0002",
+        "status": "paid",
+        "billing_reason": "subscription_cycle",
+        "amount_due": 2900,
+        "amount_paid": 2900,
+        "currency": "usd",
+        "created": 1770496000,
+        "period_start": 1767904000,
+        "period_end": 1770496000,
+        "attempt_count": 1
+      },
+      {
+        "id": "in_Fixture0001",
+        "customer": "cus_Fixture0001",
+        "subscription": "sub_Fixture0001",
+        "status": "paid",
+        "billing_reason": "subscription_create",
+        "amount_due": 87000,
+        "amount_paid": 87000,
+        "currency": "usd",
+        "created": 1763584000,
+        "period_start": 1760992000,
+        "period_end": 1763584000,
+        "attempt_count": 1
+      }
+    ],
+    "has_more": false,
+    "truncated": false,
+    "next_cursor": null
+  },
+  "prices.list": {
+    "livemode": false,
+    "records": [
+      {
+        "id": "price_FixtureAudit",
+        "product": {
+          "id": "prod_FixtureAudit",
+          "name": "One-off audit"
+        },
+        "unit_amount": 49000,
+        "currency": "usd",
+        "type": "one_time",
+        "recurring": null,
+        "active": false,
+        "nickname": null
+      },
+      {
+        "id": "price_FixtureProYearly",
+        "product": {
+          "id": "prod_FixturePro",
+          "name": "Pro"
+        },
+        "unit_amount": 29000,
+        "currency": "usd",
+        "type": "recurring",
+        "recurring": {
+          "interval": "year",
+          "interval_count": 1
+        },
+        "active": true,
+        "nickname": "Pro yearly"
+      },
+      {
+        "id": "price_FixtureProMonthly",
+        "product": {
+          "id": "prod_FixturePro",
+          "name": "Pro"
+        },
+        "unit_amount": 2900,
+        "currency": "usd",
+        "type": "recurring",
+        "recurring": {
+          "interval": "month",
+          "interval_count": 1
+        },
+        "active": true,
+        "nickname": "Pro monthly"
+      }
+    ],
+    "has_more": false,
+    "truncated": false,
+    "next_cursor": null
+  },
+  "charges.list": {
+    "livemode": false,
+    "records": [
+      {
+        "id": "ch_Fixture0003",
+        "customer": "cus_Fixture0002",
+        "amount": 2900,
+        "amount_refunded": 0,
+        "currency": "usd",
+        "status": "failed",
+        "paid": false,
+        "refunded": false,
+        "created": 1773088000,
+        "failure_code": "card_declined"
+      },
+      {
+        "id": "ch_Fixture0002",
+        "customer": "cus_Fixture0002",
+        "amount": 2900,
+        "amount_refunded": 2900,
+        "currency": "usd",
+        "status": "succeeded",
+        "paid": true,
+        "refunded": true,
+        "created": 1770496000,
+        "failure_code": null
+      },
+      {
+        "id": "ch_Fixture0001",
+        "customer": "cus_Fixture0001",
+        "amount": 87000,
+        "amount_refunded": 0,
+        "currency": "usd",
+        "status": "succeeded",
+        "paid": true,
+        "refunded": false,
+        "created": 1763584000,
+        "failure_code": null
+      }
+    ],
+    "has_more": false,
+    "truncated": false,
+    "next_cursor": null
+  }
+}

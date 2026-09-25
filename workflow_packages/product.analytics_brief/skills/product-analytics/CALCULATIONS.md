@@ -54,16 +54,37 @@ def stable_hash(obj):
     ).hexdigest()
 
 
+def validate_hosts(hosts):
+    if (
+        type(hosts) is not list
+        or len(hosts) > 5
+        or any(
+            type(host) is not str
+            or len(host) > 253
+            or not re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+", host
+            )
+            for host in hosts
+        )
+        or len(hosts) != len(set(hosts))
+    ):
+        raise ValueError("website_hosts must contain at most five distinct lowercase hostnames")
+
+
 def settings(inputs, now=None):
-    allowed = {"posthog_project_id", "reporting_days", "as_of_utc", "event_mapping", "exclusions"}
+    allowed = {
+        "reporting_days",
+        "as_of_utc",
+        "event_mapping",
+        "exclusions",
+        "website_hosts",
+    }
     if not isinstance(inputs, dict) or set(inputs) - allowed:
         raise ValueError("unexpected client input")
     c = dict(reporting_days=7, as_of_utc="", event_mapping="", exclusions="")
     c.update(inputs)
-    if type(c.get("posthog_project_id")) is not str or not re.fullmatch(
-        r"[0-9]{1,20}", c["posthog_project_id"]
-    ):
-        raise ValueError("invalid provider project ID")
+    hosts = c.get("website_hosts", [])
+    validate_hosts(hosts)
     if type(c["reporting_days"]) is not int or not 1 <= c["reporting_days"] <= 31:
         raise ValueError("invalid reporting_days")
     for k in ("event_mapping", "exclusions"):
@@ -83,8 +104,11 @@ def settings(inputs, now=None):
         end = clock.astimezone(dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     current = end - dt.timedelta(days=c["reporting_days"])
     prior = current - dt.timedelta(days=c["reporting_days"])
-    # Date/window changes do not silently replace the semantic mapping.
-    binding = stable_hash({k: c[k] for k in ("posthog_project_id", "event_mapping", "exclusions")})
+    # Date/window changes do not silently replace the semantic mapping. The PostHog project is
+    # the one selected in Tin's Integrations; it is never an input or part of a request.
+    binding = stable_hash({k: c[k] for k in ("event_mapping", "exclusions")})
+    if hosts:
+        binding = stable_hash({"base": binding, "website_hosts": sorted(hosts)})
     return c, (prior, current, end), binding
 
 
@@ -111,6 +135,9 @@ def validate_plan(p):
         "traffic_actor_key",
         "traffic_chain_key",
     }
+    if type(p) is dict and "_website_hosts" in p:
+        validate_hosts(p["_website_hosts"])
+        p = {k: v for k, v in p.items() if k != "_website_hosts"}
     if type(p) is not dict or set(p) != fields or p["version"] != VERSION:
         raise ValueError("unsupported plan shape/version")
     identity(p["actor_key"])
@@ -225,6 +252,13 @@ def event_list(p):
 
 def where(p, start, end, events=None):
     s = f"timestamp>={timestamp(start)} AND timestamp<{timestamp(end)} AND ({exclusions(p['exclusions'])})"
+    hosts = p.get("_website_hosts", [])
+    validate_hosts(hosts)
+    if hosts:
+        # Scope every occurrence of pageviews, including inventory/coverage, consistently.
+        # Server events have separate project-wide scope; never drop missing-host server rows.
+        host = prop("$host")
+        s += " AND (event!='$pageview' OR " + host + " IN (" + ",".join(map(literal, hosts)) + "))"
     if events is not None:
         if not events:
             raise ValueError("empty event selection")
@@ -253,31 +287,40 @@ def coverage(p, w):
         ev = literal(p["pageview_event"])
         actor = f"if(event={ev},toString({identity(p['traffic_actor_key'])}),toString({actor}))"
         chain = f"if(event={ev},toString({identity(p['traffic_chain_key'])}),toString({chain}))"
-    extra = []
     keys = sorted(
         set(
             [x["property"] for x in p["exclusions"]]
             + [x for x in (p["category_property"], p["path_property"], p["source_property"]) if x]
         )
     )
-    for i, k in enumerate(keys):
-        extra.append(f"countIf(NOT {nonempty(exclusion_field(k))}) AS missing_p{i}")
-    fields = [
+    # Each identity/property expression appears once, in the inner SELECT, so the query stays
+    # within Tin's 8000-byte HogQL bound with six exclusions and five website hosts.
+    inner = [
         "event",
         f"if(timestamp<{timestamp(b)},'prior','current') AS period",
+        "timestamp",
+        f"toString({actor}) AS actor",
+        f"toString({chain}) AS chain",
+    ] + [f"toString({exclusion_field(k)}) AS f{i}" for i, k in enumerate(keys)]
+    has_actor = nonempty("actor")
+    eligible = f"{has_actor} AND {nonempty('chain')}"
+    fields = [
+        "event",
+        "period",
         "count() AS raw",
-        f"countIf({nonempty(actor)}) AS actor_rows",
-        f"countIf({nonempty(actor)} AND {nonempty(chain)}) AS eligible_rows",
-        f"uniqExactIf(toString({actor}),{nonempty(actor)}) AS actors",
-        f"uniqExactIf(toString({actor}),{nonempty(actor)} AND {nonempty(chain)}) AS eligible_actors",
-        f"uniqExactIf(tuple(toString({actor}),toString({chain})),{nonempty(actor)} AND {nonempty(chain)}) AS chains",
+        f"countIf({has_actor}) AS actor_rows",
+        f"countIf({eligible}) AS eligible_rows",
+        f"uniqExactIf(actor,{has_actor}) AS actors",
+        f"uniqExactIf(actor,{eligible}) AS eligible_actors",
+        f"uniqExactIf(tuple(actor,chain),{eligible}) AS chains",
         "min(timestamp) AS first_seen",
         "max(timestamp) AS last_seen",
-    ] + extra
+    ] + [f"countIf(NOT {nonempty(f'f{i}')}) AS missing_p{i}" for i in range(len(keys))]
+    rows = f"SELECT {','.join(inner)} FROM events WHERE {where(p, a, c, event_list(p))}"
     return (
         "SELECT "
         + ",".join(fields)
-        + f" FROM events WHERE {where(p, a, c, event_list(p))} GROUP BY event,period ORDER BY event,period LIMIT 41",
+        + f" FROM ({rows}) GROUP BY event,period ORDER BY event,period LIMIT 41",
         keys,
     )
 
@@ -406,6 +449,7 @@ def traffic(p, w):
 
 
 def request(c, step, p, w):
+    """One analytics.posthog query.hogql call: pass its fields to call_service unchanged."""
     builders = {
         "inventory": inventory,
         "coverage": coverage,
@@ -417,53 +461,101 @@ def request(c, step, p, w):
     }
     if step not in builders:
         raise ValueError("unknown query step")
-    if type(c.get("posthog_project_id")) is not str or not re.fullmatch(
-        r"[0-9]{1,20}", c["posthog_project_id"]
-    ):
-        raise ValueError("invalid provider project ID")
     if step != "inventory":
         validate_plan(p)
-    sql = builders[step](p, w)
+    hosts = c.get("website_hosts", [])
+    validate_hosts(hosts)
+    if hosts and p.get("pageview_event", "$pageview") not in ("", "$pageview"):
+        raise ValueError("website_hosts currently scopes the standard $pageview event only")
+    scoped = {**p, "_website_hosts": hosts}
+    sql = builders[step](scoped, w)
     if step == "coverage":
         sql = sql[0]
     # Caller supplies validated data, never SQL; query text only comes from fixed builders.
+    # Tin's gateway accepts one SELECT of at most 8000 bytes ending in LIMIT n (n <= 1000),
+    # without OFFSET; check the same shape here so a refusal never costs a call.
     if not sql.startswith(("SELECT ", "WITH ")) or ";" in sql or "--" in sql or "/*" in sql:
         raise ValueError("invalid builder output")
-    r = dict(
+    limit = re.search(r" LIMIT ([0-9]+)\Z", sql)
+    if limit is None or not 1 <= int(limit.group(1)) <= 1000 or re.search(r"\bOFFSET\b", sql):
+        raise ValueError("invalid builder output")
+    if len(sql.encode()) > 8000:
+        raise ValueError("query exceeds the 8000-byte HogQL bound")
+    return dict(
         service="analytics",
         step=step,
-        method="POST",
-        path="/api/projects/" + c["posthog_project_id"] + "/query/",
-        body={"query": {"kind": "HogQLQuery", "query": sql}},
+        operation="query.hogql",
+        arguments={"query": sql, "name": "analytics brief " + step},
     )
-    if len(json.dumps(r, ensure_ascii=False).encode()) > 16000:
-        raise ValueError("request too large")
-    return r
+
+
+def properties_request(events):
+    """The one analytics.posthog property_definitions.list call, for 1-20 selected events."""
+    if (
+        type(events) is not list
+        or not 1 <= len(events) <= 20
+        or len(set(events)) != len(events)
+        or any(type(e) is not str or not 1 <= len(e) <= 200 for e in events)
+    ):
+        raise ValueError("select 1-20 distinct event names")
+    return dict(
+        service="analytics",
+        step="properties",
+        operation="property_definitions.list",
+        arguments={"event_names": sorted(events), "limit": 100},
+    )
+
+
+def property_types(page):
+    """Validate the projected property page; returns {name: type or None} and completeness."""
+    if (
+        type(page) is not dict
+        or type(page.get("records")) is not list
+        or type(page.get("has_more")) is not bool
+        or type(page.get("truncated")) is not bool
+    ):
+        raise ValueError("invalid property definitions")
+    types = {}
+    for r in page["records"]:
+        if type(r) is not dict or type(r.get("name")) is not str or r["name"] in types:
+            raise ValueError("invalid property definition")
+        if r.get("property_type") is not None and type(r["property_type"]) is not str:
+            raise ValueError("invalid property type")
+        types[r["name"]] = r.get("property_type")
+    return {"types": types, "complete": not page["has_more"]}
+
+
+def check_property_types(found, p):
+    """Keys whose declared type contradicts their use. Unlisted is unverified, not absent."""
+    wanted = {}
+    for key in ("actor_key", "chain_key", "traffic_actor_key", "traffic_chain_key"):
+        if p[key].startswith("event:"):
+            wanted[p[key][6:]] = "String"
+    for key in ("category_property", "path_property", "source_property"):
+        if p[key]:
+            wanted[p[key]] = "String"
+    conflicts, unverified = [], []
+    for name, expected in sorted(wanted.items()):
+        actual = found["types"].get(name)
+        if name not in found["types"] or actual is None:
+            unverified.append(name)
+        elif actual != expected:
+            conflicts.append({"property": name, "type": actual, "expected": expected})
+    return {"conflicts": conflicts, "unverified": unverified, "complete": found["complete"]}
 
 
 def table(data, columns, cap):
-    # Pass only the documented provider data object after checking gateway status separately.
+    # Pass the query.hogql result unchanged: {columns, types, rows, has_more, truncated}.
     if type(data) is not dict or len(json.dumps(data, ensure_ascii=False).encode()) > 64000:
         raise ValueError("invalid provider data")
-    for k in (
-        "error",
-        "errors",
-        "hasMore",
-        "has_more",
-        "next",
-        "is_partial",
-        "exceeded_limit",
-    ):
-        if data.get(k):
+    for k in ("has_more", "truncated"):
+        if type(data.get(k)) is not bool:
+            raise ValueError("invalid provider data")
+        if data[k]:
             raise ValueError("incomplete evidence: " + k)
-    status = data.get("query_status")
-    if status and (
-        type(status) is not dict or status.get("complete") is not True or status.get("error")
-    ):
-        raise ValueError("pending/failed query")
-    if data.get("columns") != columns or type(data.get("results")) is not list:
+    if data.get("columns") != columns or type(data.get("rows")) is not list:
         raise ValueError("wrong result schema")
-    rows = data["results"]
+    rows = data["rows"]
     if len(rows) >= cap or any(type(row) is not list or len(row) != len(columns) for row in rows):
         raise ValueError("truncated/malformed result")
     return [dict(zip(columns, row)) for row in rows]
@@ -923,7 +1015,7 @@ def query_columns(step, p):
             "total_event_types",
         ], 201
     if step == "coverage":
-        _, keys = coverage(p, settings({"posthog_project_id": "1", "as_of_utc": "2026-01-01"})[1])
+        _, keys = coverage(p, settings({"as_of_utc": "2026-01-01"})[1])
         return [
             "event",
             "period",
@@ -1008,8 +1100,10 @@ def error_signals(series, plan, funnel_totals):
 
 
 def dimensions(p, w):
-    # Label discovery uses volume, never conversion, and exports no raw identifiers.
-    pieces = []
+    # Label discovery uses volume, never conversion, and exports no raw identifiers. One SELECT
+    # (Tin's gateway refuses UNION): each event row yields a [kind, value] pair per supported
+    # dimension, and the eight highest-volume safe values per kind are kept.
+    pairs, selected = [], set()
     a, b, c = w
     for kind, key, events in [
         ("categories", p["category_property"], p["steps"][:1]),
@@ -1020,12 +1114,15 @@ def dimensions(p, w):
             continue
         expr = f"toString({prop(key)})"
         safe = f"match({expr},'^[A-Za-z/][A-Za-z0-9 _./-]{{0,63}}$') AND NOT match({expr},'[0-9]{{5}}|[a-fA-F0-9]{{8}}-[a-fA-F0-9]{{4}}') AND {expr} NOT IN ('Unknown','Other','Ambiguous')"
-        pieces.append(
-            f"SELECT * FROM (SELECT '{kind}' AS kind,{expr} AS value,count() AS volume FROM events WHERE {where(p, a, c, events)} AND {safe} GROUP BY value ORDER BY volume DESC,value LIMIT 8)"
-        )
-    if not pieces:
+        chosen = "event IN (" + ",".join(map(literal, events)) + ")"
+        pairs.append(f"if({chosen} AND coalesce({safe},false),['{kind}',{expr}],['',''])")
+        selected.update(events)
+    if not pairs:
         raise ValueError("no supported dimension fields")
-    return " UNION ALL ".join(pieces)
+    rows = f"SELECT arrayJoin([{','.join(pairs)}]) AS pair FROM events WHERE {where(p, a, c, sorted(selected))}"
+    counted = f"SELECT arrayElement(pair,1) AS kind,arrayElement(pair,2) AS value,count() AS volume FROM ({rows}) WHERE arrayElement(pair,1)!='' GROUP BY kind,value"
+    ranked = f"SELECT kind,value,volume,row_number() OVER(PARTITION BY kind ORDER BY volume DESC,value) AS rank FROM ({counted})"
+    return f"SELECT kind,value,volume FROM ({ranked}) WHERE rank<=8 ORDER BY kind,volume DESC,value LIMIT 25"
 
 
 def public_pin(pin):

@@ -444,6 +444,10 @@ def test_sandbox_scripts_wire_the_camoufox_mcp_and_guard_the_identity_secret() -
     assert "mounted the `camoufox` MCP server" in bridge
     assert "only browser: use `navigate`" in bridge
     assert "Do not write helper scripts" in bridge
+    # The shared harness permits the capture package's images; the signup procedure
+    # retains its own restriction. A global ban silently prevented live brand evidence.
+    assert "Do not take screenshots" not in bridge
+    assert "`set_viewport` and `screenshot` when the procedure permits it" in bridge
     assert "chrome" not in bridge
     skill = (
         ROOT
@@ -483,7 +487,7 @@ def test_warp_up_script_registers_then_connects() -> None:
     assert script.rstrip().endswith('echo "WARP_OK=true"')
 
 
-def test_camoufox_mcp_exposes_only_bounded_text_tools() -> None:
+def test_camoufox_mcp_exposes_bounded_browser_tools_without_file_access() -> None:
     source = (ROOT / "sandbox" / "camoufox_mcp.py").read_text()
     tree = ast.parse(source)
     declared: tuple[str, ...] = ()
@@ -502,7 +506,8 @@ def test_camoufox_mcp_exposes_only_bounded_text_tools() -> None:
                 ):
                     registered.add(node.name)
     assert registered == set(declared) and len(declared) == len(set(declared))
-    assert not {name for name in registered if "screenshot" in name or "download" in name}
+    assert {"set_viewport", "screenshot"} <= registered
+    assert not {name for name in registered if "download" in name}
     assert not {name for name in registered if "write" in name or "save" in name}
     assert "MAX_TEXT_CHARS = 20_000" in source
     assert '"persistent_context": True' in source

@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "assumptions": [
+    "No declared service or fixture-replayable API is involved; the agent's own web search supplies evidence, so the cases below check the report's contract and input handling, not live venue facts.",
+    "Live qualification of whether picked venues have a genuinely open, correctly dated call and accurate requirements needs an explicitly authorized live case; nothing here fixture-replays that.",
+    "Static checking runs every case's inputs through the declared input_schema; cases only cover inputs that are schema-valid, since a schema-level rejection is already guaranteed by the schema itself.",
+    "Project context (wiki/INDEX.md Feature map, reports/GROWTH_ONBOARDING_PLAN.md, .agents/skills/writing-style/SKILL.md) is read when present; cases with an empty expertise need a project whose Feature map or growth plan gives a real story, or they end with Status: needs context."
+  ],
+  "cost_drivers": [
+    "One bounded Codex session on the existing pinned model pricing and spending ceiling; no managed-model routes are declared. The configured 900-second runtime ceiling is not an expected price.",
+    "Cost scales with how many candidate venues must be searched and verified before max_venues survives; a narrow, well-specified expertise needs fewer searches than a vague one."
+  ],
+  "effects": [
+    "One project.artifact write to a run-owned reports/outreach/speaking/<run_id>.md; no other project files change.",
+    "Reads wiki/INDEX.md, reports/GROWTH_ONBOARDING_PLAN.md, the writing style guide and earlier reports in reports/outreach/speaking/ from project state, and public web pages through fenced web search.",
+    "No provider mutation, no submitting, applying, emailing or otherwise acting toward any venue, no guessed email addresses, no outbound email, publication or credential access, no recursive workflow start."
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "A specific, well-scoped expertise with no exclusions, no format preference, and the default max_venues.",
+      "inputs": {
+        "expertise": "How we cut our Postgres bill 40% by fixing three slow query patterns, aimed at backend engineers at small SaaS companies.",
+        "format_preference": "no_preference",
+        "already_pitched": "",
+        "max_venues": 10,
+        "tone_notes": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status:",
+          "Verdict:",
+          "Deadline:",
+          "Fit:",
+          "Requirements:",
+          "Drafted pitch:",
+          "## Excluded candidates",
+          "Pitching:",
+          "Submit via:",
+          "## Pitched in earlier runs",
+          "```tin-speaking-state"
+        ],
+        "excludes": [
+          "Status: no venues verified"
+        ]
+      }
+    },
+    {
+      "id": "expertise_from_project_context",
+      "description": "No expertise input: the pitch comes from the project's Feature map and growth plan, named on the Pitching line, rather than being asked for or invented.",
+      "inputs": {
+        "expertise": "",
+        "format_preference": "no_preference",
+        "already_pitched": "",
+        "max_venues": 5,
+        "tone_notes": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status:",
+          "Verdict:",
+          "Pitching:",
+          "Context:",
+          "## Excluded candidates",
+          "```tin-speaking-state"
+        ],
+        "excludes": [
+          "What would you like to pitch?"
+        ]
+      }
+    },
+    {
+      "id": "format_preference_narrows_to_podcasts",
+      "description": "Restricting to podcast_guest must exclude conference and meetup CFPs from the ranked list, and since most podcasts take pitches on a rolling basis, Deadline: should read as rolling rather than force a fabricated date.",
+      "inputs": {
+        "expertise": "How we cut our Postgres bill 40% by fixing three slow query patterns, aimed at backend engineers at small SaaS companies.",
+        "format_preference": "podcast_guest",
+        "already_pitched": "",
+        "max_venues": 10,
+        "tone_notes": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status:",
+          "Verdict:",
+          "Deadline:",
+          "## Excluded candidates"
+        ]
+      }
+    },
+    {
+      "id": "already_pitched_excluded",
+      "description": "A named venue is pre-excluded; it must not appear as a ranked pick.",
+      "inputs": {
+        "expertise": "How we cut our Postgres bill 40% by fixing three slow query patterns, aimed at backend engineers at small SaaS companies.",
+        "format_preference": "no_preference",
+        "already_pitched": "PGConf",
+        "max_venues": 10,
+        "tone_notes": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status:",
+          "Verdict:",
+          "## Excluded candidates"
+        ],
+        "excludes": [
+          "## PGConf"
+        ]
+      }
+    },
+    {
+      "id": "narrow_expertise_no_padding",
+      "description": "An intentionally obscure expertise, to check the report discloses a short list honestly instead of padding it to max_venues.",
+      "inputs": {
+        "expertise": "Restoring and re-tuning one specific discontinued 1987 Soviet marine radio model, aimed at the handful of collectors who still repair them.",
+        "format_preference": "no_preference",
+        "already_pitched": "",
+        "max_venues": 10,
+        "tone_notes": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status:",
+          "Verdict:",
+          "## Excluded candidates"
+        ],
+        "excludes": [
+          "Verdict: fit"
+        ]
+      }
+    },
+    {
+      "id": "tight_cap",
+      "description": "The minimum allowed max_venues, to check the cap is respected rather than treated as a target.",
+      "inputs": {
+        "expertise": "How we cut our Postgres bill 40% by fixing three slow query patterns, aimed at backend engineers at small SaaS companies.",
+        "format_preference": "no_preference",
+        "already_pitched": "",
+        "max_venues": 3,
+        "tone_notes": "Keep it plain and specific, no hype language."
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status:",
+          "Verdict:",
+          "## Excluded candidates"
+        ]
+      }
+    }
+  ],
+  "rubric": [
+    {
+      "id": "deadline_accuracy",
+      "question": "Is every dated venue's deadline an exact date sourced from that venue's own CFP or apply page, not a secondhand aggregator or a stale past-year page?"
+    },
+    {
+      "id": "rolling_handling",
+      "question": "For a podcast or other venue with no fixed deadline, is it correctly recorded as rolling with a verified-open date, rather than given a fabricated deadline or dropped from the list for lacking one?"
+    },
+    {
+      "id": "requirement_fit",
+      "question": "Does each drafted pitch actually fit the venue's stated length limit and submission format, rather than a generic one-size pitch?"
+    },
+    {
+      "id": "specificity",
+      "question": "Does each pitch reference a concrete detail from the venue's own page (its theme, a past talk or episode, its stated audience) proving it was actually read?"
+    },
+    {
+      "id": "honesty",
+      "question": "Are claims, credentials and speaking history in each pitch real and traceable to project context, with no fabricated results or availability?"
+    },
+    {
+      "id": "project_context",
+      "question": "Do pitches take business facts only from expertise and the project's Feature map and growth plan, follow the writing style guide when present, and respect the growth plan's hard no's?"
+    },
+    {
+      "id": "no_repeat",
+      "question": "Is every venue drafted in an earlier report in reports/outreach/speaking/ left out of the ranked list and listed under Pitched in earlier runs with its date and report path?"
+    },
+    {
+      "id": "restraint",
+      "question": "Are already_pitched venues and the wrong format correctly excluded, is the ranked list capped at max_venues, and does the report disclose honestly when fewer venues survive verification instead of padding the list?"
+    },
+    {
+      "id": "verdict_accuracy",
+      "question": "Does the Verdict line match a plain count of venues that survived verification (fit at 3+, thin at 1-2, not a fit at 0), rather than a subjective read on how strong the matches are?"
+    },
+    {
+      "id": "scope",
+      "question": "Does the run only write the declared report, with no attempt to submit, apply, email, or otherwise act toward any venue?"
+    }
+  ]
+}

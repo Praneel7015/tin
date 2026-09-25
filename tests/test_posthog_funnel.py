@@ -6,6 +6,9 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from connection_fakes import FakePostHogConnection
+
+from tin_lite.posthog_connection import check_hogql, project_query
 
 RESOURCE = (
     Path(__file__).parents[1]
@@ -25,16 +28,17 @@ def recipe():
 
 
 def response():
-    # Synthetic three-stage fixture: raw marginals differ from ordered unique actors.
+    # Synthetic three-stage fixture, as Tin's query.hogql returns it: raw marginals differ
+    # from ordered unique actors.
     columns = [name for i in (1, 2, 3) for name in (f"raw{i}", f"eligible{i}", f"actors{i}")]
     columns += ["n1", "n2", "n3", "median_d12", "median_d13", "median_d23"]
     columns += ["order_violations", "duplicate_choices"]
     return {
         "columns": columns,
-        "results": [[10, 10, 8, 11, 11, 8, 10, 10, 8, 8, 6, 5, 1.5, 5.0, 3.0, 0, 0]],
-        "error": None,
-        "hasMore": False,
-        "query_status": None,
+        "types": ["UInt64"] * 12 + ["Float64"] * 3 + ["UInt64"] * 2,
+        "rows": [[10, 10, 8, 11, 11, 8, 10, 10, 8, 8, 6, 5, 1.5, 5.0, 3.0, 0, 0]],
+        "has_more": False,
+        "truncated": False,
     }
 
 
@@ -56,14 +60,56 @@ def test_generator_preserves_the_provider_qualified_synthetic_query(recipe):
     events_cte = query.split(",\nb AS", 1)[0]
     steps = ["onboarding_plan_written", "onboarding_approved", "onboarding_set_up"]
     assert events_cte + recipe["funnel_tail"](steps) == query
-    observed = json.loads((fixtures / "ordered.json").read_text())
+    # The recorded PostHog response, projected the way Tin's gateway returns it.
+    observed = project_query(
+        json.loads((fixtures / "ordered.json").read_text()), max_response_bytes=32_000
+    )
     assert recipe["read_funnel"](observed, 3) == recipe["read_funnel"](response(), 3)
+
+
+def guarded_events_cte():
+    """A synthetic e CTE that Tin's guard accepts: rows come from arrayJoin, not UNION ALL."""
+    rows = [
+        ("p1", "a", "signed_up", 1),
+        ("p1", "a", "onboarding_completed", 2),
+        ("p2", "b", "signed_up", 1),
+    ]
+    literal = ",".join(f"('{a}','{b}','{e}',{t})" for a, b, e, t in rows)
+    columns = "r.1 AS actor,r.2 AS attempt,r.3 AS event,toDateTime64(r.4,6,'UTC') AS t"
+    rows_sql = f"SELECT arrayJoin([{literal}]) AS r"
+    return f"WITH e AS (SELECT {columns},true AS eligible FROM ({rows_sql}))"  # noqa: S608
+
+
+async def test_generated_query_passes_tins_guard_through_the_binding(recipe):
+    query = guarded_events_cte() + recipe["funnel_tail"](["signed_up", "onboarding_completed"])
+    assert check_hogql(query) == query and len(query.encode()) <= 8000
+    fixtures = Path(__file__).parent / "fixtures/posthog_funnel"
+    recorded = json.loads((fixtures / "ordered.json").read_text())
+    posthog = FakePostHogConnection(
+        {}, service="analytics", max_response_bytes=32_000, queries={"funnel": recorded}
+    )
+    result = await posthog.call(
+        service="analytics",
+        step="funnel",
+        operation="query.hogql",
+        arguments={"query": query, "name": "funnel"},
+    )
+    assert set(result) == {"columns", "types", "rows", "has_more", "truncated"}
+    assert recipe["read_funnel"](result, 3)[2]["chain_actors"] == 5
+    # The old request shape (project path, OFFSET paging, UNION) never reaches PostHog.
+    for bad in [
+        query.removesuffix(" LIMIT 2"),
+        query + " OFFSET 10",
+        query + " UNION ALL " + query,
+    ]:
+        with pytest.raises(ValueError):
+            check_hogql(bad)
 
 
 @pytest.mark.parametrize("raw_first", [0, 1])
 def test_no_events_and_no_eligible_actor_have_undefined_rates(recipe, raw_first):
     data = response()
-    data["results"] = [[raw_first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, 0, 0]]
+    data["rows"] = [[raw_first, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, 0, 0]]
     rows = recipe["read_funnel"](data, 3)
     assert all(r["chain_actors"] == 0 for r in rows)
     assert all(r["of_first_pct"] is None and r["of_previous_pct"] is None for r in rows)
@@ -90,7 +136,7 @@ def test_no_events_and_no_eligible_actor_have_undefined_rates(recipe, raw_first)
 )
 def test_rejects_inconsistent_provider_aggregates(recipe, column, value):
     data = response()
-    data["results"][0][data["columns"].index(column)] = value
+    data["rows"][0][data["columns"].index(column)] = value
     with pytest.raises(ValueError):
         recipe["read_funnel"](data, 3)
 
@@ -98,11 +144,11 @@ def test_rejects_inconsistent_provider_aggregates(recipe, column, value):
 @pytest.mark.parametrize(
     "change",
     [
-        {"error": "query_failed"},
-        {"hasMore": True},
-        {"query_status": {"complete": False}},
-        {"results": []},
-        {"results": [[1]]},
+        {"has_more": True},
+        {"truncated": True},
+        {"has_more": None},
+        {"rows": []},
+        {"rows": [[1]]},
         {"columns": ["unexpected"]},
     ],
 )
@@ -127,7 +173,9 @@ def test_two_stage_results(recipe):
             "order_violations",
             "duplicate_choices",
         ],
-        "results": [[10, 10, 8, 11, 11, 8, 8, 6, 1.0, 0, 0]],
+        "rows": [[10, 10, 8, 11, 11, 8, 8, 6, 1.0, 0, 0]],
+        "has_more": False,
+        "truncated": False,
     }
     rows = recipe["read_funnel"](data, 2)
     assert len(rows) == 2 and rows[1]["of_first_pct"] == 75

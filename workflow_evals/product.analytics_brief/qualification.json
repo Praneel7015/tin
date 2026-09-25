@@ -2,17 +2,17 @@
   "version": 1,
   "assumptions": [
     "Fixtures and response replays are synthetic; live runs need separately authorized project connections and a named payer.",
-    "One provider project, 1..31 complete UTC days plus equal prior window and a bounded 90-day history. Discovery returns up to 200 event types with total catalog size; metrics use complete selected-event queries. At most 200 discovered event types, 2..6 ordered steps, 4 key events, 2 error events and one named dimension.",
+    "One PostHog project, the one selected in the analytics.posthog connection; 1..31 complete UTC days plus equal prior window and a bounded 90-day history. Discovery returns up to 200 event types with total catalog size; metrics use complete selected-event queries. At most 200 discovered event types, 2..6 ordered steps, 4 key events, 2 error events and one named dimension.",
     "Run success establishes artifact delivery. Ordinary cases also require a complete useful report and independent numerical/rubric review."
   ],
   "cost_drivers": [
     "One bounded Codex session uses the existing pinned model pricing and spending ceiling. No extra managed-model routes. The configured ceiling is not an expected price.",
-    "Agent work depends on schema ambiguity, bounded project context, prior state and response/narrative size. Eight provider requests maximum, 16000 bytes each, 64000-byte responses, 900 seconds and one 192000-byte report.",
+    "Agent work depends on schema ambiguity, bounded project context, prior state and response/narrative size. Eight provider calls maximum, HogQL queries of at most 8000 bytes, 64000-byte responses, 900 seconds and one 192000-byte report.",
     "PostHog scans depend on selected window, event volume and actor/attempt cardinality. Output LIMIT is not a bound on provider scan cost. Connected-provider cost is unknown and separate.",
     "Use verified usage from authorized runs for measured estimates. Synthetic SQL checks alone measure no model cost."
   ],
   "effects": [
-    "Read-only event-definition GET and aggregate query POST through custom.api.posthog. Provider-enforced read-only permissions are required; generic http.write is a transport permission.",
+    "Read-only analytics.posthog calls through Tin's gateway: property_definitions.list and query.hogql aggregate SELECTs that Tin checks (one statement, LIMIT <= 1000, no OFFSET) against the project selected in Integrations, with OAuth read scopes only.",
     "One run-owned reports/analytics/<run_id>.md in project state; Files/Activity delivery and existing immutable history.",
     "No provider mutation, raw person exports, credential access, email, publication, workflow activation or recursive runs."
   ],
@@ -21,7 +21,6 @@
       "id": "ordinary_web",
       "description": "Controlled ordinary_web fixture from tests/fixtures/product_analytics. Require useful verified figures, ordered population 6/3/2 (web adds 2), not a diagnostic. See README.md.",
       "inputs": {
-        "posthog_project_id": "101",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Browser identities use distinct_id; sessions use $session_id. Visited the site=$pageview, Started signup=signup_started, Completed signup=signup_completed, Exported once=first_export. Website properties: $pathname, $referring_domain and $device_type. These are synthetic documented events.",
@@ -55,7 +54,6 @@
       "id": "large_catalog",
       "description": "ordinary_web plus 201 independent one-row noise event types in the comparison window (205 total). Discovery returns 200 ranked types, while the selected website funnel remains 6/3/2/2. Report the catalog scope and exact selected-event metrics; no whole-project absence claims.",
       "inputs": {
-        "posthog_project_id": "101",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Browser identities use distinct_id; sessions use $session_id. Visited the site=$pageview, Started signup=signup_started, Completed signup=signup_completed, Exported once=first_export. Website properties: $pathname, $referring_domain and $device_type. These are synthetic documented events.",
@@ -91,7 +89,6 @@
       "id": "ordinary_backend",
       "description": "Controlled ordinary_backend fixture from tests/fixtures/product_analytics. Require useful verified figures, ordered population 6/3/2 (web adds 2), not a diagnostic. See README.md.",
       "inputs": {
-        "posthog_project_id": "202",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Accounts use account_id; attempts use job_id. Created a workspace=Workspace created, Invited a teammate=Invite sent, Viewed a report=Report viewed. No website instrumentation or category dimension. These are synthetic documented events.",
@@ -122,7 +119,6 @@
       "id": "repeat_labels",
       "description": "Reuse the validated pin from ordinary_web; same fixture and settings must retain labels and counts.",
       "inputs": {
-        "posthog_project_id": "101",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Browser identities use distinct_id; sessions use $session_id. Visited the site=$pageview, Started signup=signup_started, Completed signup=signup_completed, Exported once=first_export. Website properties: $pathname, $referring_domain and $device_type. These are synthetic documented events.",
@@ -151,7 +147,6 @@
       "id": "wrong_counts",
       "description": "Replay website responses with monotone 5/3/2/2 instead of 6/3/2/2. Funnel and dependent breakdown must be withheld.",
       "inputs": {
-        "posthog_project_id": "101",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Browser identities use distinct_id; sessions use $session_id. Visited the site=$pageview, Started signup=signup_started, Completed signup=signup_completed, Exported once=first_export. Website properties: $pathname, $referring_domain and $device_type. These are synthetic documented events.",
@@ -177,9 +172,8 @@
     },
     {
       "id": "failed_query",
-      "description": "Replay coverage HTTP 403 after discovery; no blind retry or zero substitution.",
+      "description": "Replay a coverage call that Tin's gateway refuses with permission_denied after discovery; no blind retry or zero substitution.",
       "inputs": {
-        "posthog_project_id": "101",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Browser identities use distinct_id; sessions use $session_id. Visited the site=$pageview, Started signup=signup_started, Completed signup=signup_completed, Exported once=first_export. Website properties: $pathname, $referring_domain and $device_type. These are synthetic documented events.",
@@ -194,7 +188,7 @@
           "## Meaningful error signals",
           "## Named categorical breakdown",
           "Status: incomplete",
-          "403",
+          "refused",
           "unavailable"
         ],
         "excludes": [
@@ -207,7 +201,6 @@
       "id": "unsupported_exclusions",
       "description": "An email-domain pattern is outside the exact-scalar compiler; no aggregate requests.",
       "inputs": {
-        "posthog_project_id": "101",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Browser identities use distinct_id; sessions use $session_id. Visited the site=$pageview, Started signup=signup_started, Completed signup=signup_completed, Exported once=first_export. Website properties: $pathname, $referring_domain and $device_type. These are synthetic documented events.",
@@ -232,13 +225,15 @@
     },
     {
       "id": "invalid_input",
-      "description": "Reject provider path traversal before access.",
+      "description": "Reject a malformed website host before any provider call.",
       "inputs": {
-        "posthog_project_id": "../202",
         "reporting_days": 7,
         "as_of_utc": "2026-01-12",
         "event_mapping": "Browser identities use distinct_id; sessions use $session_id. Visited the site=$pageview, Started signup=signup_started, Completed signup=signup_completed, Exported once=first_export. Website properties: $pathname, $referring_domain and $device_type. These are synthetic documented events.",
-        "exclusions": ""
+        "exclusions": "",
+        "website_hosts": [
+          "example.com/../admin"
+        ]
       },
       "expected_status": "succeeded",
       "expect": {

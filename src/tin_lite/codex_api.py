@@ -41,7 +41,7 @@ def attempt_failure(record):
     return CodexAttemptStopped(reason + " The paid attempt will not be repeated automatically.")
 
 
-async def record_attempt_failure(conn, key, exc=None):
+async def record_attempt_failure(conn, key, exc=None, *, stop_reason=None):
     # A previously running attempt without a surviving controller is unconfirmed.
     outcome = (
         "unconfirmed"
@@ -53,15 +53,20 @@ async def record_attempt_failure(conn, key, exc=None):
         # Keep the established attempt outcome/type contract for task turns too.
         # Exception bodies can contain provider payloads and are never stored here.
         facts["failure_type"] = type(exc).__name__
+    # A relay stop recorded first stays authoritative; only fill a missing reason.
     await conn.execute(
-        """UPDATE effect_receipts SET result=result || $2::jsonb
+        """UPDATE effect_receipts
+           SET result=result || $2::jsonb || CASE
+               WHEN $3::text IS NOT NULL AND NOT result ? 'stop_reason'
+               THEN jsonb_build_object('stop_reason', $3::text) ELSE '{}'::jsonb END
            WHERE execution_key=$1 AND status='started' AND result->>'outcome'='running'""",
         key,
         json.dumps(facts),
+        stop_reason,
     )
 
 
-MODEL = "gpt-6-astra"
+MODEL = "gpt-6-sol"
 # Execution bounds; enrolled API runs separately pin their billing terms.
 CONTRACT = {
     "mode": MODE,
@@ -110,7 +115,7 @@ SESSION_CONTRACT = {
 def procedure_contract(validator=None):
     return (
         DIAGRAM_CONTRACT
-        if validator in {"tin-diagram.reviewed.v1", "demo-video.v1"}
+        if validator in {"tin-diagram.reviewed.v1", "tin-diagram.branded.v1", "demo-video.v1"}
         else PROCEDURE_CONTRACT
     )
 
@@ -202,11 +207,7 @@ async def select_contract(*, db, conn, run, procedure, settings):
         if not is_api_contract(contract):
             raise ValueError("Unknown reserved Codex execution contract")
     else:
-        contract = (
-            CONTRACT
-            if procedure.sandbox.isolated
-            else procedure_contract(getattr(procedure, "output_validator", None))
-        )
+        contract = procedure_contract(getattr(procedure, "output_validator", None))
     execution_profile(procedure.sandbox, contract)
     return dict(contract)
 
@@ -278,15 +279,21 @@ async def run_api_attempt(*, db, conn, run, sandbox_id, run_input, call, turn_nu
         await db.start_effect(locked, execution_key=key, operation=ATTEMPT)
         await db.save_effect_progress(locked, execution_key=key, result=record)
 
-        async def controller_usage(_value):
+        controller_stop = {}
+
+        async def controller_usage(value):
             # The isolated stream is still checked by E2BRuntime. API response receipts,
-            # not this overlapping thread total, are the supplier usage authority.
-            pass
+            # not this overlapping thread total, are the supplier usage authority. Its
+            # limit flag only explains why the controller interrupted the turn.
+            if value.get("limit_reached") is True:
+                controller_stop["reason"] = "token_limit"
 
         async def failed(exc):
             # Revoke admission before salvage/cleanup. Merge in SQL so a relay's
             # independently recorded budget stop cannot be overwritten here.
-            await record_attempt_failure(locked, key, exc)
+            await record_attempt_failure(
+                locked, key, exc, stop_reason=controller_stop.get("reason")
+            )
 
         try:
             result = await call(

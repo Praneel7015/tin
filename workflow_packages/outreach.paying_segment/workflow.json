@@ -1,0 +1,124 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "outreach.paying_segment",
+    "title": "Find who pays and stays",
+    "description": "A founder with Stripe subscriptions learns which customers keep paying, and gets exact inputs for the outreach shortlist, keyword plan and ads assessment to aim at them. Read-only; no model calls, and it starts nothing itself.",
+    "version": "2.0.0",
+    "executor": "workflow.code",
+    "system": "cold-outreach",
+    "schedule_modes": [
+      "on_demand",
+      "weekly"
+    ],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 14,
+          "maximum": 180,
+          "default": 60,
+          "title": "Days a customer must keep paying to count as stayed",
+          "x-tin-ui": {
+            "control": "counter",
+            "order": 10
+          }
+        },
+        "lookback_days": {
+          "type": "integer",
+          "minimum": 90,
+          "maximum": 1095,
+          "default": 365,
+          "title": "How far back to read subscriptions (days)",
+          "x-tin-ui": {
+            "control": "counter",
+            "order": 20
+          }
+        },
+        "min_segment_size": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 50,
+          "default": 5,
+          "title": "Smallest segment worth comparing",
+          "x-tin-ui": {
+            "control": "counter",
+            "order": 30
+          }
+        },
+        "exclude_domains": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "default": [],
+          "items": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 253
+          },
+          "title": "Your own and test email domains to leave out",
+          "description": "The founder's own company domain and any test or staff email domains, from the codebase (seed data, admin allowlists) or the onboarding plan."
+        },
+        "product_summary": {
+          "type": "string",
+          "maxLength": 500,
+          "default": "",
+          "title": "What you sell, in one sentence",
+          "x-tin-ui": {
+            "control": "textarea",
+            "order": 50
+          },
+          "description": "Opens the keyword plan's buyer_context. Fill it from the Business section of reports/GROWTH_ONBOARDING_PLAN.md or the Feature map in wiki/INDEX.md: what the product does and for whom. Leave empty only when neither exists."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The calling agent fills product_summary from the plan's business section and checks its hard no's before starting the hand-off workflows."
+      }
+    ],
+    "integration_requirements": [
+      {
+        "provider_key": "payments.stripe",
+        "capabilities": [
+          "subscriptions.read"
+        ],
+        "required": true
+      }
+    ],
+    "code": {
+      "runtime": "python3.12.8-stdlib-v1",
+      "entrypoint": "main.py",
+      "files": [
+        "main.py"
+      ],
+      "timeout_seconds": 60,
+      "services": {
+        "stripe": {
+          "provider_key": "payments.stripe",
+          "max_calls": 8,
+          "max_response_bytes": 64000
+        }
+      },
+      "output": {
+        "kind": "project.artifact",
+        "path": "reports/outreach/PAYING_SEGMENT.md",
+        "media_type": "text/markdown",
+        "max_bytes": 64000
+      }
+    }
+  }
+}

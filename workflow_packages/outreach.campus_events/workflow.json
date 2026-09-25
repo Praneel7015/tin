@@ -1,0 +1,90 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "outreach.campus_events",
+    "title": "Find campus events to reach student buyers",
+    "description": "For a business whose buyers are students: finds upcoming campus events near them, or compares ones you paste, ranks them and drafts one small activation to pitch. Research only; never contacts organizers, pays for a sponsorship or collects student data.",
+    "executor": "codex.procedure",
+    "version": "1.1.0",
+    "system": "cold-outreach",
+    "schedule_modes": ["on_demand"],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id"],
+      "properties": {
+        "project_id": {"type": "string", "format": "uuid"},
+        "event_briefs": {
+          "type": "string",
+          "maxLength": 12000,
+          "default": "",
+          "title": "Events to compare (optional)",
+          "description": "Public event descriptions with their source URLs, when the founder already has candidates. Leave empty and the run searches for upcoming campus events itself.",
+          "x-tin-ui": {"control": "textarea", "order": 10}
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 1000,
+          "default": "",
+          "title": "Which students, and where (optional)",
+          "description": "Overrides the onboarding plan, for example: computer science students at universities in Pune. Fill it when the plan does not name a campus, city or region.",
+          "x-tin-ui": {"control": "textarea", "order": 20}
+        },
+        "business": {
+          "type": "string",
+          "maxLength": 1500,
+          "default": "",
+          "title": "Product and offer (optional)",
+          "description": "Overrides the onboarding plan and the Feature map. Leave empty when either exists.",
+          "x-tin-ui": {"control": "textarea", "order": 30}
+        },
+        "budget": {
+          "type": "string",
+          "maxLength": 300,
+          "default": "",
+          "title": "Budget or practical limits (optional)",
+          "description": "Overrides the budget and founder hours in the onboarding plan, for example: up to INR 5000 and one person for two hours.",
+          "x-tin-ui": {"control": "textarea", "order": 40}
+        }
+      }
+    },
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The growth plan says what the business sells, who its students are, the budget and founder hours, and hard no's the activation must respect."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Feature map",
+        "producer": "product.deep_dive",
+        "reason": "The Feature map supplies the real product detail the activation demonstrates."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": ".agents/skills/writing-style/SKILL.md",
+        "producer": "style.capture",
+        "reason": "A captured writing style guide shapes the drafted sign and on-site line."
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": ["skills/campus-event-fit/SKILL.md"],
+      "entry_skill": "campus-event-fit",
+      "workspace": {"kind": "project.state"},
+      "sandbox": {"profile": "isolated", "egress": "fenced", "timeout_seconds": 900},
+      "output": {
+        "kind": "project.artifact",
+        "path_template": "reports/outreach/campus-events/{run_id}.md",
+        "media_type": "text/markdown",
+        "max_bytes": 48000
+      }
+    }
+  }
+}

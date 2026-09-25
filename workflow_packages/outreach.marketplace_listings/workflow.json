@@ -1,0 +1,94 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "outreach.marketplace_listings",
+    "title": "Get listed where your integrations' users already shop",
+    "description": "Reads the integrations in your Code map, checks each partner's app marketplace for you and your competitors, tests its listing rules against your site, and names the one to three listings to submit this week with the form filled in, in your voice. Never repeats a listing an earlier run prepared, and never submits anything.",
+    "executor": "codex.procedure",
+    "version": "1.1.0",
+    "schedule_modes": ["on_demand", "weekly"],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id"],
+      "properties": {
+        "project_id": { "type": "string", "format": "uuid" },
+        "product_url": {
+          "type": "string",
+          "title": "Product website (optional)",
+          "description": "Used to check the pages marketplaces require. Leave blank to use the site already in project memory.",
+          "maxLength": 300,
+          "default": "",
+          "x-tin-ui": { "order": 10 }
+        },
+        "max_picks": {
+          "type": "integer",
+          "title": "Listings to recommend this week",
+          "minimum": 1,
+          "maximum": 3,
+          "default": 3,
+          "x-tin-ui": { "control": "counter", "order": 20 }
+        },
+        "skip": {
+          "type": "string",
+          "title": "Marketplaces to leave out (optional)",
+          "description": "For example: already applied to Slack, or we will not build for Shopify.",
+          "maxLength": 1000,
+          "default": "",
+          "x-tin-ui": { "control": "textarea", "order": 30 }
+        }
+      }
+    },
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "required",
+        "path": "wiki/INDEX.md",
+        "section": "### Code map",
+        "producer": "product.code_map",
+        "reason": "The Code map lists the integrations wired in the product's code; each one is a marketplace to check."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Feature map",
+        "producer": "product.deep_dive",
+        "reason": "The Feature map supplies what each integration does for a user, which the listing copy describes."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The growth plan names the buyers the listing copy speaks to and records hard no's such as no discounting."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": ".agents/skills/writing-style/SKILL.md",
+        "producer": "style.capture",
+        "reason": "A captured writing style guide shapes the listing copy within each field's limit."
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": [
+        "skills/partner-marketplaces/SKILL.md",
+        "skills/partner-marketplaces/MARKETPLACES.md",
+        "skills/partner-marketplaces/SCORING.md",
+        "skills/partner-marketplaces/REPORT.md"
+      ],
+      "entry_skill": "partner-marketplaces",
+      "workspace": { "kind": "project.state" },
+      "sandbox": { "profile": "isolated", "egress": "fenced", "timeout_seconds": 1200 },
+      "output": {
+        "kind": "project.artifact",
+        "path_template": "reports/outreach/marketplaces/{run_id}.md",
+        "media_type": "text/markdown",
+        "max_bytes": 96000
+      }
+    }
+  }
+}

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from tin_lite import content_plan, content_plan_editorial, growth_plan, style_capture
+from tin_lite import (
+    content_plan,
+    content_plan_editorial,
+    growth_plan,
+    paid_ads,
+    paid_ads_launch,
+    style_capture,
+)
 from tin_lite.activities import TinActivities
 from tin_lite.activity_lanes import (
     CODEX_ACTIVITIES,
@@ -45,6 +53,9 @@ from tin_lite.model_usage import ModelUsageRecorder
 from tin_lite.organic_audit_activities import OrganicAuditActivities
 from tin_lite.organic_system_activities import OrganicSystemActivities
 from tin_lite.output_resolution import OutputResolutionService
+from tin_lite.paid_ads_activities import PaidAdsActivities
+from tin_lite.paid_ads_launch_activities import PaidAdsLaunchActivities
+from tin_lite.paid_ads_monitor_activities import PaidAdsMonitorActivities
 from tin_lite.project_files import ProjectFileService
 from tin_lite.scan import ScanReporter
 from tin_lite.settings import Settings
@@ -119,6 +130,8 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
             CHARACTER_MODEL_ROUTE,
             style_capture.ROUTE,
             *growth_plan.ROUTES,
+            *paid_ads.ROUTES,
+            *paid_ads_launch.ROUTES,
             ModelRoute(
                 key=content_plan.ROUTE_KEY,
                 provider=ProviderName.OPENAI,
@@ -209,7 +222,11 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         temporal=temporal,
     )
     organic = OrganicAuditActivities(
-        database=database, storage=storage, settings=settings, responses=responses
+        database=database,
+        storage=storage,
+        settings=settings,
+        responses=responses,
+        integrations=integrations,
     )
     keywords = KeywordPlanActivities(
         database=database,
@@ -250,6 +267,30 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         integrations=integrations,
         temporal=temporal,
     )
+    from tin_lite.gak import client_from_settings
+
+    paid_ads_activities = PaidAdsActivities(
+        database=database,
+        storage=storage,
+        settings=settings,
+        router=model_router,
+        integrations=integrations,
+        gak=client_from_settings(settings),
+    )
+    paid_ads_launch_activities = PaidAdsLaunchActivities(
+        database=database,
+        storage=storage,
+        settings=settings,
+        router=model_router,
+        integrations=integrations,
+    )
+    paid_ads_monitor_activities = PaidAdsMonitorActivities(
+        database=database,
+        storage=storage,
+        settings=settings,
+        router=model_router,
+        integrations=integrations,
+    )
     from tin_lite.code_activities import CodeActivities
 
     code = CodeActivities(common=activity_instance, model_router=model_router)
@@ -269,6 +310,29 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         plan_activities.write,
         plan_activities.publish,
         plan_activities.failure,
+        paid_ads_activities.prepare,
+        paid_ads_activities.gather,
+        paid_ads_activities.research,
+        paid_ads_activities.assess,
+        paid_ads_activities.publish,
+        paid_ads_activities.project,
+        paid_ads_activities.failure,
+        paid_ads_launch_activities.prepare,
+        paid_ads_launch_activities.gather,
+        paid_ads_launch_activities.draft,
+        paid_ads_launch_activities.settle_setup,
+        paid_ads_launch_activities.request_review,
+        paid_ads_launch_activities.record_approval,
+        paid_ads_launch_activities.apply,
+        paid_ads_launch_activities.publish,
+        paid_ads_launch_activities.failure,
+        paid_ads_monitor_activities.prepare,
+        paid_ads_monitor_activities.read,
+        paid_ads_monitor_activities.decide,
+        paid_ads_monitor_activities.apply,
+        paid_ads_monitor_activities.propose,
+        paid_ads_monitor_activities.publish,
+        paid_ads_monitor_activities.failure,
         organic_system.organic_system_prepare,
         organic_system.organic_system_step,
         organic_system.organic_system_step_failure,
@@ -364,6 +428,7 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
     by_name = {activity._Definition.must_from_callable(fn).name: fn for fn in activities}
     if set(by_name) != CODEX_ACTIVITIES | TRUSTED_ACTIVITIES:
         raise RuntimeError("Every registered activity needs an explicit worker lane")
+    graceful_shutdown = timedelta(seconds=settings.worker_graceful_shutdown_seconds)
     worker = WorkerGroup(
         Worker(
             temporal,
@@ -372,6 +437,7 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
             # Project child-workflow IDs serialize execution; this is only the
             # machine's parallel capacity across projects, not an account lock.
             max_concurrent_activities=4,
+            graceful_shutdown_timeout=graceful_shutdown,
             workflows=registered_workflows(),
             workflow_runner=workflow_runner(),
             activities=activities,
@@ -381,6 +447,7 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
             temporal,
             task_queue=trusted_task_queue(settings.task_queue),
             max_concurrent_activities=4,
+            graceful_shutdown_timeout=graceful_shutdown,
             activities=[by_name[name] for name in sorted(TRUSTED_ACTIVITIES)],
         ),
     )

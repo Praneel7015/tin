@@ -28,6 +28,7 @@ from tin_lite.usage_capture import (
     observe_response,
     observe_sandbox,
     observe_tool,
+    recover_tool_observation,
 )
 
 
@@ -298,6 +299,58 @@ async def test_recovered_task_cost_fills_ambiguous_observation_once(publication_
     assert view["inclusive_totals"]["known_provider_reported_cost_usd"] == "0.15"
 
 
+async def test_gak_tool_observations_keep_their_provider_at_zero_cost(publication_db):
+    db = publication_db
+    _, _, run, _ = await activity_fixture(db)
+    async with db.effect_lock("outer", "test") as (conn, _):
+        with external_usage_scope(db, conn, run.id, "ideas"):
+            observed = await begin_observation("gak", "tool", "api/v1/keywords/ideas")
+            await observe_tool(observed, {"cost": "0"})
+        with external_usage_scope(db, conn, run.id, "volume"):
+            await begin_observation("gak", "tool", "api/v1/keywords/volume")
+    view = await read_run_usage(database=db, run=run)
+    confirmed, pending = sorted(view["own"]["observations"], key=lambda item: item["outcome"])
+    assert confirmed["provider"] == pending["provider"] == "gak"
+    assert confirmed["kind"] == pending["kind"] == "tool"
+    assert confirmed["outcome"] == "response_received"
+    assert confirmed["provider_reported_cost_usd"] == "0"
+    assert confirmed["usage"]["requests"] == 1
+    assert pending["outcome"] == "unconfirmed" and pending["provider_reported_cost_usd"] is None
+    assert view["inclusive_totals"]["known_provider_reported_cost_usd"] == "0"
+    assert view["inclusive_totals"]["total_cost_usd"] is None
+
+
+async def test_recovery_accepts_a_gak_tool_record_without_a_provider_cost():
+    from test_gak import MemoryDB
+
+    db = MemoryDB()
+    conn = None
+    run_id = db.run.id
+    with external_usage_scope(db, conn, run_id, "ideas"):
+        await begin_observation("gak", "tool", "api/v1/keywords/ideas")
+    (receipt,) = db.effects.values()
+    # Recovery is a billing-only path; without a run budget it prices nothing.
+    db.billing = SimpleNamespace()
+    assert receipt.status == "started" and receipt.result["outcome"] == "unconfirmed"
+    for _ in range(2):
+        await recover_tool_observation(
+            db, conn, run_id=run_id, step="ideas", endpoint="api/v1/keywords/ideas", cost="0"
+        )
+    (receipt,) = db.effects.values()
+    assert receipt.status == "completed" and receipt.result["provider"] == "gak"
+    assert receipt.result["outcome"] == "response_received"
+    assert receipt.result["reported_cost_usd"] == "0"
+    # An unknown provider's receipt is never rewritten by the tool recovery path.
+    db.billing = None
+    with external_usage_scope(db, conn, run_id, "other"):
+        await begin_observation("unknown", "tool", "api/v1/keywords/ideas")
+    db.billing = SimpleNamespace()
+    await recover_tool_observation(
+        db, conn, run_id=run_id, step="other", endpoint="api/v1/keywords/ideas", cost="0"
+    )
+    assert [r.status for r in db.effects.values()] == ["completed", "started"]
+
+
 async def test_parent_only_counts_owned_children_including_failures(publication_db):
     db = publication_db
     _, _, base, _ = await activity_fixture(db)
@@ -391,3 +444,18 @@ async def test_truncation_is_explicit(publication_db, monkeypatch):
     monkeypatch.setattr("tin_lite.run_usage.MAX_OBSERVATIONS", 1)
     view = await read_run_usage(database=db, run=run)
     assert view["own"]["truncated"] and len(view["own"]["observations"]) == 1
+
+
+def test_stage_readout_keeps_compaction_and_unknown_prices_separate():
+    from tin_lite.run_usage import usage_stage
+
+    assert (
+        usage_stage({"endpoint": "/v1/responses/compact", "step": "draft"}, "codex_openai_api")
+        == "context_compaction"
+    )
+    assert usage_stage({"step": "keyword:triage"}, "native_model_service") == "keyword:triage"
+    assert (
+        usage_stage({"step": "https://secret.example/?token=hidden"}, "native_model_service")
+        == "model_unspecified"
+    )
+    assert usage_stage({}, "connected_api") == "connected_api"

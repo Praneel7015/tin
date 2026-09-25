@@ -1,0 +1,77 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "growth.signup_source",
+    "title": "Ask new signups how they heard about you",
+    "description": "Add one optional \"How did you hear about us?\" question to your signup or first screen, with answers tailored to the channels you actually use and saved where your accounts already live, in an unmerged PR. Never merges or deploys.",
+    "version": "1.0.0",
+    "executor": "codex.procedure",
+    "schedule_modes": ["on_demand"],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {"type": "string", "format": "uuid"},
+        "expected_repository": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 140,
+          "title": "Product repository",
+          "description": "The connected repository that contains your signup, as owner/name."
+        },
+        "signup_url": {
+          "type": "string",
+          "maxLength": 300,
+          "default": "",
+          "title": "Optional signup page URL",
+          "description": "Helps find the right form when the repository has more than one.",
+          "x-tin-ui": {"control": "text", "order": 20}
+        },
+        "context": {
+          "type": "string",
+          "maxLength": 2000,
+          "default": "",
+          "title": "Optional constraints",
+          "description": "Where the signup lives, channels to include, or files to avoid. Never credentials.",
+          "x-tin-ui": {"control": "textarea", "order": 30}
+        }
+      },
+      "required": ["project_id", "expected_repository"]
+    },
+    "integration_requirements": [
+      {
+        "provider_key": "infra.github",
+        "capabilities": ["contents.read", "contents.write", "pull_requests.read", "pull_requests.write"],
+        "required": true
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": [
+        "skills/signup-source/SKILL.md",
+        "skills/signup-source/PLACEMENT.md",
+        "skills/signup-source/QUESTION.md",
+        "skills/signup-source/RESULT.md"
+      ],
+      "entry_skill": "signup-source",
+      "workspace": {
+        "kind": "github.repository",
+        "provider_key": "infra.github",
+        "capabilities": ["contents.read", "pull_requests.read"]
+      },
+      "sandbox": {"profile": "isolated", "egress": "fenced", "timeout_seconds": 900},
+      "output": {
+        "kind": "github.pull_request",
+        "provider_key": "infra.github",
+        "max_files": 3,
+        "max_bytes": 180000,
+        "receipt_path_template": "reports/signup-source/{run_id}/RESULT.md",
+        "allow_no_change": true
+      },
+      "verification": {
+        "commands": ["git diff --check", "git status --short"]
+      }
+    }
+  }
+}

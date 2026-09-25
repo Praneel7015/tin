@@ -49,14 +49,8 @@ async def test_profile_selection_is_scoped_and_old_oauth_stays_oauth(publication
             procedure=SimpleNamespace(sandbox=sandbox),
             settings=settings,
         )
-    expected = (
-        PROCEDURE_CONTRACT
-        if profile in {"default", "browser", "studio"}
-        else CONTRACT
-        if profile == "isolated"
-        else {"mode": "chatgpt_oauth"}
-    )
-    assert selected == expected
+    # Unpinned API runs of every supported profile, isolated included, use v3.
+    assert selected == PROCEDURE_CONTRACT
     effective = execution_profile(sandbox, selected)
     assert effective.timeout_seconds == 1200
     assert effective.profile == (
@@ -77,7 +71,7 @@ def test_procedure_context_config_does_not_change_v1(tmp_path, contract):
 
     module = load_sandbox_module("codex_api_config")
     path = tmp_path / "config.toml"
-    path.write_text('model="gpt-6-astra"\n[mcp_servers.test]\ncommand="true"\n')
+    path.write_text('model="gpt-6-sol"\n[mcp_servers.test]\ncommand="true"\n')
     module.configure(
         path,
         {
@@ -379,6 +373,22 @@ async def test_context_and_request_limits_are_pinned_before_paid_intent(publicat
         await relay.close()
 
 
+async def test_relay_rejections_are_logged_without_request_content(publication_db, caplog):
+    run, relay, client, sent = await setup_relay(publication_db)
+    try:
+        with caplog.at_level("WARNING", logger="tin_lite.codex_api_relay"):
+            response = await post(client, run, {**BODY, "input": "private-prompt" * 30000})
+        assert response.status_code == 413
+        assert not sent
+        [record] = [r for r in caplog.records if r.name == "tin_lite.codex_api_relay"]
+        message = record.getMessage()
+        assert f"run={run.id}" in message and "status=413" in message
+        assert "private-prompt" not in message
+    finally:
+        await client.aclose()
+        await relay.close()
+
+
 async def test_multiple_searches_compaction_and_retry_settle_once(billed, monkeypatch):
     f = billed
     monkeypatch.setattr(
@@ -439,7 +449,7 @@ async def test_multiple_searches_compaction_and_retry_settle_once(billed, monkey
         await f.billing.settle(run.id)
         await f.billing.settle(run.id)
         charge = await f.billing.run_charge(run.id, ACTOR)
-        assert charge["charged_usd"] == "0.06"
+        assert charge["charged_usd"] == "0.04"
         assert len(sent) == 2
         assert all("max_tool_calls" not in json.loads(request.content) for request in sent)
         assert (
@@ -449,7 +459,7 @@ async def test_multiple_searches_compaction_and_retry_settle_once(billed, monkey
             == 1
         )
         usage = await read_run_usage(database=f.db, run=run)
-        assert Decimal(usage["own"]["totals"]["known_api_list_price_usd"]) == Decimal("0.0582")
+        assert Decimal(usage["own"]["totals"]["known_api_list_price_usd"]) == Decimal("0.03564")
     finally:
         await client.aclose()
         await relay.close()
@@ -497,7 +507,9 @@ def test_remote_compaction_is_not_priced_from_invented_supplier_fields():
     assert price_response(RATE_CARD, {**record, "model": "different"}) is None
     assert price_response(RATE_CARD, {**record, "service_tier": "priority"}) is None
     assert price_response(RATE_CARD, {**record, "response_object": None}) is None
-    assert "codex_contract" not in api_terms({"procedure": {"sandbox": {"profile": "isolated"}}})
+    isolated = api_terms({"procedure": {"sandbox": {"profile": "isolated"}}})
+    assert isolated["codex_contract"] == PROCEDURE_CONTRACT
+    assert isolated["request_maximum_input_bytes"] == PROCEDURE_CONTRACT["max_request_bytes"]
     assert api_terms({"procedure": {}})["codex_contract"] == PROCEDURE_CONTRACT
 
 
@@ -610,7 +622,7 @@ async def test_diagram_images_use_quoted_tokens_and_settle_once(billed, monkeypa
             )
             == 1
         )
-        assert (await f.billing.run_charge(run.id, ACTOR))["charged_usd"] == "0.12"
+        assert (await f.billing.run_charge(run.id, ACTOR))["charged_usd"] == "0.02"
     finally:
         await client.aclose()
         await relay.close()

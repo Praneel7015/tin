@@ -28,9 +28,12 @@ from tin_lite.domain import (
     Workflow,
     WorkflowStatus,
 )
+from tin_lite.google_ads import GoogleAdsApi
 from tin_lite.integrations import (
+    ADS_PROVIDER,
     GITHUB_PROVIDER,
     GOOGLE_WORKSPACE_PROVIDER,
+    GSC_MIN_ROW_BYTES,
     GSC_PROVIDER,
     CredentialCipher,
     GitHubFileChange,
@@ -38,11 +41,14 @@ from tin_lite.integrations import (
     GitHubInstallationRequiredError,
     GitHubRepositoryFile,
     GitHubRepositorySnapshot,
+    GoogleAdsCallError,
     IntegrationAuthorizationError,
     IntegrationDeliveryUnknownError,
     IntegrationError,
     IntegrationRequirement,
     IntegrationService,
+    IntegrationUpstreamError,
+    ServiceResponseTooLarge,
     load_pinned_integration_requirements,
     parse_integration_requirements,
     registered_integrations,
@@ -82,7 +88,7 @@ class FakeIntegrationDatabase:
             attempt is None
             or attempt.provider_key != values["provider_key"]
             or attempt.clerk_user_id != values["clerk_user_id"]
-            or attempt.used_at is not None
+            or (attempt.used_at is not None and not values.get("include_used"))
         ):
             return None
         return attempt
@@ -168,10 +174,32 @@ class FakeIntegrationDatabase:
         self.connections[(updated.project_id, updated.provider_key)] = updated
         return updated
 
+    async def update_integration_credential(self, **values) -> bool:
+        current = self.connections.get((values["project_id"], values["provider_key"]))
+        if current is None or current.id != values["connection_id"]:
+            return False
+        self.connections[(current.project_id, current.provider_key)] = IntegrationConnection(
+            **{
+                **current.__dict__,
+                "credential_ciphertext": values["credential_ciphertext"],
+                "credential_key_version": values["credential_key_version"],
+            }
+        )
+        return True
+
     async def mark_integration_attention(self, **values) -> None:
         current = self.connections[(values["project_id"], values["provider_key"])]
         self.connections[(current.project_id, current.provider_key)] = IntegrationConnection(
-            **{**current.__dict__, "status": "needs_attention"}
+            **{
+                **current.__dict__,
+                "status": "needs_attention",
+                "last_error_code": values.get("error_code"),
+            }
+        )
+
+    async def delete_integration_connection(self, **values) -> bool:
+        return (
+            self.connections.pop((values["project_id"], values["provider_key"]), None) is not None
         )
 
     @asynccontextmanager
@@ -392,6 +420,145 @@ async def test_required_capability_preflight_is_project_scoped_and_selection_awa
         )
     finally:
         await service.close()
+
+
+@asynccontextmanager
+async def search_console(rows: list[dict]):
+    """A GSC read against a fixed property, recording each body sent to Google."""
+    sent: list[dict] = []
+
+    async def provider(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body)
+        start = body.get("startRow", 0)
+        return httpx.Response(
+            200,
+            json={
+                "rows": rows[start : start + body["rowLimit"]],
+                "responseAggregationType": "byProperty",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+        service = IntegrationService(
+            database=FakeIntegrationDatabase(),  # type: ignore[arg-type]
+            settings=settings(),  # type: ignore[arg-type]
+            client=client,
+        )
+        connection = SimpleNamespace(
+            id=uuid4(), configuration={"selected_site_url": "sc-domain:example.com"}
+        )
+
+        async def found(*_args):
+            return connection
+
+        async def token(_connection):
+            return "short-access"
+
+        service._connection = found  # type: ignore[method-assign]
+        service._google_access_token = token  # type: ignore[method-assign]
+
+        async def read(**kwargs):
+            return await service.search_console_analytics(
+                project_id=PROJECT_ID, start_date="2026-08-01", end_date="2026-08-31", **kwargs
+            )
+
+        yield read, sent
+
+
+def gsc_rows(count: int) -> list[dict]:
+    return [
+        {
+            "keys": [f"query number {i}", f"https://example.com/blog/post-{i}"],
+            "clicks": count - i,
+            "impressions": 1000 + i,
+            "ctr": 0.0123,
+            "position": 4.56,
+        }
+        for i in range(count)
+    ]
+
+
+def test_search_console_min_row_bytes_is_the_smallest_possible_row() -> None:
+    smallest = {"keys": [""], "clicks": 0, "impressions": 0, "ctr": 0, "position": 0}
+    assert len(json.dumps(smallest, ensure_ascii=False).encode()) == GSC_MIN_ROW_BYTES
+
+
+@pytest.mark.asyncio
+async def test_search_console_sends_paging_and_filters_and_validates_them() -> None:
+    filters = [
+        {"dimension": "page", "operator": "contains", "expression": "/blog/"},
+        {"dimension": "country", "operator": "equals", "expression": "usa"},
+    ]
+    async with search_console(gsc_rows(3)) as (read, sent):
+        await read(
+            dimensions=("query", "page"), row_limit=50, start_row=2, dimension_filters=filters
+        )
+        assert sent[-1] == {
+            "startDate": "2026-08-01",
+            "endDate": "2026-08-31",
+            "dimensions": ["query", "page"],
+            "rowLimit": 50,
+            "startRow": 2,
+            "dimensionFilterGroups": [{"groupType": "and", "filters": filters}],
+        }
+        # Without a bound the response is exactly Google's, as native workflows expect.
+        assert await read(row_limit=2) == {
+            "rows": gsc_rows(3)[:2],
+            "responseAggregationType": "byProperty",
+        }
+        invalid = [
+            {"start_row": -1},
+            {"start_row": 100_001},
+            {"dimension_filters": [{**filters[0], "dimension": "date"}]},
+            {"dimension_filters": [{**filters[0], "operator": "like"}]},
+            {"dimension_filters": [{**filters[0], "expression": ""}]},
+            {"dimension_filters": [{**filters[0], "expression": "x" * 4097}]},
+            {"dimension_filters": [{**filters[0], "extra": 1}]},
+            {"dimension_filters": filters * 3},
+        ]
+        for arguments in invalid:
+            with pytest.raises(IntegrationError):
+                await read(**arguments)
+        assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_console_bound_clamps_trims_and_points_to_the_next_page() -> None:
+    rows = gsc_rows(2000)
+    async with search_console(rows) as (read, sent):
+        small = await read(row_limit=3, max_response_bytes=64_000)
+        assert small == {"rows": rows[:3], "responseAggregationType": "byProperty"}
+
+        page = await read(dimensions=("query", "page"), row_limit=25_000, max_response_bytes=64_000)
+        assert sent[-1]["rowLimit"] == 64_000 // GSC_MIN_ROW_BYTES
+        assert len(json.dumps(page, ensure_ascii=False).encode()) <= 64_000
+        assert page["truncated"] is True
+        assert page["rows"] == rows[: len(page["rows"])]
+        assert 200 < len(page["rows"]) < sent[-1]["rowLimit"]
+        assert page["next_start_row"] == len(page["rows"])
+
+        following = await read(
+            dimensions=("query", "page"),
+            row_limit=25_000,
+            start_row=page["next_start_row"],
+            max_response_bytes=64_000,
+        )
+        assert following["rows"][0] == rows[page["next_start_row"]]
+        assert following["next_start_row"] == page["next_start_row"] + len(following["rows"])
+
+        # A clamped limit that Google fills may hide more rows, even when every row fit.
+        tiny = [{"keys": ["a"], "clicks": 1, "impressions": 1, "ctr": 1, "position": 1}] * 40
+    async with search_console(tiny) as (read, sent):
+        filled = await read(row_limit=1000, max_response_bytes=1024)
+        assert sent[-1]["rowLimit"] == 1024 // GSC_MIN_ROW_BYTES
+        assert filled["truncated"] is True
+        assert filled["next_start_row"] == len(filled["rows"])
+
+    huge = [{"keys": ["x" * 2000], "clicks": 1, "impressions": 1, "ctr": 1, "position": 1}]
+    async with search_console(huge) as (read, _):
+        with pytest.raises(ServiceResponseTooLarge):
+            await read(row_limit=10, max_response_bytes=1024)
 
 
 def test_credential_cipher_is_context_bound_and_never_embeds_plaintext() -> None:
@@ -1302,6 +1469,114 @@ async def test_github_snapshot_is_bounded_to_safe_site_files_at_one_commit(tmp_p
     assert receipt.provider_request_id == "tree-request"
 
 
+def git_blob_sha(content: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(content) + content, usedforsecurity=False).hexdigest()
+
+
+def tree_entry(path: str, content: bytes, mode: str = "100644") -> dict:
+    return {
+        "type": "blob",
+        "mode": mode,
+        "path": path,
+        "sha": git_blob_sha(content),
+        "size": len(content),
+    }
+
+
+def github_tarball(
+    files: dict[str, bytes], *, root: str = "example-org-site-aaaaaaa", links=()
+) -> bytes:
+    """The shape codeload serves: a pax header, one root directory and its members."""
+    buffer = io.BytesIO()
+    with tarfile.open(
+        fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": "a" * 40}
+    ) as archive:
+        directory = tarfile.TarInfo(root)
+        directory.type = tarfile.DIRTYPE
+        archive.addfile(directory)
+        for path, content in files.items():
+            info = tarfile.TarInfo(f"{root}/{path}")
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        for path in links:
+            info = tarfile.TarInfo(f"{root}/{path}")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "src/index.html"
+            archive.addfile(info)
+    return buffer.getvalue()
+
+
+CODELOAD = "https://codeload.github.com/example-org/site/legacy.tar.gz/refs?token=signed"
+
+
+class RepositoryGitHub:
+    """Synthetic GitHub API and codeload host for repository snapshots."""
+
+    def __init__(self, tree, tarball, *, blobs=None, location=CODELOAD, head_sha="a" * 40):
+        self.tree, self.tarball, self.blobs = tree, tarball, blobs or {}
+        self.location, self.head_sha = location, head_sha
+        self.requests: list[httpx.Request] = []
+
+    def paths(self, suffix: str) -> list[httpx.Request]:
+        return [request for request in self.requests if suffix in request.url.path]
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+        if str(request.url) == self.location:
+            return httpx.Response(200, content=self.tarball)
+        assert request.url.host == "api.github.com", request.url
+        if request.method == "POST" and path.endswith("/access_tokens"):
+            return httpx.Response(201, json={"token": "installation-token"})
+        if path == "/repos/example-org/site":
+            return httpx.Response(200, json={"default_branch": "main"})
+        if path.endswith("/git/ref/heads/main"):
+            return httpx.Response(200, json={"object": {"sha": self.head_sha}})
+        if path.endswith(f"/git/trees/{self.head_sha}"):
+            return httpx.Response(200, json={"tree": self.tree, "truncated": False})
+        if path.endswith(f"/tarball/{self.head_sha}"):
+            return httpx.Response(302, headers={"location": self.location})
+        for sha, content in self.blobs.items():
+            if path.endswith(f"/git/blobs/{sha}"):
+                encoded = base64.b64encode(content).decode()
+                return httpx.Response(200, json={"encoding": "base64", "content": encoded})
+        raise AssertionError(f"unexpected GitHub request {request.method} {request.url}")
+
+
+@asynccontextmanager
+async def repository_service(monkeypatch, github):
+    from unittest.mock import AsyncMock
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+        service = IntegrationService(
+            database=FakeIntegrationDatabase(),  # type: ignore[arg-type]
+            settings=settings(),  # type: ignore[arg-type]
+            client=client,
+        )
+        monkeypatch.setattr(
+            service,
+            "_connection",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=uuid4(),
+                    external_account_id="42",
+                    configuration={
+                        "selected_repository": "example-org/site",
+                        "permissions": {"contents": "read"},
+                    },
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            service, "_github_installation_token", AsyncMock(return_value="synthetic-token")
+        )
+        yield service
+
+
+def bundle_args(key: str = "run-9:procedure-repository") -> dict:
+    return {"project_id": PROJECT_ID, "run_id": RUN_ID, "execution_key": key}
+
+
 @pytest.mark.asyncio
 async def test_github_repository_bundle_is_pinned_bounded_and_tokenless(tmp_path) -> None:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -1336,56 +1611,16 @@ async def test_github_repository_bundle_is_pinned_bounded_and_tokenless(tmp_path
         updated_at=now,
     )
     head_sha = "a" * 40
-    blobs = {
-        "1" * 40: b"<main>Before</main>\n",
-        "2" * 40: b"name: ci\n",
-    }
-
-    async def github(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if request.method == "POST" and path.endswith("/access_tokens"):
-            return httpx.Response(201, json={"token": "installation-token"})
-        if request.method == "GET" and path == "/repos/example-org/site":
-            return httpx.Response(200, json={"default_branch": "main"})
-        if request.method == "GET" and path.endswith("/git/ref/heads/main"):
-            return httpx.Response(200, json={"object": {"sha": head_sha}})
-        if request.method == "GET" and path.endswith(f"/git/trees/{head_sha}"):
-            return httpx.Response(
-                200,
-                json={
-                    "truncated": False,
-                    "tree": [
-                        {
-                            "type": "blob",
-                            "mode": "100644",
-                            "path": "src/index.html",
-                            "sha": "1" * 40,
-                            "size": len(blobs["1" * 40]),
-                        },
-                        {
-                            "type": "blob",
-                            "mode": "100644",
-                            "path": ".github/workflows/ci.yml",
-                            "sha": "2" * 40,
-                            "size": len(blobs["2" * 40]),
-                        },
-                        {
-                            "type": "blob",
-                            "mode": "120000",
-                            "path": "unsafe-link",
-                            "sha": "3" * 40,
-                            "size": 4,
-                        },
-                    ],
-                },
-            )
-        for sha, content in blobs.items():
-            if request.method == "GET" and path.endswith(f"/git/blobs/{sha}"):
-                return httpx.Response(
-                    200,
-                    json={"encoding": "base64", "content": base64.b64encode(content).decode()},
-                )
-        raise AssertionError(f"unexpected GitHub request {request.method} {request.url}")
+    files = {"src/index.html": b"<main>Before</main>\n", ".github/workflows/ci.yml": b"name: ci\n"}
+    github = RepositoryGitHub(
+        [
+            tree_entry("src/index.html", files["src/index.html"]),
+            tree_entry(".github/workflows/ci.yml", files[".github/workflows/ci.yml"]),
+            {**tree_entry("unsafe-link", b"link"), "mode": "120000"},
+        ],
+        github_tarball(files, links=["unsafe-link"]),
+        head_sha=head_sha,
+    )
 
     configured = settings(
         integration_credential_key=None,
@@ -1409,37 +1644,11 @@ async def test_github_repository_bundle_is_pinned_bounded_and_tokenless(tmp_path
             execution_key="run-9:procedure-repository",
             run_id=RUN_ID,
         )
-        # Limits are explicitly selected and remain part of request identity.
-        larger = await service.github_repository_bundle(
-            project_id=PROJECT_ID,
-            execution_key="run-9:larger-repository",
-            run_id=RUN_ID,
-            max_files=1000,
-            max_bytes=100_000_000,
-        )
-        assert (larger.repository, larger.head_sha, larger.file_count) == (
-            bundle.repository,
-            bundle.head_sha,
-            bundle.file_count,
-        )
         with pytest.raises(SideEffectConflictError):
             await service.github_repository_bundle(
                 project_id=PROJECT_ID,
-                execution_key="run-9:larger-repository",
-                run_id=RUN_ID,
-            )
-        with pytest.raises(IntegrationAuthorizationError, match="workspace limits"):
-            await service.github_repository_bundle(
-                project_id=PROJECT_ID,
-                execution_key="run-9:small-repository",
-                run_id=RUN_ID,
-                max_files=1,
-            )
-        with pytest.raises(IntegrationError, match="limits"):
-            await service.github_repository_bundle(
-                project_id=PROJECT_ID,
-                execution_key="run-9:invalid-repository",
-                max_files=1001,
+                execution_key="run-9:procedure-repository",
+                run_id=uuid4(),
             )
 
     assert bundle.repository == "example-org/site"
@@ -1448,7 +1657,13 @@ async def test_github_repository_bundle_is_pinned_bounded_and_tokenless(tmp_path
     assert bundle.complete is False  # The excluded symlink prevents a complete build proof.
     with tarfile.open(fileobj=io.BytesIO(bundle.archive), mode="r:gz") as archive:
         assert archive.getnames() == [".github/workflows/ci.yml", "src/index.html"]
-        assert archive.extractfile("src/index.html").read() == blobs["1" * 40]
+        assert archive.extractfile("src/index.html").read() == files["src/index.html"]
+    # One tarball download; the signed codeload URL never receives the installation token.
+    (tarball,) = github.paths(f"/tarball/{head_sha}")
+    assert tarball.headers["authorization"] == "Bearer installation-token"
+    (download,) = [r for r in github.requests if r.url.host == "codeload.github.com"]
+    assert "authorization" not in download.headers
+    assert not github.paths("/git/blobs/")
     receipt = database.call_receipts["run-9:procedure-repository"]
     assert receipt.response_summary["head_sha"] == head_sha
 
@@ -2369,74 +2584,33 @@ async def test_github_commit_adapter_writes_the_default_branch_and_replays(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("file_count", "file_bytes", "limits", "accepted"),
+    ("file_count", "file_bytes", "accepted"),
     [
-        (750, 40_000, {"max_files": 1000, "max_bytes": 100_000_000}, True),
-        (1000, 100_000, {"max_files": 1000, "max_bytes": 100_000_000}, True),
-        (1001, 0, {"max_files": 1000, "max_bytes": 100_000_000}, False),
-        (51, 2_000_000, {"max_files": 1000, "max_bytes": 100_000_000}, False),
-        (750, 1, {}, False),  # Historical default still enforces 500 files.
-        (6, 2_000_000, {}, False),  # Historical default still enforces 10 MB.
+        (50, 1, True),  # At the (lowered) file cap.
+        (51, 0, False),
+        (40, 2_000_000, True),  # 80 MB of eligible files.
+        (51, 2_000_000, False),  # Over the 100 MB byte cap.
     ],
 )
-async def test_repository_bundle_expanded_bounds_and_legacy_rejection(
-    monkeypatch, file_count, file_bytes, limits, accepted
+async def test_repository_bundle_bounds_apply_to_every_workspace(
+    monkeypatch, file_count, file_bytes, accepted
 ):
-    from unittest.mock import AsyncMock
+    from tin_lite import integrations
 
-    db = FakeIntegrationDatabase()
+    assert (integrations.REPOSITORY_MAX_FILES, integrations.REPOSITORY_MAX_BYTES) == (
+        20_000,
+        100_000_000,
+    )
+    monkeypatch.setattr(integrations, "REPOSITORY_MAX_FILES", 50)
     content = b"x" * file_bytes
-    head_sha = "a" * 40
-    blob_reads = []
-    tree = [
-        {
-            "type": "blob",
-            "mode": "100644",
-            "path": f"src/file-{index}.txt",
-            "sha": f"{index:040x}",
-            "size": file_bytes,
-        }
-        for index in range(file_count)
-    ]
-
-    async def github(request):
-        path = request.url.path
-        if path == "/repos/example-org/site":
-            return httpx.Response(200, json={"default_branch": "main"})
-        if path.endswith("/git/ref/heads/main"):
-            return httpx.Response(200, json={"object": {"sha": head_sha}})
-        if path.endswith(f"/git/trees/{head_sha}"):
-            return httpx.Response(200, json={"tree": tree, "truncated": False})
-        assert "/git/blobs/" in path
-        blob_reads.append(path)
-        return httpx.Response(
-            200, json={"encoding": "base64", "content": base64.b64encode(content).decode()}
-        )
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
-        service = IntegrationService(database=db, settings=settings(), client=client)
-        monkeypatch.setattr(
-            service,
-            "_connection",
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    id=uuid4(),
-                    external_account_id="42",
-                    configuration={
-                        "selected_repository": "example-org/site",
-                        "permissions": {"contents": "read"},
-                    },
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            service, "_github_installation_token", AsyncMock(return_value="synthetic-token")
-        )
-        args = dict(project_id=PROJECT_ID, run_id=RUN_ID, execution_key="larger-repo", **limits)
+    files = {f"src/file-{index}.txt": content for index in range(file_count)}
+    tree = [tree_entry(path, content) for path in files]
+    github = RepositoryGitHub(tree, github_tarball(files) if accepted else b"")
+    async with repository_service(monkeypatch, github) as service:
         if accepted:
-            bundle = await service.github_repository_bundle(**args)
+            bundle = await service.github_repository_bundle(**bundle_args())
             assert bundle.file_count == file_count and bundle.complete
-            assert len(blob_reads) == file_count
+            assert not github.paths("/git/blobs/")
             with tarfile.open(fileobj=io.BytesIO(bundle.archive), mode="r:gz") as archive:
                 members = archive.getmembers()
                 assert len(members) == file_count
@@ -2444,6 +2618,580 @@ async def test_repository_bundle_expanded_bounds_and_legacy_rejection(
                 assert archive.extractfile(members[-1]).read() == content
         else:
             with pytest.raises(IntegrationAuthorizationError, match="workspace limits") as error:
-                await service.github_repository_bundle(**args)
+                await service.github_repository_bundle(**bundle_args())
             assert f"{file_count:,} files / {file_count * file_bytes:,} bytes" in str(error.value)
-            assert not blob_reads  # Reject before downloading any file contents.
+            assert not github.paths("/tarball/")  # Reject before downloading anything.
+
+
+async def test_repository_bundle_reads_export_ignored_and_rewritten_files_by_blob(monkeypatch):
+    files = {"README.md": b"# Site\n", "VERSION": b"$Format:%H$\n", "ops/deploy.sh": b"ship\n"}
+    tree = [tree_entry(path, content) for path, content in files.items()]
+    # export-subst rewrites VERSION and export-ignore drops ops/ from the tarball.
+    tarball = github_tarball({"README.md": files["README.md"], "VERSION": b"0123abc\n"})
+    blobs = {git_blob_sha(files[path]): files[path] for path in ("VERSION", "ops/deploy.sh")}
+    github = RepositoryGitHub(tree, tarball, blobs=blobs)
+    async with repository_service(monkeypatch, github) as service:
+        bundle = await service.github_repository_bundle(**bundle_args())
+    with tarfile.open(fileobj=io.BytesIO(bundle.archive), mode="r:gz") as archive:
+        assert {name: archive.extractfile(name).read() for name in archive.getnames()} == files
+    assert len(github.paths("/git/blobs/")) == 2
+
+
+@pytest.mark.parametrize(
+    ("change", "error", "message"),
+    [
+        # A fallback blob must still match the pinned tree.
+        ("wrong_blob", IntegrationUpstreamError, "pinned tree"),
+        # Only codeload may serve the redirected archive.
+        ("foreign_redirect", IntegrationUpstreamError, "unexpectedly"),
+        ("insecure_redirect", IntegrationUpstreamError, "unexpectedly"),
+        # Members outside the single archive root are never read as repository files.
+        ("two_roots", IntegrationUpstreamError, "layout"),
+        ("not_gzip", IntegrationUpstreamError, "unreadable"),
+        ("too_many_fallbacks", IntegrationUpstreamError, "missing pinned files"),
+        ("oversized_download", IntegrationAuthorizationError, "archive exceeds"),
+    ],
+)
+async def test_repository_bundle_rejects_unverifiable_archives(monkeypatch, change, error, message):
+    from tin_lite import integrations
+
+    files = {"README.md": b"# Site\n", "src/app.py": b"print('hi')\n"}
+    tree = [tree_entry(path, content) for path, content in files.items()]
+    tarball = github_tarball(files)
+    blobs = {}
+    location = CODELOAD
+    if change == "wrong_blob":
+        tarball = github_tarball({"README.md": files["README.md"]})
+        blobs = {git_blob_sha(files["src/app.py"]): b"print('bye')\n"}
+    elif change == "foreign_redirect":
+        location = "https://files.example.com/site.tar.gz"
+    elif change == "insecure_redirect":
+        location = "http://codeload.github.com/example-org/site/legacy.tar.gz/refs"
+    elif change == "two_roots":
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for name, content in (("one/README.md", b"a"), ("two/src/app.py", b"b")):
+                info = tarfile.TarInfo(name)
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+        tarball = buffer.getvalue()
+    elif change == "not_gzip":
+        tarball = b"<html>rate limited</html>"
+    elif change == "too_many_fallbacks":
+        tarball = github_tarball({"README.md": files["README.md"]})
+        monkeypatch.setattr(integrations, "REPOSITORY_BLOB_FALLBACKS", 0)
+    elif change == "oversized_download":
+        monkeypatch.setattr(integrations, "REPOSITORY_DOWNLOAD_MAX_BYTES", len(tarball) - 1)
+    github = RepositoryGitHub(tree, tarball, blobs=blobs, location=location)
+    async with repository_service(monkeypatch, github) as service:
+        with pytest.raises(error, match=message):
+            await service.github_repository_bundle(**bundle_args())
+    assert not any(r.url.host == "files.example.com" for r in github.requests)
+    assert not any(r.url.scheme == "http" for r in github.requests)
+
+
+async def test_repository_bundle_ignores_members_outside_the_pinned_tree(monkeypatch):
+    files = {"README.md": b"# Site\n"}
+    tarball = github_tarball({**files, "../escape": b"x", "extra.txt": b"not in tree"})
+    github = RepositoryGitHub([tree_entry("README.md", files["README.md"])], tarball)
+    async with repository_service(monkeypatch, github) as service:
+        bundle = await service.github_repository_bundle(**bundle_args())
+    with tarfile.open(fileobj=io.BytesIO(bundle.archive), mode="r:gz") as archive:
+        assert archive.getnames() == ["README.md"]
+
+
+# ---------------------------------------------------------------- Google Ads (ads.google)
+
+ADS_CID = "1234567890"
+ADS_MCC = "1002174488"
+ADS_BASE = "https://googleads.googleapis.com/v25/customers"
+
+
+def ads_settings(**overrides):
+    return settings(
+        google_ads_manager_customer_id="100-217-4488",
+        google_ads_manager_refresh_token=SecretStr("1//manager-refresh"),
+        google_ads_developer_token=None,
+        google_ads_api_version="v25",
+        **overrides,
+    )
+
+
+def ads_error(category, value):
+    return httpx.Response(
+        400,
+        json={
+            "error": {
+                "code": 400,
+                "message": "secret detail",
+                "status": "INVALID_ARGUMENT",
+                "details": [{"errors": [{"errorCode": {category: value}, "message": "x"}]}],
+            }
+        },
+    )
+
+
+class AdsBackend:
+    """A tiny Google Ads REST double: routes by path, records every request."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict, dict]] = []
+        self.link_status = "PENDING"
+        self.link_error: tuple[str, str] | None = None
+        self.search_error: tuple[str, str] | None = None
+        self.mutate_error: tuple[str, str] | None = None
+        self.link_rows: list[dict] | None = None
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content or b"{}")
+        self.requests.append((request.url.path, body, dict(request.headers)))
+        path = request.url.path
+        if path.endswith("customerClientLinks:mutate"):
+            if self.link_error:
+                return ads_error(*self.link_error)
+            create = body["operation"].get("create") or body["operation"].get("update")
+            client = create.get("clientCustomer", f"customers/{ADS_CID}").rsplit("/", 1)[-1]
+            return httpx.Response(
+                200,
+                headers={"request-id": "req-link"},
+                json={
+                    "result": {
+                        "resourceName": f"customers/{ADS_MCC}/customerClientLinks/{client}~555"
+                    }
+                },
+            )
+        if path.endswith("googleAds:search"):
+            if self.search_error:
+                return ads_error(*self.search_error)
+            query = body["query"]
+            rows: list[dict] = []
+            if "FROM customer_client_link" in query:
+                rows = (
+                    self.link_rows
+                    if self.link_rows is not None
+                    else [
+                        {
+                            "customerClientLink": {
+                                "resourceName": (
+                                    f"customers/{ADS_MCC}/customerClientLinks/{ADS_CID}~555"
+                                ),
+                                "clientCustomer": f"customers/{ADS_CID}",
+                                "managerLinkId": "555",
+                                "status": self.link_status,
+                            }
+                        }
+                    ]
+                )
+            elif "FROM customer " in query or query.rstrip().endswith("FROM customer"):
+                rows = [
+                    {
+                        "customer": {
+                            "id": ADS_CID,
+                            "descriptiveName": "Acme Ltd",
+                            "currencyCode": "USD",
+                            "timeZone": "Europe/London",
+                            "status": "ENABLED",
+                            "autoTaggingEnabled": True,
+                            "conversionTrackingSetting": {
+                                "conversionTrackingId": "17707549309",
+                                "conversionTrackingStatus": "CONVERSION_TRACKING_MANAGED_BY_SELF",
+                                "acceptedCustomerDataTerms": True,
+                            },
+                        }
+                    }
+                ]
+            elif "FROM billing_setup" in query:
+                rows = [{"billingSetup": {"id": "1", "status": "APPROVED"}}]
+            elif "FROM conversion_action" in query:
+                rows = [
+                    {
+                        "conversionAction": {
+                            "resourceName": f"customers/{ADS_CID}/conversionActions/9",
+                            "id": "9",
+                            "name": "Scan started",
+                            "category": "SIGNUP",
+                            "status": "ENABLED",
+                            "type": "WEBPAGE",
+                            "primaryForGoal": True,
+                        },
+                        "metrics": {"allConversions": 12.0},
+                    },
+                    {
+                        "conversionAction": {
+                            "resourceName": f"customers/{ADS_CID}/conversionActions/10",
+                            "id": "10",
+                            "name": "Call booked",
+                            "category": "BOOK_APPOINTMENT",
+                            "status": "ENABLED",
+                            "type": "WEBPAGE",
+                            "primaryForGoal": True,
+                        },
+                        "metrics": {"allConversions": 0},
+                    },
+                ]
+            elif "FROM campaign" in query:
+                rows = [
+                    {"campaign": {"id": "22", "resourceName": f"customers/{ADS_CID}/campaigns/22"}}
+                ]
+            return httpx.Response(200, headers={"request-id": "req-search"}, json={"results": rows})
+        if path.endswith("googleAds:mutate"):
+            if self.mutate_error:
+                return ads_error(*self.mutate_error)
+            responses = [{"campaignResult": {"resourceName": f"customers/{ADS_CID}/campaigns/22"}}]
+            return httpx.Response(
+                200,
+                headers={"request-id": "req-mutate"},
+                json={"mutateOperationResponses": responses},
+            )
+        if path.endswith(":mutate"):
+            if self.mutate_error:
+                return ads_error(*self.mutate_error)
+            return httpx.Response(
+                200,
+                headers={"request-id": "req-resource"},
+                json={"results": [{"resourceName": f"customers/{ADS_CID}/campaigns/22"}]},
+            )
+        raise AssertionError(f"unexpected Google Ads request {request.url}")
+
+
+async def manager_token():
+    return "manager-token"
+
+
+def ads_service(backend: AdsBackend, database=None, **overrides):
+    database = database or FakeIntegrationDatabase()
+    api = GoogleAdsApi(
+        manager_customer_id=ADS_MCC,
+        token_source=manager_token,
+        transport=httpx.MockTransport(backend),
+    )
+    service = IntegrationService(
+        database=database,  # type: ignore[arg-type]
+        settings=ads_settings(**overrides),  # type: ignore[arg-type]
+        client=httpx.AsyncClient(transport=httpx.MockTransport(backend)),
+        google_ads=api,
+    )
+    return service, database
+
+
+def test_registry_declares_google_ads_as_a_manager_linked_connection() -> None:
+    definition = next(item for item in registered_integrations() if item.key == ADS_PROVIDER)
+    assert definition.key == "ads.google"
+    assert definition.capabilities == ("account.read", "campaigns.read", "campaigns.write")
+    assert "manager account" in definition.access_label
+    assert definition.unlocks == ("Google Ads launch", "Google Ads monitor")
+
+
+def test_google_ads_is_configured_only_with_manager_credentials_and_oauth_client() -> None:
+    database = FakeIntegrationDatabase()
+    plain = IntegrationService(database=database, settings=settings())  # type: ignore[arg-type]
+    assert plain.is_configured(ADS_PROVIDER) is False
+    ready = IntegrationService(database=database, settings=ads_settings())  # type: ignore[arg-type]
+    assert ready.is_configured(ADS_PROVIDER) is True
+    no_client = IntegrationService(
+        database=database,  # type: ignore[arg-type]
+        settings=ads_settings(google_oauth_client_id=None, google_oauth_client_secret=None),  # type: ignore[arg-type]
+    )
+    assert no_client.is_configured(ADS_PROVIDER) is False
+
+
+@pytest.mark.asyncio
+async def test_connect_google_ads_refuses_bad_ids_and_tin_own_manager() -> None:
+    service, _ = ads_service(AdsBackend())
+    with pytest.raises(IntegrationError, match="ten-digit"):
+        await service.connect_google_ads(
+            project_id=PROJECT_ID, customer_id="12345", clerk_user_id=USER_ID
+        )
+    with pytest.raises(IntegrationError, match="not Tin's"):
+        await service.connect_google_ads(
+            project_id=PROJECT_ID, customer_id="100-217-4488", clerk_user_id=USER_ID
+        )
+
+
+@pytest.mark.asyncio
+async def test_connect_google_ads_sends_the_manager_invitation_and_records_it() -> None:
+    backend = AdsBackend()
+    service, database = ads_service(backend)
+    connection = await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id="123-456-7890", clerk_user_id=USER_ID
+    )
+    path, body, headers = backend.requests[-1]
+    assert path == f"/v25/customers/{ADS_MCC}/customerClientLinks:mutate"
+    assert body == {
+        "operation": {"create": {"clientCustomer": f"customers/{ADS_CID}", "status": "PENDING"}}
+    }
+    assert headers["login-customer-id"] == ADS_MCC
+    assert headers["authorization"] == "Bearer manager-token"
+    assert "developer-token" not in headers
+    assert connection.provider_key == ADS_PROVIDER
+    assert connection.external_account_id == ADS_CID
+    assert connection.external_account_label == "Google Ads 123-456-7890"
+    assert connection.credential_ciphertext is None
+    assert connection.configuration["link_status"] == "pending"
+    assert connection.configuration["manager_link_id"] == "555"
+    assert connection.configuration["customer_id"] == ADS_CID
+    assert connection.configuration["write_opted_in"] is True
+    receipt = database.calls[-1]
+    assert receipt["provider_key"] == ADS_PROVIDER
+    assert receipt["capability"] == "account.read"
+    assert receipt["status"] == "completed"
+    assert receipt["provider_request_id"] == "req-link"
+    assert database.activities[-1]["event_type"] == "integration_connected"
+    assert "Accept it in Google Ads" in database.activities[-1]["summary"]
+
+
+@pytest.mark.asyncio
+async def test_connect_google_ads_already_invited_falls_back_to_the_link_status() -> None:
+    backend = AdsBackend()
+    backend.link_error = ("managerLinkError", "ALREADY_MANAGED_BY_THIS_MANAGER")
+    backend.link_status = "ACTIVE"
+    service, database = ads_service(backend)
+    connection = await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    assert connection.configuration["link_status"] == "active"
+    assert connection.status == "connected"
+    statuses = [call["status"] for call in database.calls]
+    assert statuses == ["completed", "completed"]
+    assert database.calls[0]["response_summary"] == {
+        "code": "ManagerLinkError.ALREADY_MANAGED_BY_THIS_MANAGER"
+    }
+    assert backend.requests[-1][1]["query"].startswith("SELECT customer_client_link")
+
+
+@pytest.mark.asyncio
+async def test_connect_google_ads_maps_provider_refusals_to_founder_messages() -> None:
+    backend = AdsBackend()
+    backend.link_error = ("managerLinkError", "TOO_MANY_INVITES")
+    service, database = ads_service(backend)
+    with pytest.raises(IntegrationUpstreamError, match="too many open manager"):
+        await service.connect_google_ads(
+            project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+        )
+    receipt = database.calls[-1]
+    assert receipt["status"] == "failed"
+    assert receipt["error_code"] == "ManagerLinkError.TOO_MANY_INVITES"
+    assert "secret detail" not in json.dumps(receipt, default=str)
+
+
+@pytest.mark.asyncio
+async def test_google_ads_link_status_records_acceptance_and_refusal() -> None:
+    backend = AdsBackend()
+    service, database = ads_service(backend)
+    await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    backend.link_status = "ACTIVE"
+    connection = await service.google_ads_link_status(project_id=PROJECT_ID)
+    assert connection.configuration["link_status"] == "active"
+    assert connection.configuration["manager_link_id"] == "555"
+    assert database.activities[-1]["event_type"] == "integration_configured"
+    assert "linked to Tin's manager account" in database.activities[-1]["summary"]
+    assert backend.requests[-1][0] == f"/v25/customers/{ADS_MCC}/googleAds:search"
+    backend.link_status = "REFUSED"
+    connection = await service.google_ads_link_status(project_id=PROJECT_ID)
+    assert connection.configuration["link_status"] == "refused"
+    assert connection.status == "needs_attention"
+    assert connection.last_error_code == "manager_link_refused"
+
+
+@pytest.mark.asyncio
+async def test_google_ads_health_summarises_billing_and_conversions() -> None:
+    backend = AdsBackend()
+    backend.link_status = "ACTIVE"
+    service, database = ads_service(backend)
+    await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    with pytest.raises(IntegrationAuthorizationError, match="Accept Tin's manager request"):
+        await service.google_ads_health(project_id=PROJECT_ID)
+    connection = await service.refresh_google_ads(project_id=PROJECT_ID)
+    health = connection.configuration["health"]
+    assert health["billing_approved"] is True
+    assert health["billing_statuses"] == ["APPROVED"]
+    assert health["account_status"] == "ENABLED"
+    assert health["descriptive_name"] == "Acme Ltd"
+    assert health["conversion_actions_with_data"] == 1
+    assert health["conversion_actions"][0]["name"] == "Scan started"
+    assert health["conversion_actions"][0]["conversions_30d"] == 12.0
+    assert connection.external_account_label == "Acme Ltd · 123-456-7890"
+    paths = [call[0] for call in backend.requests]
+    assert paths.count(f"/v25/customers/{ADS_CID}/googleAds:search") == 3
+    assert all(
+        call["capability"] == "account.read" and call["status"] == "completed"
+        for call in database.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_ads_requirements_wait_for_the_accepted_link_and_write_opt_in() -> None:
+    backend = AdsBackend()
+    service, database = ads_service(backend)
+    requirement = IntegrationRequirement(ADS_PROVIDER, ("campaigns.write",), required=True)
+    with pytest.raises(IntegrationAuthorizationError, match="Connect Google Ads"):
+        await service.ensure_requirements(project_id=PROJECT_ID, requirements=(requirement,))
+    await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    with pytest.raises(IntegrationAuthorizationError, match="Accept Tin's manager request"):
+        await service.ensure_requirements(project_id=PROJECT_ID, requirements=(requirement,))
+    backend.link_status = "ACTIVE"
+    await service.google_ads_link_status(project_id=PROJECT_ID)
+    await service.ensure_requirements(project_id=PROJECT_ID, requirements=(requirement,))
+    current = database.connections[(PROJECT_ID, ADS_PROVIDER)]
+    await database.update_integration_configuration(
+        project_id=PROJECT_ID,
+        provider_key=ADS_PROVIDER,
+        configuration={**current.configuration, "write_opted_in": False},
+    )
+    with pytest.raises(IntegrationAuthorizationError, match="explicitly enabled"):
+        await service.ensure_requirements(project_id=PROJECT_ID, requirements=(requirement,))
+    read_only = IntegrationRequirement(ADS_PROVIDER, ("campaigns.read",), required=True)
+    await service.ensure_requirements(project_id=PROJECT_ID, requirements=(read_only,))
+
+
+@pytest.mark.asyncio
+async def test_google_ads_call_receipts_reads_and_writes_for_a_run() -> None:
+    backend = AdsBackend()
+    service, database = ads_service(backend)
+    await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    with pytest.raises(IntegrationAuthorizationError, match="Accept Tin's manager request"):
+        await service.google_ads_call(
+            project_id=PROJECT_ID,
+            kind="search",
+            request={"query": "SELECT campaign.id FROM campaign"},
+            execution_key="run:read",
+            run_id=RUN_ID,
+        )
+    backend.link_status = "ACTIVE"
+    await service.google_ads_link_status(project_id=PROJECT_ID)
+    read = await service.google_ads_call(
+        project_id=PROJECT_ID,
+        kind="search",
+        request={"query": "SELECT campaign.id FROM campaign"},
+        execution_key="run:read",
+        run_id=RUN_ID,
+    )
+    assert read["customer_id"] == ADS_CID
+    assert read["rows"][0]["campaign"]["id"] == "22"
+    receipt = database.call_receipts["run:read"]
+    assert receipt.run_id == RUN_ID
+    assert receipt.capability == "campaigns.read"
+    assert receipt.status == "completed"
+    assert receipt.provider_request_id == "req-search"
+    write = await service.google_ads_call(
+        project_id=PROJECT_ID,
+        kind="mutate",
+        request={
+            "operations": [{"campaignOperation": {"create": {"name": "x"}}}],
+            "validate_only": True,
+        },
+        execution_key="run:validate",
+        run_id=RUN_ID,
+        expected_customer_id=ADS_CID,
+    )
+    assert write["results"] == [
+        {"campaignResult": {"resourceName": f"customers/{ADS_CID}/campaigns/22"}}
+    ]
+    assert backend.requests[-1][1]["validateOnly"] is True
+    assert database.call_receipts["run:validate"].capability == "campaigns.write"
+    with pytest.raises(IntegrationAuthorizationError, match="changed after this run started"):
+        await service.google_ads_call(
+            project_id=PROJECT_ID,
+            kind="search",
+            request={"query": "SELECT campaign.id FROM campaign"},
+            execution_key="run:other",
+            run_id=RUN_ID,
+            expected_customer_id="9999999999",
+        )
+    backend.mutate_error = ("policyFindingError", "POLICY_FINDING")
+    with pytest.raises(GoogleAdsCallError) as error:
+        await service.google_ads_call(
+            project_id=PROJECT_ID,
+            kind="mutate_resource",
+            request={
+                "segment": "campaigns",
+                "body": {"operations": [{"update": {"resourceName": "x"}, "updateMask": "status"}]},
+            },
+            execution_key="run:enable",
+            run_id=RUN_ID,
+        )
+    assert error.value.code == "PolicyFindingError.POLICY_FINDING"
+    failed = database.call_receipts["run:enable"]
+    assert failed.status == "failed" and failed.error_code == "PolicyFindingError.POLICY_FINDING"
+    assert failed.capability == "campaigns.write"
+
+
+@pytest.mark.asyncio
+async def test_google_ads_call_requires_the_write_opt_in() -> None:
+    backend = AdsBackend()
+    backend.link_status = "ACTIVE"
+    service, database = ads_service(backend)
+    await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    await service.google_ads_link_status(project_id=PROJECT_ID)
+    current = database.connections[(PROJECT_ID, ADS_PROVIDER)]
+    await database.update_integration_configuration(
+        project_id=PROJECT_ID,
+        provider_key=ADS_PROVIDER,
+        configuration={**current.configuration, "write_opted_in": False},
+    )
+    with pytest.raises(IntegrationAuthorizationError, match="not enabled"):
+        await service.google_ads_call(
+            project_id=PROJECT_ID,
+            kind="mutate",
+            request={"operations": [], "validate_only": True},
+            execution_key="run:validate",
+            run_id=RUN_ID,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("link_status", "expected"), [("PENDING", "CANCELED"), ("ACTIVE", "INACTIVE")]
+)
+async def test_disconnect_google_ads_ends_the_manager_link_then_deletes(
+    link_status, expected
+) -> None:
+    backend = AdsBackend()
+    backend.link_status = link_status
+    service, database = ads_service(backend)
+    await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    await service.google_ads_link_status(project_id=PROJECT_ID)
+    assert await service.disconnect(project_id=PROJECT_ID, provider_key=ADS_PROVIDER) is True
+    path, body, headers = backend.requests[-1]
+    assert path == f"/v25/customers/{ADS_MCC}/customerClientLinks:mutate"
+    assert body == {
+        "operation": {
+            "update": {
+                "resourceName": f"customers/{ADS_MCC}/customerClientLinks/{ADS_CID}~555",
+                "status": expected,
+            },
+            "updateMask": "status",
+        }
+    }
+    assert headers["login-customer-id"] == ADS_MCC
+    assert (PROJECT_ID, ADS_PROVIDER) not in database.connections
+    assert database.activities[-1]["event_type"] == "integration_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_google_ads_is_authoritative_when_google_is_down() -> None:
+    backend = AdsBackend()
+    service, database = ads_service(backend)
+    await service.connect_google_ads(
+        project_id=PROJECT_ID, customer_id=ADS_CID, clerk_user_id=USER_ID
+    )
+    backend.link_error = ("internalError", "INTERNAL_ERROR")
+
+    async def no_sleep(seconds):
+        return None
+
+    service.google_ads._sleep = no_sleep
+    assert await service.disconnect(project_id=PROJECT_ID, provider_key=ADS_PROVIDER) is True
+    assert (PROJECT_ID, ADS_PROVIDER) not in database.connections

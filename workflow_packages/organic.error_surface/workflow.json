@@ -1,0 +1,151 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "organic.error_surface",
+    "title": "Find the errors your users search for",
+    "description": "Read the connected repository for the error messages your product shows users, check which your docs already answer, and get a ranked list of pages to write with the cause and fix from the code, ready to add to Plan upcoming content as a context file. It never writes pages, opens pull requests or estimates search volume.",
+    "version": "1.1.0",
+    "executor": "codex.procedure",
+    "system": "organic-traffic",
+    "schedule_modes": [
+      "on_demand",
+      "weekly"
+    ],
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Code map",
+        "producer": "product.code_map",
+        "reason": "The Code map's user-facing surfaces tell the run which directories users reach, so reading starts there instead of guessing."
+      },
+      {
+        "kind": "run",
+        "level": "recommended",
+        "workflow": "organic.keyword_plan",
+        "reason": "When a ranked query or error code appears in the keyword plan, its observed demand is copied with the run id; otherwise demand is reported as unmeasured, never estimated."
+      },
+      {
+        "kind": "run",
+        "level": "recommended",
+        "workflow": "organic.audit",
+        "reason": "The audit's crawled page list names live pages that may already answer an error, which content.plan needs to choose between a new page and an update."
+      }
+    ],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "focus": {
+          "type": "string",
+          "maxLength": 500,
+          "default": "",
+          "title": "Focus",
+          "description": "A module, package, or surface to read first, such as the public API client or the CLI. Leave empty to read the user-facing surfaces evenly.",
+          "x-tin-ui": {
+            "control": "text",
+            "order": 10
+          }
+        },
+        "depth": {
+          "type": "string",
+          "enum": [
+            "focused",
+            "standard",
+            "extensive"
+          ],
+          "default": "standard",
+          "title": "Depth",
+          "description": "How much of the repository to read before ranking.",
+          "x-tin-ui": {
+            "control": "select",
+            "order": 20
+          }
+        },
+        "self_hosted": {
+          "type": "boolean",
+          "default": false,
+          "title": "Do people run this product themselves?",
+          "description": "Turn this on for open-source or self-hosted products, where setup and configuration errors reach real users rather than only your own team.",
+          "x-tin-ui": {
+            "control": "segmented",
+            "order": 25
+          }
+        },
+        "max_opportunities": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 25,
+          "default": 15,
+          "title": "Ranked opportunities",
+          "description": "How many page-worthy errors to carry into the ranked table. The report stays small enough to be a content.plan context file.",
+          "x-tin-ui": {
+            "control": "counter",
+            "order": 30
+          }
+        },
+        "docs_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "maxItems": 8,
+          "uniqueItems": true,
+          "default": [],
+          "title": "Optional docs locations",
+          "description": "Repository directories that hold public documentation, such as docs or content/help. Leave empty to discover them."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "integration_requirements": [
+      {
+        "provider_key": "infra.github",
+        "capabilities": [
+          "contents.read"
+        ],
+        "required": true
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": [
+        "skills/error-surface/SKILL.md",
+        "skills/error-surface/EXTRACTION.md",
+        "skills/error-surface/RANKING.md"
+      ],
+      "entry_skill": "error-surface",
+      "workspace": {
+        "kind": "github.repository",
+        "provider_key": "infra.github",
+        "capabilities": [
+          "contents.read"
+        ],
+        "limits": {
+          "max_files": 1000,
+          "max_bytes": 100000000
+        }
+      },
+      "sandbox": {
+        "profile": "isolated",
+        "egress": "fenced",
+        "timeout_seconds": 1800
+      },
+      "output": {
+        "kind": "project.artifact",
+        "media_type": "text/markdown",
+        "max_bytes": 20000,
+        "path_template": "reports/error-surface/{run_id}.md"
+      }
+    }
+  }
+}

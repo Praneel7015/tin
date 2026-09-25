@@ -1,0 +1,224 @@
+{
+  "version": 1,
+  "assumptions": [
+    "One connected GitHub repository, read through the declared read-only snapshot at the 1000-file, 100 MB workspace limits, plus the read-only project state: the Code map, the newest keyword plan and organic audit, content plans and drafts, and the previous error-surface report. No runtime telemetry, no live site fetch and no search-provider access exist in this run.",
+    "The product emits its user-visible errors as literals, shared constants, an error-code catalogue or an i18n file in the default locale. A product whose messages are assembled at runtime from data, or translated outside the repository, yields a deliberately incomplete inventory rather than an inferred one.",
+    "Surface, call-site count and coverage are author observations cited to path:line; only the score, the ordering and the bucket are deterministic. A wrong coverage claim silently removes a real opportunity, so coverage is the field live review checks first.",
+    "Run success establishes artifact delivery only. Ordinary cases also require a useful ranked table whose every row is reproducible from the cited evidence."
+  ],
+  "cost_drivers": [
+    "One bounded Codex session at the existing pinned model pricing and spending ceiling. No managed-model routes and no connected provider beyond the GitHub snapshot, so there is no separate provider bill. The configured ceiling is not an expected price.",
+    "Agent work scales with repository size, language count and how centralised the error vocabulary is. A repository with an error-code catalogue or an i18n file costs a fraction of one that inlines literals across many packages.",
+    "The depth budget is the real cost control: focused reads one area for up to 30 candidates, standard every user-facing surface for up to 80, extensive adds i18n and secondary surfaces for up to 150. 1800 seconds and one 200000-byte report bound the rest.",
+    "Use verified usage from authorized runs for measured estimates. Offline resource tests measure no model cost."
+  ],
+  "effects": [
+    "Read-only GitHub contents.read through the declared repository workspace; the snapshot is never modified and no repository command is run.",
+    "One run-owned reports/error-surface/<run_id>.md of at most 20000 bytes in project state, sized to be selected as a content.plan context file, with existing Files and Activity delivery and immutable history.",
+    "No pull request, publication, email, provider mutation, credential access, workflow activation or recursive run. A secret found inside a message string is reported as a finding with the value redacted."
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "A repository with a central error-code catalogue and a docs directory that explains two of its codes. Expect a ranked table, the covered codes moved out of it, and the generic messages named as product repairs. Each suggested page carries its cause and fix from the code, and the report fits as a content.plan context file.",
+      "inputs": {
+        "depth": "standard",
+        "max_opportunities": 15,
+        "focus": "",
+        "docs_paths": []
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "## Ranked opportunities",
+          "## Below the cut",
+          "## Already documented",
+          "## Queries you cannot win",
+          "## Internal only",
+          "## What this does not measure",
+          "## Method and coverage",
+          "Suggested page",
+          "content.plan",
+          "## Page facts for content.plan",
+          "Cause:",
+          "Fix:",
+          "context files",
+          "content.generate"
+        ],
+        "excludes": [
+          "Status: incomplete",
+          "estimated traffic",
+          "monthly searches",
+          "content.draft"
+        ]
+      }
+    },
+    {
+      "id": "with_project_context",
+      "description": "The ordinary repository, with project memory holding a Code map, a keyword plan whose inventory contains one of the ranked error codes, and an organic audit whose crawl lists a docs page for another. Expect the observed figure copied with the keyword plan run id, every other row marked not measured, the crawled page named under Check first, and no invented number.",
+      "inputs": {
+        "depth": "standard",
+        "max_opportunities": 15,
+        "focus": "",
+        "docs_paths": []
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "## Page facts for content.plan",
+          "not measured",
+          "Check first:",
+          "Code map",
+          "Since last run:"
+        ],
+        "excludes": [
+          "Status: incomplete",
+          "estimated traffic",
+          "monthly searches"
+        ]
+      }
+    },
+    {
+      "id": "generic_vocabulary",
+      "description": "A repository whose user-visible messages are almost all interpolated or generic. The useful result is a mostly empty ranked table and a populated unwinnable-queries section naming the copy that would have to change, not a padded ranking.",
+      "inputs": {
+        "depth": "standard",
+        "max_opportunities": 15,
+        "focus": "",
+        "docs_paths": []
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "## Queries you cannot win",
+          "distinctive"
+        ],
+        "excludes": [
+          "Status: incomplete"
+        ]
+      }
+    },
+    {
+      "id": "already_documented",
+      "description": "Every extracted code is explained in the supplied docs_paths. The table is empty, Already documented names the covering file for each, and nothing is promoted to fill the table.",
+      "inputs": {
+        "depth": "focused",
+        "max_opportunities": 10,
+        "focus": "the public API error module",
+        "docs_paths": [
+          "docs/errors"
+        ]
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "## Already documented",
+          "docs/errors"
+        ],
+        "excludes": [
+          "Status: incomplete"
+        ]
+      }
+    },
+    {
+      "id": "unreadable_stack",
+      "description": "A language whose error convention the extraction patterns do not cover. The run must report an incomplete inventory naming the stack and the directories it could not interpret, rather than an empty complete one.",
+      "inputs": {
+        "depth": "standard",
+        "max_opportunities": 15,
+        "focus": "",
+        "docs_paths": []
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: incomplete",
+          "## Method and coverage"
+        ],
+        "excludes": [
+          "Status: complete"
+        ]
+      }
+    },
+    {
+      "id": "truncated_snapshot",
+      "description": "A repository larger than the workspace file limit. Coverage must state which directories were absent from the snapshot; absence must not be reported as an absence of errors.",
+      "inputs": {
+        "depth": "extensive",
+        "max_opportunities": 25,
+        "focus": "",
+        "docs_paths": []
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: incomplete",
+          "## Method and coverage"
+        ],
+        "excludes": [
+          "Status: complete"
+        ]
+      }
+    },
+    {
+      "id": "tests_only_messages",
+      "description": "Distinctive error strings that exist only in test fixtures. They must not appear as opportunities, because they are evidence about the test suite and not about the product.",
+      "inputs": {
+        "depth": "focused",
+        "max_opportunities": 10,
+        "focus": "",
+        "docs_paths": []
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "## Method and coverage"
+        ],
+        "excludes": [
+          "tests/fixtures"
+        ]
+      }
+    }
+  ],
+  "rubric": [
+    {
+      "id": "evidence",
+      "question": "Does every ranked row carry a path:line the reviewer can open, with the message quoted exactly as the source spells it and its placeholders intact?"
+    },
+    {
+      "id": "deliverable",
+      "question": "Does every ranked row name a page a writer could take straight to content.plan, with one page covering a group of messages that are the same failure, rather than only a message and a code location?"
+    },
+    {
+      "id": "determinism",
+      "question": "Does the table match what rank_candidates returns for the recorded candidates, with no hand-adjusted score, promoted reject or re-ordered row?"
+    },
+    {
+      "id": "surface",
+      "question": "Was each surface decided by reading the emitting path, including the handler that may replace a message before a user sees it, rather than inferred from the message text?"
+    },
+    {
+      "id": "coverage",
+      "question": "Is every documented and partial claim backed by a named file, and were the searched docs paths recorded so an unsupported claim is visible?"
+    },
+    {
+      "id": "restraint",
+      "question": "Does the report refuse to estimate search volume, difficulty, ranking or traffic, copy only figures the keyword plan observed with its run id, and mark every other row not measured?"
+    },
+    {
+      "id": "negative_result",
+      "question": "Are unsearchable, internal and unreachable messages reported as findings with the reason, rather than dropped to make the ranking look fuller?"
+    },
+    {
+      "id": "scope",
+      "question": "Did the run read only the snapshot and project state, write only the declared report, run no repository command, and redact any secret found inside a message?"
+    },
+    {
+      "id": "plan_ready",
+      "question": "Could content.plan turn each page-facts block into a brief without re-reading the code: a reader, the rows covered, a cause and a fix each cited to path:line or marked not established, and a live page to check first?"
+    }
+  ]
+}

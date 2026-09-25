@@ -9,6 +9,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from mcp.server.mcpserver.exceptions import ToolError
+from test_gak import settings_values
 from test_procedure_publication import HistoryStorage
 from test_procedure_publication import publication_db as publication_db
 
@@ -23,10 +24,13 @@ from tin_lite.private_workflows import (
     PrivateWorkflowError,
     PrivateWorkflows,
     authoring_guide,
+    private_execution_blocker,
+    private_execution_ready,
     validate_private_definition,
 )
 from tin_lite.procedures import load_pinned_codex_procedure
 from tin_lite.run_service import start_workflow_run
+from tin_lite.settings import Settings
 from tin_lite.workflow_definitions import ensure_schedule_allowed, resolve_execution_contract
 from tin_lite.workflow_packages import decode_workflow_source
 
@@ -171,6 +175,21 @@ async def test_contribution_readme_copy_validates_and_activates_through_mcp(
     valid = structured(await server.call_tool("validate_workflow_package", chosen))
     assert valid["valid"] and valid["runtime_available"]
     assert sorted(valid["files"]) == sorted(files)
+    # Agents often select the package directory rather than its manifest.
+    for directory in (
+        "workflow_packages/custom.example_play",
+        "workflow_packages/custom.example_play/",
+    ):
+        by_directory = {**chosen, "path": directory}
+        assert (
+            structured(await server.call_tool("validate_workflow_package", by_directory)) == valid
+        )
+    with pytest.raises(
+        ToolError, match=r"invalid: path 'reports/x\.md' must be workflow_packages/custom\.<key>/"
+    ):
+        await server.call_tool("validate_workflow_package", {**chosen, "path": "reports/x.md"})
+    with pytest.raises(ToolError, match="invalid: revision must be a lowercase 40-character"):
+        await server.call_tool("validate_workflow_package", {**chosen, "revision": "main"})
     assert await private_rows(f) == []
     activation = {**chosen, "request_id": str(uuid4()), "expected_revision": None}
     first = structured(await server.call_tool("activate_workflow_package", activation))
@@ -438,6 +457,28 @@ async def test_runtime_gate_blocks_activation_and_starts_without_effects(publica
     f.runtime.temporal.start_workflow.assert_not_awaited()
 
 
+async def test_open_gate_admits_unlisted_projects_but_keeps_the_isolated_template(
+    publication_db,
+):
+    f = await fixture(publication_db)
+    f.settings.private_workflow_projects = set()
+    f.settings.private_workflows_open = True
+    active = await activate(f)
+    workflow = await f.db.get_workflow(UUID(active["workflow_id"]))
+    worker = TinActivities(database=f.db, storage=f.storage, settings=f.settings, sandboxes=None)
+    run = SimpleNamespace(project_id=f.project.id, started_by_clerk_user_id=ACTOR)
+    await worker._check_private_attempt(run, workflow)
+    f.settings.e2b_isolated_template = None
+    with pytest.raises(PrivateWorkflowError, match="no isolated runtime configured"):
+        await worker._check_private_attempt(run, workflow)
+    f.settings.e2b_isolated_template = "isolated-test"
+    f.settings.private_workflows_open = False
+    with pytest.raises(
+        PrivateWorkflowError, match="not enabled for this project: it is not admitted"
+    ):
+        await worker._check_private_attempt(run, workflow)
+
+
 @pytest.mark.parametrize("surface", ["http", "mcp"])
 async def test_authoring_lifecycle_on_both_transports(publication_db, monkeypatch, surface):
     f = await fixture(publication_db)
@@ -584,21 +625,11 @@ def test_github_pr_workflows_and_worker_verification_are_supported():
     assert spec.result_kind == "github.pull_request" and spec.verification_commands
     assert spec.allow_no_change is True
     assert spec.verification_commands == ("git diff --check",)
-    assert (spec.workspace_max_files, spec.workspace_max_bytes) == (1000, 100_000_000)
-    legacy = deepcopy(definition)
-    del legacy["procedure"]["workspace"]["limits"]
-    old_spec = validate_private_definition(legacy)
-    assert (old_spec.workspace_max_files, old_spec.workspace_max_bytes) == (500, 10_000_000)
-    for limits in (
-        {"max_files": 1001, "max_bytes": 100_000_000},
-        {"max_files": 1000, "max_bytes": 100_000_001},
-        {"max_files": True, "max_bytes": 100_000_000},
-        {"max_files": 1000, "max_bytes": 100_000_000, "unbounded": True},
-    ):
-        changed = deepcopy(definition)
-        changed["procedure"]["workspace"]["limits"] = limits
-        with pytest.raises(ValueError, match="limits"):
-            validate_private_definition(changed)
+    # Snapshot bounds belong to the gateway; a package's former limits are ignored.
+    assert "limits" not in definition["procedure"]["workspace"]
+    older = deepcopy(definition)
+    older["procedure"]["workspace"]["limits"] = {"max_files": 1000, "max_bytes": 100_000_000}
+    assert validate_private_definition(older) == spec
     ensure_schedule_allowed(definition, None)
     with pytest.raises(ValueError, match="scheduling"):
         ensure_schedule_allowed(definition, SimpleNamespace(cadence="daily"))
@@ -609,3 +640,37 @@ def test_key_lookup_rejects_ambiguity():
     with pytest.raises(ToolError, match="ambiguous"):
         _mcp_workflow(rows, "same")
     assert _mcp_workflow(rows, str(rows[1].id)) == rows[1]
+
+
+def test_open_private_workflows_require_billing(monkeypatch):
+    with pytest.raises(ValueError, match="Open private workflows require billing"):
+        Settings(
+            _env_file=None, **settings_values(monkeypatch, TIN_LITE_PRIVATE_WORKFLOWS_OPEN="true")
+        )
+    settings = Settings(
+        _env_file=None,
+        **settings_values(
+            monkeypatch, TIN_LITE_PRIVATE_WORKFLOWS_OPEN="true", TIN_LITE_BILLING_ENABLED="true"
+        ),
+    )
+    assert settings.private_workflows_open is True
+    assert Settings(_env_file=None, **settings_values(monkeypatch)).private_workflows_open is False
+
+
+def test_execution_readiness_accepts_the_list_or_the_open_gate():
+    project = uuid4()
+    listed = SimpleNamespace(private_workflow_projects={project}, e2b_isolated_template="iso")
+    unlisted = SimpleNamespace(private_workflow_projects=set(), e2b_isolated_template="iso")
+    opened = SimpleNamespace(
+        private_workflow_projects=set(), private_workflows_open=True, e2b_isolated_template="iso"
+    )
+    assert private_execution_ready(listed, project)
+    assert not private_execution_ready(unlisted, project)
+    assert private_execution_ready(opened, project)
+    opened.e2b_isolated_template = None
+    assert not private_execution_ready(opened, project)
+    assert "not admitted to private workflow execution" in private_execution_blocker(
+        unlisted, project
+    )
+    assert "no isolated runtime" in private_execution_blocker(opened, project, "activation")
+    assert private_execution_blocker(listed, project) is None

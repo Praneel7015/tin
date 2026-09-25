@@ -22,6 +22,7 @@ from tin_lite.growth_onboarding import (
     plan_readiness,
     ui_links,
 )
+from tin_lite.growth_onboarding_activities import repaired_action_inputs
 from tin_lite.integrations import registered_integrations
 from tin_lite.product_urls import dashboard_url
 from tin_lite.schedules import WorkflowSchedule
@@ -88,9 +89,20 @@ def result_links(settings: Any, run: Any) -> list[dict[str, Any]]:
 
 
 async def validate_plan(
-    *, database: Any, project_id: UUID, text: str, systems: list[str], timezone: str
+    *,
+    database: Any,
+    project_id: UUID,
+    text: str,
+    systems: list[str],
+    timezone: str,
+    run_input: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Validate exact proposed inputs and schedules before any setup side effects."""
+    """Validate the inputs setup will actually use, and schedules, before any side effects.
+
+    Setup starts each action with repaired_action_inputs (typed numbers, tidied targets,
+    out-of-set enums reset to their default); approval must judge that same value.
+    """
+
     block = plan_block(text)
     if block is None:
         return [
@@ -145,10 +157,13 @@ async def validate_plan(
             )
         else:
             try:
+                repaired, _notes = repaired_action_inputs(
+                    action, template.definition["input_schema"], run_input or {}
+                )
                 normalize_workflow_inputs(
                     schema=template.definition["input_schema"],
                     project_id=project_id,
-                    inputs=action["inputs"],
+                    inputs=repaired,
                 )
                 if action["mode"] != "once":
                     code = "invalid_schedule"
@@ -203,6 +218,10 @@ async def access_needs(
         relevant.add("analytics.gsc")
     if initial or keys & CONTENT_DRAFT_KEYS or inputs.get("system_repository"):
         relevant.add("infra.github")
+    if "stripe" in str(inputs.get("system_payments") or "").lower():
+        relevant.add("payments.stripe")
+    if "posthog" in str(inputs.get("system_analytics") or "").lower():
+        relevant.add("analytics.posthog")
     benefits = {
         "analytics.gsc": (
             "Use real search queries and impressions to prioritize research and audits.",
@@ -217,6 +236,23 @@ async def access_needs(
             "Run the selected signup test or research mailbox relationships; "
             "email sends need separate approval.",
             "Confirm the selected workflow needs a Google mailbox before connecting it.",
+        ),
+        "ads.google": (
+            "Launch and look after one approved Google Search campaign in the founder's "
+            "own Ads account.",
+            "Ask for the ten-digit customer id; the founder accepts Tin's manager request "
+            "inside Google Ads.",
+        ),
+        "payments.stripe": (
+            "Read subscriptions, customers and invoices to see who pays, who stays and who churns.",
+            "The founder creates a read-only restricted key from Tin's link and pastes it in "
+            "Tin's page, never in chat.",
+        ),
+        "analytics.posthog": (
+            "Read events, properties, insights and bounded HogQL results to see where "
+            "signups activate or drop.",
+            "The founder approves read access in PostHog and picks the one project for this "
+            "business.",
         ),
     }
     needs = []
@@ -241,13 +277,23 @@ async def access_needs(
                 "permissions": provider.access_label,
                 "resource_selection": selection,
                 "estimated_setup": "about one minute in the browser",
-                "connect": {
-                    "name": "start_integration_connection",
-                    "arguments": {
-                        "project_id": str(project_id),
-                        "provider_key": provider.key,
-                    },
-                },
+                "connect": (
+                    {
+                        "name": "connect_google_ads",
+                        "arguments": {
+                            "project_id": str(project_id),
+                            "customer_id": "<ten-digit customer id>",
+                        },
+                    }
+                    if provider.key == "ads.google"
+                    else {
+                        "name": "start_integration_connection",
+                        "arguments": {
+                            "project_id": str(project_id),
+                            "provider_key": provider.key,
+                        },
+                    }
+                ),
             }
         )
     return needs
@@ -344,6 +390,7 @@ async def onboarding_experience(
                 text=text,
                 systems=systems,
                 timezone=inputs.get("timezone") or "UTC",
+                run_input=inputs,
             )
         view["setup_status"] = "waiting_for_selection"
     elif run:

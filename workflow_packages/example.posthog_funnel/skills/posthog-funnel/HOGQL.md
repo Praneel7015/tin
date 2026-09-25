@@ -8,7 +8,10 @@ use both exact window bounds, allowed event names and the validated exclusions, 
 rows while `eligible` checks the types and nonempty keys. Project UUID validity applies only
 when project identity semantics require it; run_id is a nonempty string, not necessarily UUID.
 Never hardcode the example project's events, IDs or dates. Actor/attempt identifiers stay inside
-PostHog. The output is one aggregate row; medians average the two middle observations.
+PostHog. The output is one aggregate row (the tail ends in `LIMIT 2`, so Tin's HogQL guard sees
+an explicit LIMIT and a second row is detected, not hidden); medians average the two middle
+observations. The whole query, e CTE included, must stay one SELECT of at most 8000 bytes
+without UNION or OFFSET, or Tin refuses it before PostHog sees it.
 
 The algorithm groups by actor AND attempt, uses strict timestamp comparisons and selects one
 deepest, earliest chain per actor. Missing array elements cannot advance a stage: length checks
@@ -18,9 +21,10 @@ Request limits still apply. Do not run the synthetic cases against the provider 
 those belong to separately authorized qualification. Use local synthetic responses to check the
 validator and compare the generated SQL against this resource before dispatch.
 
-On HTTP 200 completed results, call `read_funnel(response["data"], len(stage_events))`.
-Keep the original columns/results in evidence and report the returned stage rows. Also verify
-provider types are numeric for these named columns; reject missing, truncated or malformed data.
+Pass the query.hogql result unchanged to `read_funnel(result, len(stage_events))`; it is Tin's
+projection `{columns, types, rows, has_more, truncated}`. Keep the columns/rows in evidence and
+report the returned stage rows. Also verify the reported types are numeric for these named
+columns; reject missing, truncated or malformed data.
 An error or inconsistent row is unavailable, never zero. Every required window must pass the ordinary case.
 
 ```python
@@ -92,14 +96,20 @@ def funnel_tail(steps):
             f"if(metrics.n{b}=0,NULL,(arrayElement(metrics.d{a}{b},intDiv(metrics.n{b}+1,2))+arrayElement(metrics.d{a}{b},intDiv(metrics.n{b}+2,2)))/2.0) AS median_d{a}{b}"
         )
     cols += ["metrics.order_violations", "metrics.duplicate_choices"]
-    return ",\n" + ",\n".join(ctes) + "\nSELECT " + ",".join(cols) + " FROM raw CROSS JOIN metrics"
+    return (
+        ",\n"
+        + ",\n".join(ctes)
+        + "\nSELECT "
+        + ",".join(cols)
+        + " FROM raw CROSS JOIN metrics LIMIT 2"
+    )
 
 
 def read_funnel(data, stages):
     import math
 
     columns = data.get("columns")
-    rows = data.get("results")
+    rows = data.get("rows")
     expected = [
         name for i in range(1, stages + 1) for name in (f"raw{i}", f"eligible{i}", f"actors{i}")
     ]
@@ -113,7 +123,7 @@ def read_funnel(data, stages):
         or len(rows[0]) != len(columns)
     ):
         raise ValueError("unexpected funnel result schema")
-    if data.get("error") or data.get("hasMore") or data.get("query_status"):
+    if data.get("has_more") is not False or data.get("truncated") is not False:
         raise ValueError("incomplete provider result")
     r = dict(zip(columns, rows[0]))
     for name in expected:

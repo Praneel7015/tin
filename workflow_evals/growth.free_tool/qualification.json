@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "assumptions": [
+    "The connected GitHub repository is the product's own code and fits the declared 1000-file, 100 MB snapshot limit.",
+    "Demand is inferred only from search results the run observed; there is no keyword-volume provider in this package. Labels are strong, weak or none, never numbers.",
+    "Each case names the repository shape it needs; see README.md. Cases are specifications for an authorized evaluation, not evidence that a run passed."
+  ],
+  "cost_drivers": [
+    "One bounded Codex session under the existing pinned pricing and spending ceiling; no managed-model routes or provider services.",
+    "Hosted web searches are billed per call; the skill caps a run at 12 candidate phrases, 24 searches and 16 page fetches.",
+    "Repository reading grows with snapshot size up to the declared limit and the 1800-second sandbox timeout."
+  ],
+  "effects": [
+    "Read-only GitHub repository snapshot through infra.github contents.read.",
+    "Hosted web search of public pages; no logins, form submissions or messages.",
+    "One run-owned reports/free-tool/<run_id>.md in project state. No pull request, publication, repository change or workflow start."
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "Repository with reusable, public-safe domain logic (for example an invoice or VAT-number format validator) and a product page naming its buyer. Require one winner with URL-backed demand, path:line citations and a 60-day check.",
+      "inputs": {
+        "product_url": "https://example.com/",
+        "focus": "",
+        "exclude": ""
+      },
+      "expect": {
+        "contains": [
+          "# Free tool pick",
+          "Status: complete",
+          "## The buyer",
+          "## Pick",
+          "- Built from:",
+          "- Target phrase:",
+          "- Check after 60 days:",
+          "## Rejected",
+          "## Next steps",
+          "## What this run did not check"
+        ],
+        "excludes": [
+          "Status: incomplete",
+          "No tool worth building",
+          "searches per month",
+          "monthly searches",
+          "search volume of"
+        ]
+      }
+    },
+    {
+      "id": "thin_repository",
+      "description": "Repository that is CRUD, auth and billing glue with no reusable input-to-output logic, in a category where every tool phrase is crowded or has no demand. A trusted no is a complete result, not a failure.",
+      "inputs": {
+        "product_url": "https://example.com/"
+      },
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "No tool worth building",
+          "## Rejected"
+        ],
+        "excludes": [
+          "Status: incomplete",
+          "- Built from:"
+        ]
+      }
+    },
+    {
+      "id": "sensitive_logic_vetoed",
+      "description": "Plausible but unusable: the most tool-like code is the product's proprietary fraud or pricing score. It must be rejected as sensitive-logic even though a checker built on it would be cheap and searched for.",
+      "inputs": {
+        "product_url": "https://example.com/",
+        "exclude": ""
+      },
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "sensitive-logic"
+        ],
+        "excludes": [
+          "Status: incomplete"
+        ]
+      }
+    },
+    {
+      "id": "crowded_phrase_rejected",
+      "description": "Repository whose only reusable code is a generic formatter (for example JSON or Markdown) where the first results page is held by large established tool sites. The phrase must be rejected as crowded, not picked.",
+      "inputs": {
+        "product_url": "https://example.com/"
+      },
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "crowded"
+        ],
+        "excludes": [
+          "Status: incomplete"
+        ]
+      }
+    },
+    {
+      "id": "exclude_is_honoured",
+      "description": "Same repository as ordinary with calculators ruled out by the founder. Calculator ideas appear only in Rejected as excluded.",
+      "inputs": {
+        "product_url": "https://example.com/",
+        "exclude": "No calculators."
+      },
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "excluded"
+        ],
+        "excludes": [
+          "Status: incomplete"
+        ]
+      }
+    },
+    {
+      "id": "already_shipped_is_not_repeated",
+      "description": "Product site or repository marketing app already lists free tools (for example a /tools page). The strongest-looking phrase matches one of them; it must be listed under The buyer and rejected as already-shipped, never picked.",
+      "inputs": {
+        "product_url": "https://example.com/"
+      },
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "already-shipped"
+        ],
+        "excludes": [
+          "Status: incomplete",
+          "None found"
+        ]
+      }
+    }
+  ],
+  "rubric": [
+    {
+      "id": "demand_first",
+      "question": "Does every candidate start from a searched phrase with cited result URLs, rather than from code nobody searches for?"
+    },
+    {
+      "id": "grounded_code",
+      "question": "Does each Built from path:line exist in the snapshot and actually perform the core step of the proposed tool?"
+    },
+    {
+      "id": "honest_labels",
+      "question": "Do the demand, winnability and build-cost labels follow SCORING.md from the cited evidence, with no invented volumes or rankings?"
+    },
+    {
+      "id": "safe_to_publish",
+      "question": "Would the winning tool run without customer data, credentials or proprietary logic, and does the report avoid copying any of them?"
+    },
+    {
+      "id": "buildable_next_step",
+      "question": "Could a founder hand the project-task instruction to a coding agent and get the single tool page without further research?"
+    }
+  ]
+}

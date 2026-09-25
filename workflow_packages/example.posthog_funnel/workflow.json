@@ -4,7 +4,7 @@
     "key": "example.posthog_funnel",
     "title": "Inspect a PostHog funnel",
     "description": "Explore event definitions and report one bounded funnel with reproducible queries and explicit data limitations.",
-    "version": "1.0.1",
+    "version": "2.0.0",
     "executor": "codex.procedure",
     "schedule_modes": [
       "on_demand"
@@ -16,12 +16,6 @@
         "project_id": {
           "type": "string",
           "format": "uuid"
-        },
-        "posthog_project_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 20,
-          "title": "PostHog project ID"
         },
         "question": {
           "type": "string",
@@ -44,7 +38,6 @@
       },
       "required": [
         "project_id",
-        "posthog_project_id",
         "question",
         "start_date",
         "end_date"
@@ -52,10 +45,10 @@
     },
     "integration_requirements": [
       {
-        "provider_key": "custom.api.posthog",
+        "provider_key": "analytics.posthog",
         "capabilities": [
-          "http.read",
-          "http.write"
+          "query.read",
+          "definitions.read"
         ],
         "required": true
       }
@@ -78,7 +71,7 @@
       },
       "services": {
         "analytics": {
-          "provider_key": "custom.api.posthog",
+          "provider_key": "analytics.posthog",
           "max_calls": 8,
           "max_response_bytes": 32000
         }

@@ -11,33 +11,32 @@ from decimal import Decimal, InvalidOperation
 from tin_lite.billing_contracts import NANOS_PER_DOLLAR, BillingError, digest, token_charge
 
 CARD = {
-    "id": "tin-native-supplier-2026-09-14-v1",
+    "id": "tin-native-supplier-2026-09-23-v1",
     "source": "https://developers.openai.com/api/docs/pricing",
     "provider": "openai",
     "service_tier": "default",
     "long_context_above_input_tokens": 272_000,
     "models": {
-        "gpt-5.6-luna": {
-            "standard": {"input": 200, "cached_input": 20, "cache_write": 250, "output": 1200},
-            "long_context": {"input": 400, "cached_input": 40, "cache_write": 500, "output": 1800},
+        "gpt-6-luna": {
+            "standard": {"input": 100, "cached_input": 10, "cache_write": 125, "output": 500},
+            "long_context": {"input": 200, "cached_input": 20, "cache_write": 250, "output": 750},
         },
-        "gpt-6-astra": {
-            "standard": {
-                "input": 10_000,
-                "cached_input": 1000,
-                "cache_write": 12_500,
-                "output": 50_000,
-            },
+        "gpt-6-sol": {
+            "standard": {"input": 2000, "cached_input": 200, "cache_write": 2500, "output": 10_000},
             "long_context": {
-                "input": 20_000,
-                "cached_input": 2000,
-                "cache_write": 25_000,
-                "output": 75_000,
+                "input": 4000,
+                "cached_input": 400,
+                "cache_write": 5000,
+                "output": 15_000,
             },
         },
     },
     "web_search_call_nanos": 10_000_000,
-    "tools": {"dataforseo": "provider_reported_task_cost_usd"},
+    "tools": {
+        "dataforseo": "provider_reported_task_cost_usd",
+        "gak": "provider_reported_task_cost_usd",
+        "google_ads": "provider_reported_task_cost_usd",
+    },
 }
 
 NATIVE_EXECUTORS = {
@@ -52,6 +51,9 @@ NATIVE_EXECUTORS = {
     "organic.audit",
     "organic.keyword_plan",
     "growth.onboarding_plan",
+    "ads.assessment",
+    "ads.launch",
+    "ads.monitor",
 }
 PARENT_EXECUTORS = {"organic.traffic_system", "growth.onboarding"}
 
@@ -98,6 +100,17 @@ def service_terms(definition, *, inputs=None):
     elif executor == "growth.onboarding_plan":
         # About twenty-five bounded model steps; each reserves its conservative ceiling first.
         maximum = 8 * NANOS_PER_DOLLAR
+    elif executor == "ads.assessment":
+        # The founder's ceiling bounds model steps and provider research together.
+        maximum = amount_nanos(inputs.get("max_cost_usd", 6))
+        kinds = ["native_model", "tool"]
+    elif executor == "ads.launch":
+        # Model steps only; the Google Ads API reports no cost and is receipted at zero.
+        maximum = amount_nanos(inputs.get("max_cost_usd", 4))
+        kinds = ["native_model", "tool"]
+    elif executor == "ads.monitor":
+        maximum = amount_nanos(inputs.get("max_cost_usd", 2))
+        kinds = ["native_model", "tool"]
     if type(maximum) is not int or maximum <= 0:
         raise BillingError("invalid_budget", "The workflow spending maximum is invalid.")
     return {

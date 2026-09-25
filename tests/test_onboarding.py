@@ -110,6 +110,9 @@ def test_tin_state_mirrors_the_start_gates_when_nothing_is_configured() -> None:
         "analytics.gsc": False,
         "infra.github": False,
         "workspace.google": False,
+        "ads.google": False,
+        "payments.stripe": False,
+        "analytics.posthog": False,
     }
     assert state["running"] == [] and state["recent_runs"] == []
 
@@ -184,6 +187,9 @@ def test_tin_state_opens_doors_as_settings_and_connections_arrive() -> None:
         "analytics.gsc": False,
         "infra.github": True,
         "workspace.google": False,
+        "ads.google": False,
+        "payments.stripe": False,
+        "analytics.posthog": False,
     }
 
 
@@ -194,7 +200,7 @@ def test_tin_state_orders_by_system_then_key_and_skips_private_workflows() -> No
             Workflow(
                 **{
                     **item.__dict__,
-                    "system_order": {"organic-traffic": 1, "cold-outreach": 2}.get(
+                    "system_order": {"organic-traffic": 1, "cold-outreach": 2, "paid-ads": 3}.get(
                         item.definition.get("system")
                     ),
                 }
@@ -210,7 +216,7 @@ def test_tin_state_orders_by_system_then_key_and_skips_private_workflows() -> No
     assert keys[:first_unassigned] == sorted(
         keys[:first_unassigned],
         key=lambda key: (
-            {"organic-traffic": 1, "cold-outreach": 2}[_rows(state)[key]["system"]],
+            {"organic-traffic": 1, "cold-outreach": 2, "paid-ads": 3}[_rows(state)[key]["system"]],
             key,
         ),
     )
@@ -312,3 +318,11 @@ async def test_onboarding_guidance_is_free_even_in_an_enrolled_workspace(billed,
     )
     result = structured(await server.call_tool("get_started", {"project_id": str(f.project.id)}))
     assert result["first_workflow"]["available"] is True
+
+
+def test_public_article_is_hidden_from_new_recommendations_but_retains_its_contract():
+    workflow = next(w for w in WORKFLOWS if w.key == "content.public_article")
+    assert workflow.definition["procedure"]
+    state = tin_state(settings=_Settings(), workflows=WORKFLOWS, connections=[])
+    assert workflow.key not in _rows(state)
+    assert next(w for w in BUILTIN_WORKFLOWS if w.id == workflow.id).executor == workflow.executor

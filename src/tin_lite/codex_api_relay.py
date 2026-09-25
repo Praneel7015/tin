@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import secrets
 from datetime import UTC, datetime
@@ -35,6 +36,8 @@ from tin_lite.codex_web_evidence import WebEvidence
 from tin_lite.usage_capture import count, object_value
 from tin_lite.workflow_costs import session_funded
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 UPSTREAM = "https://api.openai.com/v1"
@@ -44,6 +47,17 @@ class AdmissionStopped(HTTPException):
     def __init__(self, status, detail, *, key, reason):
         super().__init__(status, detail)
         self.key, self.reason = key, reason
+
+
+class RelayRejected(HTTPException):
+    """A fixed rejection that also names an allowlisted reason for operator logs."""
+
+    def __init__(self, status, detail, *, reason):
+        super().__init__(status, detail)
+        self.reason = reason
+
+
+CONTRACT_REJECTION = "This API request exceeds its reserved execution contract"
 
 
 def web_usage(output, protocol):
@@ -193,7 +207,7 @@ def request_body(raw: bytes, operation: str, contract=CONTRACT):
 
 
 def request_identity(headers, raw, operation):
-    # Codex 0.153.4 uses its THREAD id for x-client-request-id, not a per-call id.
+    # Codex 0.156.1 uses its THREAD id for x-client-request-id, not a per-call id.
     # Within our single-turn controller, a new model step changes explicit context.
     # Bind identical-request rejection to the actual turn/window as well as bytes.
     try:
@@ -336,12 +350,13 @@ class CodexAPIRelay:
                 or budget.get("pricing") != record.get("pricing")
             ):
                 raise HTTPException(403, "Codex API execution requires its reserved credit budget")
-            if enrolled and (
-                operation != "responses"
-                or request_bytes > budget["request_maximum_input_bytes"]
-                or budget.get("codex_contract", CONTRACT) != contract
-            ):
-                raise HTTPException(422, "This API request exceeds its reserved execution contract")
+            if enrolled:
+                if operation != "responses":
+                    raise RelayRejected(422, CONTRACT_REJECTION, reason="operation_not_allowed")
+                if request_bytes > budget["request_maximum_input_bytes"]:
+                    raise RelayRejected(422, CONTRACT_REJECTION, reason="request_too_large")
+                if budget.get("codex_contract", CONTRACT) != contract:
+                    raise RelayRejected(422, CONTRACT_REJECTION, reason="contract_mismatch")
             if await conn.fetchval(
                 "SELECT EXISTS(SELECT 1 FROM effect_receipts WHERE execution_key=$1)", key
             ):
@@ -506,6 +521,13 @@ class CodexAPIRelay:
         if upstream.status_code != 200:
             status = upstream.status_code
             await upstream.aclose()
+            # Provider bodies can echo prompt content; keep only the status code.
+            logger.warning(
+                "Codex API upstream rejected run=%s operation=%r upstream_status=%s",
+                run_id,
+                operation,
+                status,
+            )
             raise HTTPException(
                 429 if status == 429 else 502,
                 "OpenAI rejected the Codex API request; the attempt will not be replayed",
@@ -619,10 +641,28 @@ async def relay_codex_api(run_id: UUID, operation: str, request: Request):
     async for chunk in request.stream():
         raw.extend(chunk)
         if len(raw) > DIAGRAM_CONTRACT["max_request_bytes"]:
+            _log_rejection(run_id, operation, 413, "Codex API request exceeds its context bound")
             raise HTTPException(413, "Codex API request exceeds its context bound")
     try:
         return await asyncio.wait_for(
             relay.relay(run_id, grant, bytes(raw), operation, request.headers), timeout=200
         )
     except TimeoutError:
+        _log_rejection(run_id, operation, 504, "Codex API request outcome is unconfirmed")
         raise HTTPException(504, "Codex API request outcome is unconfirmed") from None
+    except HTTPException as exc:
+        reason = getattr(exc, "reason", None)
+        _log_rejection(run_id, operation, exc.status_code, exc.detail, reason)
+        raise
+
+
+def _log_rejection(run_id, operation, status, detail, reason=None):
+    # Details are Tin's own fixed messages; never log request bodies or grants.
+    logger.warning(
+        "Codex API relay rejected run=%s operation=%r status=%s reason=%s detail=%s",
+        run_id,
+        operation,
+        status,
+        reason,
+        detail,
+    )

@@ -19,10 +19,17 @@ from tin_lite.domain import (
     IntegrationConnection,
     Workflow,
 )
-from tin_lite.executor_gates import keyword_plan_gate, organic_audit_gate, organic_system_gate
+from tin_lite.executor_gates import (
+    google_ads_gate,
+    keyword_plan_gate,
+    organic_audit_gate,
+    organic_system_gate,
+    paid_ads_gate,
+)
 from tin_lite.integrations import parse_integration_requirements, registered_integrations
 from tin_lite.keyword_plan import KEY as KEYWORD_KEY
 from tin_lite.organic_audit import AUDIT_KEY
+from tin_lite.paid_ads import KEY as PAID_ADS_KEY
 from tin_lite.workflow_inputs import client_input_schema
 from tin_lite.workflow_prerequisites import project_readiness
 
@@ -56,6 +63,8 @@ def tin_state(
         if workflow.project_id is not None or workflow.key in ONBOARDING_WORKFLOW_KEYS:
             continue
         definition = workflow.definition or {}
+        if not definition.get("public_discovery", True):
+            continue
         requirements = parse_integration_requirements(definition.get("integration_requirements"))
         required_providers = sorted({item.provider_key for item in requirements if item.required})
         missing = [provider for provider in required_providers if provider not in connected]
@@ -150,6 +159,10 @@ def _executor_reason(executor: str, settings: Any) -> str | None:
         return keyword_plan_gate(settings)
     if executor == organic_system.KEY:
         return organic_system_gate(settings)
+    if executor == PAID_ADS_KEY:
+        return paid_ads_gate(settings)
+    if executor in {"ads.launch", "ads.monitor"}:
+        return google_ads_gate(settings)
     return None
 
 

@@ -394,7 +394,7 @@ async def test_live_isolated_codex_controller(scenario):
             "chown -R user:user /home/user/project",
             user="root",
         )
-        config = """model = "gpt-6-astra"
+        config = """model = "gpt-6-sol"
 model_provider = "synthetic"
 [model_providers.synthetic]
 name = "Synthetic test only"
@@ -481,7 +481,7 @@ args=["-c", "cp /home/user/.codex/auth.json /home/user/project/leak"]
         assert not facts["runtime_write"], facts
         assert facts["usage"], facts
         assert facts["usage"][-1]["final"]
-        assert facts["usage"][-1]["model"] == "gpt-6-astra"
+        assert facts["usage"][-1]["model"] == "gpt-6-sol"
         success = scenario in {
             "success",
             "api_context",
@@ -531,3 +531,73 @@ args=["-c", "cp /home/user/.codex/auth.json /home/user/project/leak"]
         await sandbox.kill()
     with pytest.raises(SandboxNotFoundException):
         await AsyncSandbox.connect(sandbox.sandbox_id, api_key=key)
+
+
+def test_controller_prints_bounded_narration_but_not_structured_results(monkeypatch, capsys):
+    bridge = load_sandbox_module("procedure_app_server")
+    bridge._progress("Signed in.")
+    assert capsys.readouterr().out == ""  # Legacy controllers keep their stream unchanged.
+    monkeypatch.setattr(bridge, "ISOLATED", True)
+    bridge._progress("Sign-in  succeeded.\nNext: write the report.")
+    bridge._progress('{"summary": "done", "message": "ok"}')
+    bridge._progress("   ")
+    bridge._progress("x" * 5000)
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line.partition("=")[2]) for line in lines] == [
+        {"text": "Sign-in succeeded. Next: write the report."},
+        {"text": "x" * bridge.PROGRESS_MAX_CHARS},
+    ]
+    assert all(line.startswith("TIN_CODEX_PROGRESS=") for line in lines)
+
+
+async def test_controller_narration_is_redacted_and_malformed_frames_are_ignored(monkeypatch):
+    received = []
+    payload = base64.b64encode(json.dumps({"summary": "done", "message": "ok"}).encode()).decode()
+    output = f"TIN_PROCEDURE_COMMIT_SHA={'c' * 40}\nTIN_PROCEDURE_RESULT={payload}\n"
+
+    async def command(cmd, **kwargs):
+        if cmd.endswith(" check"):
+            return SimpleNamespace(stdout="TIN_ISOLATION_READY_V1")
+        if cmd.endswith("codex_api_config.py --check"):
+            return SimpleNamespace(stdout="TIN_CODEX_API_READY_V1")
+        frames = [
+            "TIN_CODEX_PROGRESS=not-json",
+            'TIN_CODEX_PROGRESS={"text": 7}',
+            "TIN_CODEX_PROGRESS="
+            + json.dumps({"text": "Signed in with synthetic-relay-grant; writing the report."}),
+        ]
+        await kwargs["on_stdout"]("\n".join(frames) + "\n")
+        return SimpleNamespace(wait=AsyncMock(return_value=SimpleNamespace(stdout=output)))
+
+    sandbox = SimpleNamespace(
+        commands=SimpleNamespace(run=command),
+        files=SimpleNamespace(write=AsyncMock()),
+        kill=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "tin_lite.e2b_runtime.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
+    )
+    runtime = E2BRuntime(
+        api_key="synthetic",
+        template="default",
+        timeout_seconds=900,
+        egress_allow_hosts=("proxy.test",),
+    )
+
+    async def progress(text):
+        received.append(text)
+
+    input = SandboxProcedureInput(
+        **base_values(),
+        context={},
+        output_path="report.md",
+        output_max_bytes=1000,
+        isolated=True,
+        usage_sink=AsyncMock(),
+        progress_sink=progress,
+        api_url="https://tin.test/relay",
+        api_grant="synthetic-relay-grant",
+    )
+    result = await runtime.run_procedure_and_kill(sandbox_id="sandbox", run_input=input)
+    assert result.summary == "done"
+    assert received == ["Signed in with [redacted]; writing the report."]

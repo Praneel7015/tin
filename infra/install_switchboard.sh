@@ -199,6 +199,9 @@ ExecStartPre=/usr/bin/find /var/lib/tin-lite-proxy-grants -type f -delete
 ExecStart=/usr/local/bin/uv run --frozen --no-dev tin-lite serve
 Restart=always
 RestartSec=5
+# SIGTERM drains the Temporal worker (TIN_LITE_WORKER_GRACEFUL_SHUTDOWN_SECONDS,
+# default 300s) while HTTP keeps serving, then HTTP gets 20s. Stay above both.
+TimeoutStopSec=420
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

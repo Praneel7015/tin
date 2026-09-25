@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "assumptions": [
+    "The caller passes only one release's entries, taken from the repository CHANGELOG, release notes or git log; voice notes paraphrase the project's writing style guide.",
+    "Fixture pytest covers ID, link, number and clipped-text validation offline; these cases judge live model quality."
+  ],
+  "cost_drivers": [
+    "Two gpt-6-luna calls at most, each with at most 32000 input bytes; changelog length and the number of announced changes drive tokens."
+  ],
+  "effects": [
+    "Writes reports/RELEASE_ANNOUNCE.md in this project. Nothing is posted, published or emailed."
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "Two user-facing changes and one internal refactor, with a release link.",
+      "inputs": {
+        "changelog": "## 2.4.0\n- Added CSV export for customer analytics\n- Fixed session timeout on Safari 17\n- Refactored database connection pool internals\n- Bumped pytest to 9.1",
+        "product_name": "Loopwire",
+        "release_url": "https://loopwire.example/changelog/2-4-0",
+        "audience": "Developers who already use Loopwire for API rate limiting",
+        "tone": "casual",
+        "voice_notes": "Short sentences. No exclamation marks. At most one hashtag."
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "# Release announcements for Loopwire",
+          "## X post",
+          "## LinkedIn post",
+          "## Newsletter email",
+          "CSV",
+          "Safari",
+          "https://loopwire.example/changelog/2-4-0",
+          "internal change(s) left out"
+        ],
+        "excludes": ["connection pool", "pytest"]
+      }
+    },
+    {
+      "id": "internal_only",
+      "description": "A plausible release whose entries are all internal must fail rather than announce invented user value.",
+      "inputs": {
+        "changelog": "## 2.4.1\n- Refactor rate limiter internals\n- CI: cache uv downloads\n- Bump httpx to 0.29",
+        "product_name": "Loopwire"
+      },
+      "expected_status": "failed"
+    },
+    {
+      "id": "unsafe_link",
+      "description": "A release link that could break out of an attribute is rejected before any model call.",
+      "inputs": {
+        "changelog": "- Added CSV export for customer analytics",
+        "product_name": "Loopwire",
+        "release_url": "https://loopwire.example/r\" onclick=\"x"
+      },
+      "expected_status": "failed"
+    }
+  ],
+  "rubric": [
+    {"id": "grounding", "question": "Does every announced change, benefit and number appear in the changelog, with nothing invented?"},
+    {"id": "audience", "question": "Is the copy written for existing users and subscribers, and does the email read as a newsletter update rather than a cold pitch?"},
+    {"id": "voice", "question": "Does the copy follow the tone and voice notes?"}
+  ]
+}

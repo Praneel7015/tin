@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "assumptions": [
+    "The project's wiki/INDEX.md holds a ### Code map written by product.code_map with an **Integrations** block. Its lines are the only integration inventory; the website is never used to infer integrations.",
+    "Marketplace rules come from MARKETPLACES.md (checked 2026-09-23) and are rechecked once per pick against the official source. Marketplace search pages and listings are public and change daily, so presence and competitor counts are observations with a date, not fixtures.",
+    "Usage gates such as Slack's 10 active workspaces or HubSpot's 3 installs are unknown unless memory states a sourced figure; the report asks the founder to confirm them."
+  ],
+  "cost_drivers": [
+    "One bounded Codex session under the existing procedure ceiling, with no managed-model routes and no connected-provider calls.",
+    "Web actions: at most 40 per run (two presence lookups and one competitor lookup per marketplace, page checks, one rules recheck per pick). The number of storefront integrations in the Code map, at most 11 marketplaces, drives the count.",
+    "Weekly runs after the first mostly recheck presence, so they cost less than the first run. No measured live cost yet."
+  ],
+  "effects": [
+    "Writes one run-owned reports/outreach/marketplaces/<run_id>.md in project state.",
+    "Reads wiki/INDEX.md, reports/GROWTH_ONBOARDING_PLAN.md, the writing style guide, earlier reports in reports/outreach/marketplaces/ and public web pages through fenced web search.",
+    "No account creation, sign-in, form submission, listing submission, email, publication, memory edits or workflow starts."
+  ],
+  "rubric": [
+    { "id": "shape", "question": "Is every integration used only as the product's own vendor (billing, email delivery, hosting, models, login) kept out of the picks and listed under Not a storefront?" },
+    { "id": "evidence", "question": "Does every listed/absent presence, competitor listing and gate result cite a URL or path:line under Evidence, with failed lookups marked unknown rather than absent?" },
+    { "id": "packet", "question": "Is each pick's copy about what the integration does for the partner's users, within every stated field limit, and free of claims memory cannot support?" },
+    { "id": "decision", "question": "Does the first sentence tell the founder exactly what to submit this week, or the one change that unblocks the best blocked marketplace?" },
+    { "id": "no_repeat", "question": "Is a marketplace recommended in an earlier report and still not listed reported as waiting on the founder, with that report's date and path, instead of getting a new packet?" },
+    { "id": "voice", "question": "Does the listing copy follow the project's writing style guide when present and respect the growth plan's hard no's, within every field limit?" }
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "A project whose Code map lists a GitHub App, Gmail and Calendar read through Google OAuth, and Stripe for its own billing. Expect GitHub and Google Workspace rows, Stripe under Not a storefront, and at least one pick with a filled form.",
+      "inputs": { "product_url": "", "max_picks": 3, "skip": "" },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "## Submit this week",
+          "## Shelf check",
+          "## Not a storefront",
+          "vendor_side",
+          "github",
+          "google_workspace",
+          "Chars / limit",
+          "```tin-listings-state"
+        ],
+        "excludes": ["Status: diagnostic", "### 1. Stripe App Marketplace"]
+      }
+    },
+    {
+      "id": "skip_top_pick",
+      "description": "The ordinary project with GitHub skipped by the founder. GitHub stays in the shelf table and is never a pick.",
+      "inputs": { "product_url": "", "max_picks": 2, "skip": "GitHub: we will list it ourselves next month." },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: complete", "## Shelf check", "github"],
+        "excludes": ["### 1. GitHub Marketplace", "### 2. GitHub Marketplace"]
+      }
+    },
+    {
+      "id": "vendor_only",
+      "description": "A project whose Code map integrations are only Stripe billing, Resend email and OpenAI. Nothing is a storefront, so there is nothing to submit and no invented listing.",
+      "inputs": { "product_url": "", "max_picks": 3, "skip": "" },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Nothing to submit this week", "## Not a storefront", "vendor_side"],
+        "excludes": ["Chars / limit", "Status: diagnostic"]
+      }
+    },
+    {
+      "id": "no_code_map",
+      "description": "wiki/INDEX.md exists but has no ### Code map. The run delivers the diagnostic and names the workflow to run first instead of guessing integrations from the website.",
+      "inputs": { "product_url": "https://example.com", "max_picks": 3, "skip": "" },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: diagnostic", "product.code_map"],
+        "excludes": ["## Submit this week", "## Shelf check"]
+      }
+    }
+  ]
+}

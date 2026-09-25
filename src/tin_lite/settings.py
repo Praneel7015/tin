@@ -58,7 +58,7 @@ class Settings(BaseSettings):
         default="Tin <hello@tin.computer>", alias="TIN_LITE_WELCOME_EMAIL_REPLY_TO"
     )
     posthog_host: str = Field(default="https://us.i.posthog.com", alias="TIN_LITE_POSTHOG_HOST")
-    luna_model: str = Field(default="gpt-5.6-luna", alias="TIN_LITE_LUNA_MODEL")
+    luna_model: str = Field(default="gpt-6-luna", alias="TIN_LITE_LUNA_MODEL")
     luna_base_url: str = Field(default="https://api.openai.com/v1", alias="TIN_LITE_LUNA_BASE_URL")
     luna_timeout_seconds: float = Field(default=90, alias="TIN_LITE_LUNA_TIMEOUT")
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     )
     dataforseo_login: SecretStr | None = Field(default=None, alias="DATAFORSEO_LOGIN")
     dataforseo_password: SecretStr | None = Field(default=None, alias="DATAFORSEO_PASSWORD")
+    # Operator-run Google Ads Keyword Planner service (gak). An HTTPS origin, or plain HTTP on
+    # loopback only when the private-address flag is set explicitly.
+    gak_url: str | None = Field(default=None, alias="TIN_LITE_GAK_URL")
+    gak_token: SecretStr | None = Field(default=None, alias="TIN_LITE_GAK_TOKEN")
+    gak_allow_private: bool = Field(default=False, alias="TIN_LITE_GAK_ALLOW_PRIVATE")
     organic_audit_max_cost_usd: float = Field(
         default=0, ge=0, le=25, allow_inf_nan=False, alias="TIN_LITE_ORGANIC_AUDIT_MAX_COST_USD"
     )
@@ -97,6 +102,32 @@ class Settings(BaseSettings):
     )
     content_plan_max_cost_usd: float = Field(
         default=0, ge=0, le=5, allow_inf_nan=False, alias="TIN_LITE_CONTENT_PLAN_MAX_COST_USD"
+    )
+    paid_ads_max_cost_usd: float = Field(
+        default=0, ge=0, le=25, allow_inf_nan=False, alias="TIN_LITE_PAID_ADS_MAX_COST_USD"
+    )
+    # Tin's Google Ads manager account. The refresh token is a deployment credential minted
+    # once by an operator against the Google OAuth client below; customers link their own
+    # account to the manager by accepting an invitation, so no customer token is ever stored.
+    google_ads_manager_customer_id: str | None = Field(
+        default=None, alias="TIN_LITE_GOOGLE_ADS_MANAGER_CUSTOMER_ID"
+    )
+    google_ads_manager_refresh_token: SecretStr | None = Field(
+        default=None, alias="TIN_LITE_GOOGLE_ADS_MANAGER_REFRESH_TOKEN"
+    )
+    google_ads_developer_token: SecretStr | None = Field(
+        default=None, alias="TIN_LITE_GOOGLE_ADS_DEVELOPER_TOKEN"
+    )
+    # The OAuth client the manager refresh token was minted against. Defaults to Tin's Google
+    # OAuth client; set both when the token came from another client (a migration case).
+    google_ads_oauth_client_id: str | None = Field(
+        default=None, alias="TIN_LITE_GOOGLE_ADS_OAUTH_CLIENT_ID"
+    )
+    google_ads_oauth_client_secret: SecretStr | None = Field(
+        default=None, alias="TIN_LITE_GOOGLE_ADS_OAUTH_CLIENT_SECRET"
+    )
+    google_ads_api_version: str = Field(
+        default="v25", pattern=r"^v\d{1,3}$", alias="TIN_LITE_GOOGLE_ADS_API_VERSION"
     )
 
     integration_credential_key: SecretStr | None = Field(
@@ -107,6 +138,16 @@ class Settings(BaseSettings):
     )
     google_oauth_client_secret: SecretStr | None = Field(
         default=None, alias="TIN_LITE_GOOGLE_OAUTH_CLIENT_SECRET"
+    )
+    # PostHog OAuth uses a Client ID Metadata Document Tin serves at a fixed path on
+    # TIN_LITE_PUBLIC_URL; PostHog fetches it, so there is no client secret to configure.
+    posthog_oauth_enabled: bool = Field(default=False, alias="TIN_LITE_POSTHOG_OAUTH_ENABLED")
+    # Optional phvt_ token from PostHog organization settings; it links the client to that
+    # organization. It is published in the metadata document, so it is not a secret.
+    posthog_oauth_verification_token: str | None = Field(
+        default=None,
+        alias="TIN_LITE_POSTHOG_OAUTH_VERIFICATION_TOKEN",
+        pattern=r"^phvt_[A-Za-z0-9_-]{8,200}$",
     )
     github_app_slug: str | None = Field(default=None, alias="TIN_LITE_GITHUB_APP_SLUG")
     github_app_id: str | None = Field(default=None, alias="TIN_LITE_GITHUB_APP_ID")
@@ -140,6 +181,8 @@ class Settings(BaseSettings):
     private_workflow_projects_raw: str = Field(
         default="", alias="TIN_LITE_PRIVATE_WORKFLOW_PROJECTS"
     )
+    # Any project may run private workflows; requires billing so each run spends credits.
+    private_workflows_open: bool = Field(default=False, alias="TIN_LITE_PRIVATE_WORKFLOWS_OPEN")
     codex_api_projects_raw: str = Field(default="", alias="TIN_LITE_CODEX_API_PROJECTS")
     e2b_browser_template: str = Field(
         default="tin-lite-codex-browser", alias="TIN_LITE_E2B_BROWSER_TEMPLATE"
@@ -148,6 +191,12 @@ class Settings(BaseSettings):
         default="tin-lite-codex-studio", alias="TIN_LITE_E2B_STUDIO_TEMPLATE"
     )
     task_queue: str = Field(default="tin-lite-checkpoint-a", alias="TIN_LITE_TASK_QUEUE")
+    # On SIGTERM the worker stops polling and in-flight activities get this long to
+    # finish before Temporal cancels them. HTTP (including the Codex relay those
+    # activities call) keeps serving meanwhile; systemd TimeoutStopSec must exceed it.
+    worker_graceful_shutdown_seconds: int = Field(
+        default=300, ge=0, alias="TIN_LITE_WORKER_GRACEFUL_SHUTDOWN_SECONDS"
+    )
     switchboard_public_url: str = Field(
         default="http://127.0.0.1:8000", alias="TIN_LITE_PUBLIC_URL"
     )
@@ -181,6 +230,13 @@ class Settings(BaseSettings):
         from tin_lite.product_urls import validate_origin
 
         return validate_origin(value) if value is not None else None
+
+    @field_validator("gak_url")
+    @classmethod
+    def validate_gak_url(cls, value: str | None) -> str | None:
+        from tin_lite.gak import validate_base_url
+
+        return validate_base_url(value) if value is not None else None
 
     @field_validator("private_fonts_stylesheet_url")
     @classmethod
@@ -239,6 +295,8 @@ class Settings(BaseSettings):
             self.billing_enabled and self.billing_welcome_credits_enabled
         ):
             raise ValueError("Hosted credit defaults require billing and welcome credits enabled")
+        if self.private_workflows_open and not self.billing_enabled:
+            raise ValueError("Open private workflows require billing enabled")
         if self.billing_test_enabled and self.stripe_secret_key is not None:
             if not self.stripe_secret_key.get_secret_value().startswith(("sk_test_", "rk_test_")):
                 raise ValueError("Tin billing currently accepts Stripe test keys only")
@@ -279,6 +337,56 @@ class Settings(BaseSettings):
         if self.integration_credential_key is None and self.google_oauth_client_id is not None:
             raise ValueError(
                 "TIN_LITE_INTEGRATION_CREDENTIAL_KEY is required when Google OAuth is configured"
+            )
+        if self.posthog_oauth_enabled:
+            from urllib.parse import urlsplit
+
+            public = urlsplit(self.switchboard_public_url)
+            if self.integration_credential_key is None:
+                raise ValueError(
+                    "TIN_LITE_INTEGRATION_CREDENTIAL_KEY is required when PostHog OAuth is enabled"
+                )
+            if public.scheme != "https" or public.hostname in {None, "localhost", "127.0.0.1"}:
+                raise ValueError(
+                    "TIN_LITE_POSTHOG_OAUTH_ENABLED requires an https TIN_LITE_PUBLIC_URL that "
+                    "PostHog can fetch the client metadata document from"
+                )
+        ads_values = (self.google_ads_manager_customer_id, self.google_ads_manager_refresh_token)
+        if any(value is not None for value in ads_values):
+            if not all(value is not None for value in ads_values):
+                raise ValueError(
+                    "TIN_LITE_GOOGLE_ADS_MANAGER_CUSTOMER_ID and "
+                    "TIN_LITE_GOOGLE_ADS_MANAGER_REFRESH_TOKEN must be configured together"
+                )
+            ads_client = (self.google_ads_oauth_client_id, self.google_ads_oauth_client_secret)
+            if any(value is not None for value in ads_client) and not all(
+                value is not None for value in ads_client
+            ):
+                raise ValueError(
+                    "TIN_LITE_GOOGLE_ADS_OAUTH_CLIENT_ID and "
+                    "TIN_LITE_GOOGLE_ADS_OAUTH_CLIENT_SECRET must be configured together"
+                )
+            if self.google_oauth_client_id is None and self.google_ads_oauth_client_id is None:
+                raise ValueError(
+                    "TIN_LITE_GOOGLE_ADS_MANAGER_REFRESH_TOKEN requires the Google OAuth client "
+                    "it was minted against"
+                )
+            digits = self.google_ads_manager_customer_id.replace("-", "")
+            if not digits.isdigit() or len(digits) != 10:
+                raise ValueError(
+                    "TIN_LITE_GOOGLE_ADS_MANAGER_CUSTOMER_ID must be a ten-digit customer id"
+                )
+        if (self.gak_url is None) != (self.gak_token is None):
+            raise ValueError("TIN_LITE_GAK_URL and TIN_LITE_GAK_TOKEN must be configured together")
+        if self.gak_token is not None and len(self.gak_token.get_secret_value()) < 32:
+            raise ValueError("TIN_LITE_GAK_TOKEN must be at least 32 characters")
+        if (
+            self.gak_url is not None
+            and self.gak_url.startswith("http://")
+            and not self.gak_allow_private
+        ):
+            raise ValueError(
+                "TIN_LITE_GAK_URL over plain HTTP requires TIN_LITE_GAK_ALLOW_PRIVATE=true"
             )
         return self
 

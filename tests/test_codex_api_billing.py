@@ -26,7 +26,13 @@ from tin_lite.codex_api import (
     select_contract,
     token_hash,
 )
-from tin_lite.codex_api_pricing import RATE_CARD, REQUEST_MAXIMUM, api_terms, price_response
+from tin_lite.codex_api_pricing import (
+    RATE_CARD,
+    REQUEST_MAXIMUM,
+    api_terms,
+    isolated_v1_terms,
+    price_response,
+)
 from tin_lite.codex_api_relay import CodexAPIRelay, router
 from tin_lite.procedures import SandboxProfile
 from tin_lite.run_usage import read_run_usage
@@ -56,11 +62,11 @@ def facts(inputs=9250, outputs=117, cached=0, writes=9247, searches=0):
 
 def test_actual_pilot_usage_and_context_boundary():
     total = sum(price_response(RATE_CARD, facts(*usage))[0] for usage in GOLDEN)
-    assert total == 202_665_000
-    assert final_charge(total, 5_000_000_000) == 200_000_000
+    assert total == 40_533_000
+    assert final_charge(total, 5_000_000_000) == 40_000_000
     for inputs, band, rate, output in (
-        (272000, "standard", 10000, 50000),
-        (272001, "long_context", 20000, 75000),
+        (272000, "standard", 2000, 10000),
+        (272001, "long_context", 4000, 15000),
     ):
         amount, details = price_response(RATE_CARD, facts(inputs, 10, 0, 0, 2))
         assert details["context_band"] == band
@@ -96,8 +102,9 @@ async def paid_relay(
     if contract != SESSION_CONTRACT and q["terms"].get("codex_contract") == SESSION_CONTRACT:
         # These fixtures model already-issued v1/v3 quotes. Keep their old funding
         # and execution pins rather than quietly upgrading the tests to v4.
+        terms = api_terms(f.workflow.definition)
         q["terms"] = configured_terms(
-            api_terms(f.workflow.definition),
+            isolated_v1_terms(terms) if contract == CONTRACT else terms,
             f.workflow.definition,
             {"brief": "Explain the public docs"},
         )
@@ -183,17 +190,17 @@ async def test_paid_responses_settle_once_with_cache_write_pricing(billed):
         assert await f.billing.settle(run.id) is None  # Still executing.
         readout = await read_run_usage(database=f.db, run=run)
         prices = [x["api_list_price"]["total_nanos"] for x in readout["own"]["observations"]]
-        assert sum(prices) == 202_665_000
+        assert sum(prices) == 40_533_000
         assert Decimal(readout["inclusive_totals"]["known_api_list_price_usd"]) == Decimal(
-            "0.202665"
+            "0.040533"
         )
         assert readout["inclusive_totals"]["unpriced_observations"] == 0
         assert readout["rate_cards"][-1] == RATE_CARD
         await finish(f, run)
-        assert await f.billing.settle(run.id) == 200_000_000
-        assert await f.billing.settle(run.id) == 200_000_000
+        assert await f.billing.settle(run.id) == 40_000_000
+        assert await f.billing.settle(run.id) == 40_000_000
         charge = await f.billing.run_charge(run.id, ACTOR)
-        assert charge["charged_usd"] == "0.20" and charge["released_usd"] is None
+        assert charge["charged_usd"] == "0.04" and charge["released_usd"] is None
         assert charge["rate_card"] == RATE_CARD["id"]
         assert (
             await f.db.pool.fetchval("SELECT count(*) FROM billing_ledger WHERE kind='charge'") == 1
@@ -248,12 +255,40 @@ async def test_reconciliation_repairs_projection_gap_without_repurchase(billed):
         await relay.close()
 
 
-async def test_budget_context_and_compaction_bounds_before_dispatch(billed):
+async def test_budget_context_and_compaction_bounds_before_dispatch(billed, caplog):
     f = billed
     run, relay, client, sent = await paid_relay(f)
     try:
-        assert (await post(client, run, {**BODY, "input": "x" * 100001})).status_code == 422
-        assert (await post(client, run, operation="responses/compact")).status_code == 422
+        # A pinned v1 isolated run keeps its 100,000-byte request envelope.
+        with caplog.at_level("WARNING", logger="tin_lite.codex_api_relay"):
+            assert (await post(client, run, {**BODY, "input": "x" * 100001})).status_code == 422
+            assert (await post(client, run, operation="responses/compact")).status_code == 422
+            terms = json.loads(
+                await f.db.pool.fetchval(
+                    "SELECT terms FROM billing_run_budgets WHERE run_id=$1", run.id
+                )
+            )
+            await f.db.pool.execute(
+                "UPDATE billing_run_budgets SET terms=$2::jsonb WHERE run_id=$1",
+                run.id,
+                json.dumps({**terms, "codex_contract": SESSION_CONTRACT}),
+            )
+            response = await post(client, run)
+            assert response.status_code == 422
+            assert response.json()["detail"] == (
+                "This API request exceeds its reserved execution contract"
+            )
+            await f.db.pool.execute(
+                "UPDATE billing_run_budgets SET terms=$2::jsonb WHERE run_id=$1",
+                run.id,
+                json.dumps(terms),
+            )
+        reasons = [
+            r.getMessage().split("reason=")[1].split()[0]
+            for r in caplog.records
+            if r.name == "tin_lite.codex_api_relay"
+        ]
+        assert reasons == ["request_too_large", "operation_not_allowed", "contract_mismatch"]
         await f.db.pool.execute(
             "UPDATE billing_run_budgets SET committed_nanos=$2 WHERE run_id=$1",
             run.id,
@@ -309,7 +344,7 @@ async def test_verified_supplier_usage_is_charged_even_when_generation_fails(
         await f.db.pool.execute(
             "UPDATE workflow_runs SET status='failed', lease_active=false WHERE id=$1", run.id
         )
-        assert await f.billing.settle(run.id) == 120_000_000
+        assert await f.billing.settle(run.id) == 20_000_000
         assert len(sent) == 1
     finally:
         await client.aclose()
@@ -325,7 +360,7 @@ async def test_supplier_overage_is_absorbed_and_stops_further_purchases(billed):
         row = await f.db.pool.fetchrow("SELECT * FROM billing_operations")
         assert row["observed_nanos"] == REQUEST_MAXIMUM
         observation = json.loads(row["observation"])
-        assert observation["overage_absorbed_nanos"] == 6_007_500_000 - REQUEST_MAXIMUM
+        assert observation["overage_absorbed_nanos"] == 1_201_500_000 - REQUEST_MAXIMUM
         await finish(f, run)
         assert await f.billing.settle(run.id) == final_charge(REQUEST_MAXIMUM, 5_000_000_000)
         assert len(sent) == 1

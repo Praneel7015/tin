@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Annotated
 from uuid import UUID
 
@@ -126,7 +126,12 @@ class WorkflowQualification(PrivateWorkflows):
             if maximum is not None:
                 ceiling = Decimal(maximum) / 1_000_000_000
         if ceiling > Decimal(selection.maximum_usd):
-            raise QualificationError("Case ceiling exceeds the authorized evaluation maximum.")
+            needed = ceiling.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+            authorized = Decimal(selection.maximum_usd).quantize(Decimal("0.01"))
+            raise QualificationError(
+                "Case ceiling exceeds the authorized evaluation maximum: this case needs "
+                f"maximum_usd of at least ${needed} (you authorized ${authorized})."
+            )
         if ceiling and existing is None:
             if not getattr(runtime.database, "billing", None):
                 raise QualificationError("Paid evaluation requires enforced run budgets.")

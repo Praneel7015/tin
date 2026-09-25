@@ -5,7 +5,7 @@ import base64
 import hashlib
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -13,7 +13,7 @@ import httpx
 import jwt
 from cryptography.hazmat.primitives import serialization
 from pierre_storage import GitStorage
-from pierre_storage.errors import ApiError
+from pierre_storage.errors import ApiError, RefUpdateError
 from pierre_storage.types import GitFileMode, Repo
 from pierre_storage.version import get_user_agent
 
@@ -87,6 +87,18 @@ class SandboxRemotes:
     canonical_auth_header: str
     ephemeral_url: str
     ephemeral_auth_header: str
+
+
+_REF_CONFLICTS = {"conflict", "precondition_failed", "409", "412"}
+
+
+def _project_commit_error(exc: RefUpdateError) -> Exception:
+    """Name a rejected member commit in the terms the file service and MCP understand."""
+    if "no changes" in (exc.message or "").lower():
+        return ValueError("no changes: files already match expected_revision")
+    if {str(exc.reason).lower(), str(exc.status).lower()} & _REF_CONFLICTS:
+        return RuntimeError("canonical project state changed before file commit")
+    return RuntimeError(f"code.storage rejected the project file commit ({exc.reason})")
 
 
 class CodeStorage:
@@ -516,6 +528,7 @@ class CodeStorage:
         legacy_attempt: bool,
         save_intent: Callable[[dict], Awaitable[None]],
         validate_lease: Callable[[], Awaitable[None]],
+        companion_contents: dict[str, bytes] | None = None,
     ) -> tuple[str, bool]:
         """Atomically publish a validated primary output and its bounded companion."""
         checkpoint.validate_content(content)
@@ -523,7 +536,14 @@ class CodeStorage:
         message = f"{workflow_key} {checkpoint.run_id} [{execution_key}]"
         try:
             async with asyncio.timeout(120):
-                files = await self._checkpoint_contents(repo_id, checkpoint, content)
+                if companion_contents is None:
+                    files = await self._checkpoint_contents(repo_id, checkpoint, content)
+                else:
+                    if set(companion_contents) != {c.artifact_path for c in checkpoint.companions}:
+                        raise ValueError("reviewed companion contents do not match the checkpoint")
+                    for item in checkpoint.companions:
+                        item.validate_content(companion_contents[item.artifact_path])
+                    files = {checkpoint.artifact_path: content, **companion_contents}
                 head = await self.head_sha(repo, branch)
                 if not _is_commit_sha(head):
                     raise PublicationPendingError("project has no canonical revision")
@@ -623,6 +643,46 @@ class CodeStorage:
             max_bytes=_PUBLICATION_BINARY_MAX_BYTES
             if path.lower().endswith(".mp4")
             else _PUBLICATION_TEXT_MAX_BYTES,
+        )
+
+    async def apply_reviewed_documents(
+        self,
+        *,
+        repo_id,
+        branch,
+        checkpoint,
+        proposal_revision,
+        destinations,
+        execution_key,
+        intent,
+        save_intent,
+        validate_authority,
+    ):
+        if len(checkpoint.files) != 2 or len(destinations) != 2:
+            raise ValueError("reviewed documents require exactly two files")
+        files = {}
+        for item in checkpoint.files:
+            raw = await self.read_canonical_artifact(
+                repo_id=repo_id, commit_sha=proposal_revision, path=item.artifact_path
+            )
+            item.validate_content(raw)
+            files[item.artifact_path] = raw
+        content = files[checkpoint.artifact_path]
+        primary, companion = checkpoint.files
+        mapped_companion = replace(companion, artifact_path=destinations[1])
+        mapped = replace(primary, artifact_path=destinations[0], companions=(mapped_companion,))
+        return await self.publish_procedure_output(
+            repo_id=repo_id,
+            branch=branch,
+            checkpoint=mapped,
+            content=content,
+            execution_key=execution_key,
+            workflow_key="Apply reviewed documents",
+            intent=intent,
+            legacy_attempt=False,
+            save_intent=save_intent,
+            validate_lease=validate_authority,
+            companion_contents={destinations[1]: files[companion.artifact_path]},
         )
 
     async def apply_saved_output(
@@ -892,11 +952,13 @@ class CodeStorage:
         try:
             result = await builder.send()
             return result["commit_sha"], tuple(sorted(changed_paths))
-        except Exception:
+        except Exception as exc:
             recent = await repo.list_commits(branch=branch, limit=1, ttl=300)
             commits = recent.get("commits", [])
             if commits and commits[0].get("message") == commit_message:
                 return commits[0]["sha"], tuple(sorted(changed_paths))
+            if isinstance(exc, RefUpdateError):
+                raise _project_commit_error(exc) from exc
             raise
 
     async def revert_latest_project_commit(

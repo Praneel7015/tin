@@ -41,7 +41,7 @@ balance and project limits. It charges verified usage, not the estimate.
 
 ## Ordinary Codex sessions
 
-New customer-funded root procedures with a default or isolated profile use
+New customer-funded root procedures with a default, isolated or browser profile use
 `funding=procedure_session_v1`. Admission holds the configured session maximum once;
 parallel starts cannot spend the same credits. Model responses record actual usage
 against that session, without a new wallet reservation or repricing previous calls.

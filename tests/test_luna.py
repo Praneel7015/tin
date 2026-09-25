@@ -93,6 +93,25 @@ def test_catalog_tools_remove_only_model_unsupported_string_formats() -> None:
     assert input_schema["properties"]["site_url"]["format"] == "uri"
 
 
+def test_catalog_tools_remove_unique_items_from_arrays() -> None:
+    workflow = catalog_workflow()
+    input_schema = workflow["definition"]["input_schema"]
+    input_schema["properties"]["website_hosts"] = {
+        "type": "array",
+        "items": {"type": "string", "maxLength": 253},
+        "maxItems": 5,
+        "uniqueItems": True,
+        "default": [],
+    }
+
+    tools, _targets = _catalog_tools([workflow], project_id=uuid4())
+
+    hosts = tools[0]["parameters"]["properties"]["website_hosts"]
+    assert "uniqueItems" not in hosts
+    assert hosts["maxItems"] == 5
+    assert input_schema["properties"]["website_hosts"]["uniqueItems"] is True
+
+
 def text_response(text: str, *, response_id: str = "resp_text") -> dict:
     return {
         "id": response_id,
@@ -291,7 +310,7 @@ async def test_responses_client_does_not_hide_retries() -> None:
 
     client = OpenAIResponsesClient(
         api_key="test-key",  # noqa: S106
-        model="gpt-5.6-luna",
+        model="gpt-6-luna",
         base_url="https://api.openai.test/v1",
         timeout_seconds=1,
         transport=httpx.MockTransport(fail_once),
@@ -317,7 +336,7 @@ async def test_responses_timeout_is_transport_only_and_failure_is_safe(monkeypat
 
     client = OpenAIResponsesClient(
         api_key="test-key",
-        model="gpt-5.6-luna",  # noqa: S106
+        model="gpt-6-luna",  # noqa: S106
         base_url="https://api.openai.test/v1",
         timeout_seconds=90,
         transport=httpx.MockTransport(timeout),

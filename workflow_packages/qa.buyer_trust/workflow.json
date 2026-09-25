@@ -1,0 +1,103 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "qa.buyer_trust",
+    "title": "Check if a buyer would trust your checkout",
+    "description": "Run before launch or after a signup walkthrough: get a fixed-rule PASS, FAIL or UNVERIFIED verdict on whether a careful buyer would trust your site and checkout, with ranked fixes handed to Improve site health or to you. Public GET requests only; it never signs in, submits forms, changes your site or claims CVE coverage.",
+    "version": "1.1.0",
+    "executor": "codex.procedure",
+    "system": "product-qa",
+    "schedule_modes": ["on_demand"],
+    "human_review": {
+      "eligible": true,
+      "reason": "Produces externally visible trust claims and ranked fixes.",
+      "review_label": "Review trust report",
+      "defer_label": "Not now",
+      "summary": "Review the buyer-trust report before handing its fixes to Improve site health.",
+      "queue_clause": "Buyer-trust report ready to review"
+    },
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {"type": "string", "format": "uuid"},
+        "product_url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 10,
+          "maxLength": 500,
+          "title": "Product URL",
+          "description": "The public HTTPS page a buyer arrives at, the same one the signup walkthrough used. Tin audits its origin.",
+          "x-tin-ui": {"control": "text", "order": 10}
+        },
+        "depth": {
+          "type": "string",
+          "enum": ["focused", "standard", "extensive"],
+          "default": "standard",
+          "title": "Depth",
+          "description": "Every depth runs the fixed gate checks. Focused adds the pricing or checkout entry page; standard adds contact, refund and terms pages; extensive adds up to three more money pages.",
+          "x-tin-ui": {"control": "select", "order": 20}
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000,
+          "default": "",
+          "title": "Anything to check?",
+          "description": "Checkout quirks, known constraints, or areas a stranger would not know. Never credentials.",
+          "x-tin-ui": {"control": "textarea", "order": 30}
+        }
+      },
+      "required": ["project_id", "product_url"]
+    },
+    "prerequisites": [
+      {
+        "kind": "run",
+        "level": "recommended",
+        "workflow": "qa.signup_walkthrough",
+        "match": ["product_host"],
+        "reason": "The newest signup report for this host gives the checkout path, price line and walls, so the audit never re-walks signup."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Feature map",
+        "producer": "product.deep_dive",
+        "reason": "The Feature map records plans, pricing and refund facts to compare with what the site tells a buyer."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Code map",
+        "producer": "product.code_map",
+        "reason": "The Code map shows whether the site's repository can take a fix, which decides hand-off to Improve site health."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The onboarding plan states the offer, audience and pricing the founder described."
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": [
+        "skills/buyer-trust/SKILL.md",
+        "skills/buyer-trust/GATE.md",
+        "skills/buyer-trust/playbook.md"
+      ],
+      "entry_skill": "buyer-trust",
+      "workspace": {"kind": "project.state"},
+      "sandbox": {"profile": "isolated", "egress": "fenced", "timeout_seconds": 900},
+      "output": {
+        "kind": "project.artifact",
+        "path": "reports/BUYER_TRUST.md",
+        "media_type": "text/markdown",
+        "max_bytes": 32000
+      }
+    }
+  }
+}

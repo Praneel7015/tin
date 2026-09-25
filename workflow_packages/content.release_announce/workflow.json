@@ -1,0 +1,115 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "content.release_announce",
+    "title": "Announce a new release",
+    "description": "Turn a changelog or release notes into an X post, a LinkedIn post and a newsletter email for people who already follow the product, mentioning only what actually shipped. Drafts only: Tin never posts, sends or publishes them.",
+    "version": "1.1.0",
+    "executor": "workflow.code",
+    "schedule_modes": ["on_demand"],
+    "human_review": {
+      "eligible": true,
+      "summary": "Check that every announced change really shipped before posting or sending."
+    },
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": ".agents/skills/writing-style/SKILL.md",
+        "producer": "style.capture",
+        "reason": "The founder's writing style guide supplies the voice notes, so the posts sound like the founder."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The growth plan names the audience the announcements are written for."
+      }
+    ],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {"type": "string", "format": "uuid"},
+        "changelog": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 12000,
+          "title": "What shipped in this release",
+          "description": "Only this release's entries, one change per line. Take them from the repository's CHANGELOG or release notes; without those, summarize the merged commits or PRs since the last tag (git log). Leave out older releases. Nothing that is not listed here will be announced.",
+          "x-tin-ui": {"control": "textarea", "order": 10}
+        },
+        "product_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "title": "Product name",
+          "description": "The name customers know it by, as on the website or README.",
+          "x-tin-ui": {"control": "text", "order": 20}
+        },
+        "release_url": {
+          "type": "string",
+          "maxLength": 500,
+          "default": "",
+          "title": "Optional link to the release",
+          "description": "An https:// link to the changelog page, release notes or GitHub release. It is the only link added to the posts; leave empty when there is none.",
+          "x-tin-ui": {"control": "text", "order": 30}
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 500,
+          "default": "",
+          "title": "Who reads these announcements",
+          "description": "Existing users, subscribers and followers, described as in the audience section of reports/GROWTH_ONBOARDING_PLAN.md when the project has one.",
+          "x-tin-ui": {"control": "textarea", "order": 40}
+        },
+        "tone": {
+          "type": "string",
+          "enum": ["professional", "casual", "enthusiastic"],
+          "default": "professional",
+          "title": "Announcement tone",
+          "description": "Pick the one closest to the founder's writing style guide.",
+          "x-tin-ui": {"control": "select", "order": 50}
+        },
+        "voice_notes": {
+          "type": "string",
+          "maxLength": 2000,
+          "default": "",
+          "title": "Optional voice notes",
+          "description": "A few concrete rules from the founder's style guide (.agents/skills/writing-style/SKILL.md): words to use or avoid, sentence length, emoji and hashtag habits. Paraphrase; do not paste the whole guide.",
+          "x-tin-ui": {"control": "textarea", "order": 60}
+        }
+      },
+      "required": ["project_id", "changelog", "product_name"]
+    },
+    "code": {
+      "runtime": "python3.12.8-stdlib-v1",
+      "entrypoint": "main.py",
+      "files": ["main.py"],
+      "timeout_seconds": 60,
+      "model_routes": {
+        "extract": {
+          "provider": "openai",
+          "model": "gpt-6-luna",
+          "max_calls": 1,
+          "max_input_bytes": 32000,
+          "max_output_tokens": 3072
+        },
+        "announce": {
+          "provider": "openai",
+          "model": "gpt-6-luna",
+          "max_calls": 1,
+          "max_input_bytes": 32000,
+          "max_output_tokens": 4096
+        }
+      },
+      "output": {
+        "kind": "project.artifact",
+        "path": "reports/RELEASE_ANNOUNCE.md",
+        "media_type": "text/markdown",
+        "max_bytes": 32000
+      }
+    }
+  }
+}

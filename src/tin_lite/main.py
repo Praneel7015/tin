@@ -72,6 +72,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if billing_task is not None:
                 billing_task.cancel()
                 await asyncio.gather(billing_task, return_exceptions=True)
+            # Usually already drained by the serve command's SIGTERM handling; the
+            # group's shutdown is idempotent and then returns at once.
             await runtime.worker.shutdown()
             posthog_client = getattr(mcp_server, "posthog_client", None)
             if posthog_client is not None:

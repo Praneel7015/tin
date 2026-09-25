@@ -31,7 +31,7 @@ from tin_lite.e2b_runtime import E2BRuntime, SandboxProcedureInput
 from tin_lite.integrations import GitHubOpenPullRequestEvidence, GitHubRepositoryBundle
 from tin_lite.procedures import (
     GITHUB_PULL_REQUEST_RESULT,
-    TIN_DIAGRAM_REVIEWED_VALIDATOR,
+    TIN_DIAGRAM_BRANDED_VALIDATOR,
     CodexProcedureSource,
     GitHubPullRequestProcedure,
     PinnedCodexProcedure,
@@ -87,7 +87,7 @@ def test_procedure_sandbox_template_pins_repository_tooling(
         (
             "run_cmd",
             (
-                "npm install -g @openai/codex@0.153.4 && codex --version",
+                "npm install -g @openai/codex@0.156.1 && codex --version",
                 {"user": "root"},
             ),
         ),
@@ -112,7 +112,7 @@ def test_procedure_sandbox_template_pins_repository_tooling(
         ),
     ) in calls
     config = (ROOT / "sandbox" / "codex_config.toml").read_text()
-    assert 'model = "gpt-6-astra"' in config
+    assert 'model = "gpt-6-sol"' in config
     assert "OPENAI_API_KEY" not in config
 
 
@@ -204,7 +204,7 @@ def test_concrete_procedure_packages_are_pinned_and_ui_renderable() -> None:
         "path_template": "diagrams/{slug}.mmd",
         "media_type": "text/vnd.mermaid",
         "max_bytes": 64_000,
-        "validator": TIN_DIAGRAM_REVIEWED_VALIDATOR,
+        "validator": TIN_DIAGRAM_BRANDED_VALIDATOR,
     }
     assert diagram_definition["human_review"]["eligible"] is True
     assert "procedures/content.diagram/skills/content-diagram/SKILL.md" in diagram_files
@@ -242,7 +242,6 @@ def test_concrete_procedure_packages_are_pinned_and_ui_renderable() -> None:
         "kind": "github.repository",
         "provider_key": "infra.github",
         "capabilities": ["contents.read", "pull_requests.read"],
-        "limits": {"max_files": 1000, "max_bytes": 100_000_000},
     }
     assert site_definition["procedure"]["output"]["kind"] == GITHUB_PULL_REQUEST_RESULT
     assert site_definition["procedure"]["output"]["max_files"] == 3
@@ -316,7 +315,6 @@ def test_concrete_procedure_packages_are_pinned_and_ui_renderable() -> None:
         "kind": "github.repository",
         "provider_key": "infra.github",
         "capabilities": ["contents.read"],
-        "limits": {"max_files": 1000, "max_bytes": 100_000_000},
     }
     assert code_definition["procedure"]["output"] == {
         "kind": "project.artifact",
@@ -693,10 +691,8 @@ def test_pull_request_receipt_covers_no_change_and_requires_the_opened_pr() -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limits", [None, {"max_files": 1000, "max_bytes": 100_000_000}])
 async def test_github_procedure_workspace_fetch_is_heartbeat_protected(
     monkeypatch: pytest.MonkeyPatch,
-    limits,
 ) -> None:
     heartbeats: list[dict[str, str]] = []
     calls: list[tuple[str, dict]] = []
@@ -739,7 +735,6 @@ async def test_github_procedure_workspace_fetch_is_heartbeat_protected(
         project_id=project_id,
         run_id=run_id,
         sandbox_id="sandbox-1",
-        workspace_limits=limits,
     )
 
     assert actual == (expected, expected_evidence)
@@ -750,7 +745,6 @@ async def test_github_procedure_workspace_fetch_is_heartbeat_protected(
                 "project_id": project_id,
                 "execution_key": f"{run_id}:procedure_repository_workspace",
                 "run_id": run_id,
-                **(limits or {}),
             },
         ),
         (

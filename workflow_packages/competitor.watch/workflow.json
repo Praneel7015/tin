@@ -1,0 +1,98 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "competitor.watch",
+    "title": "Watch competitors for pricing and product changes",
+    "description": "Each week Tin rereads your known competitors' public pricing and changelog pages and reports only material changes, with a suggested response. It never signs up, contacts anyone or changes your pricing.",
+    "executor": "codex.procedure",
+    "version": "2.0.0",
+    "schedule_modes": ["on_demand", "weekly"],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id"],
+      "properties": {
+        "project_id": { "type": "string", "format": "uuid" },
+        "competitor_urls": {
+          "type": "array",
+          "title": "Competitor pages (optional)",
+          "description": "Public homepage, pricing or changelog URLs; pages on one host count as one competitor. Leave empty to watch the competitors Tin already knows: earlier watches, the onboarding plan, project memory, then keyword-plan and paid-ads research.",
+          "items": { "type": "string", "maxLength": 500 },
+          "maxItems": 10,
+          "uniqueItems": true,
+          "default": [],
+          "x-tin-ui": { "order": 10 }
+        },
+        "max_competitors": {
+          "type": "integer",
+          "title": "Competitors to watch",
+          "minimum": 1,
+          "maximum": 5,
+          "default": 3,
+          "x-tin-ui": { "order": 20 }
+        },
+        "watch_for": {
+          "type": "string",
+          "title": "What matters most (optional)",
+          "description": "The change that would actually change what you do, e.g. a price cut on their starter plan, a free tier, or a feature you do not have.",
+          "maxLength": 2000,
+          "default": "",
+          "x-tin-ui": { "control": "textarea", "order": 30 }
+        },
+        "our_positioning": {
+          "type": "string",
+          "title": "Your pricing and positioning (optional override)",
+          "description": "Only when project memory is missing or out of date. By default Tin reads your plans from the Feature map, Code map and onboarding plan.",
+          "maxLength": 2000,
+          "default": "",
+          "x-tin-ui": { "control": "textarea", "order": 40 }
+        }
+      }
+    },
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The onboarding plan states your business, price and packaging, and the hard no's a suggested response must respect."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Feature map",
+        "producer": "product.deep_dive",
+        "reason": "The Feature map's plans and features are what each competitor change is weighed against."
+      },
+      {
+        "kind": "run",
+        "level": "recommended",
+        "workflow": "organic.keyword_plan",
+        "reason": "A keyword plan records search competitors, so the watch can start without you listing competitor URLs."
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": [
+        "skills/competitor-watch/SKILL.md",
+        "skills/competitor-watch/SCHEMA.md",
+        "skills/competitor-watch/LAYOUT.md"
+      ],
+      "entry_skill": "competitor-watch",
+      "workspace": { "kind": "project.state" },
+      "sandbox": {
+        "profile": "isolated",
+        "egress": "fenced",
+        "timeout_seconds": 1500
+      },
+      "output": {
+        "kind": "project.artifact",
+        "path_template": "reports/competitor-watch/{run_id}.md",
+        "media_type": "text/markdown",
+        "max_bytes": 80000
+      }
+    }
+  }
+}

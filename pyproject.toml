@@ -33,6 +33,7 @@ dev = [
   "import-linter>=2.3,<3",
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
+  "pytest-xdist>=3.6,<4",
   "ruff>=0.12,<1",
 ]
 
@@ -66,3 +67,8 @@ ignore = ["S101"]
 # The Start here plan's prompts and their code-side wording rules were validated verbatim against
 # historical runs; rewrapping them by hand risks changing what was tested.
 "src/tin_lite/growth_plan.py" = ["E501"]
+# The paid-ads assessment carries its prompts and schema builders verbatim for the same reason.
+"src/tin_lite/paid_ads.py" = ["E501"]
+"src/tin_lite/paid_ads_launch.py" = ["E501"]
+"src/tin_lite/paid_ads_monitor.py" = ["E501"]
+"tests/test_paid_ads_monitor.py" = ["E501"]

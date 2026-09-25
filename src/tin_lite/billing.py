@@ -40,6 +40,35 @@ async def configure_billing(database, settings):
     database.billing = None
 
 
+LIMIT_HINT = " Raise the project's limits with set_project_spending_limits or on the Billing page."
+
+
+def project_limit_message(policy, estimate, usage) -> str | None:
+    """Name the one project limit that blocks admission, or None when none does."""
+    if not policy:
+        return "This project has no spending policy yet." + LIMIT_HINT
+    if estimate > policy["per_run_nanos"]:
+        return (
+            f"This workflow is estimated at up to ${usd(estimate)}; "
+            f"the project's per-run limit is ${usd(policy['per_run_nanos'])}." + LIMIT_HINT
+        )
+    if usage["exposure"] + estimate > policy["monthly_nanos"]:
+        return (
+            f"This workflow is estimated at up to ${usd(estimate)}, which would exceed "
+            f"this month's ${usd(policy['monthly_nanos'])} project limit "
+            f"(${usd(usage['exposure'])} already committed)." + LIMIT_HINT
+        )
+    if usage["active"] >= policy["concurrency"]:
+        active = usage["active"]
+        return (
+            f"{active} run{'' if active == 1 else 's'} {'is' if active == 1 else 'are'} "
+            f"already active; the project's concurrent-run limit is {policy['concurrency']}. "
+            "Wait for a run to finish, or raise the limit with set_project_spending_limits "
+            "or on the Billing page."
+        )
+    return None
+
+
 class BillingService:
     def __init__(self, *, database, settings):
         self.db, self.settings = database, settings
@@ -601,6 +630,22 @@ class BillingService:
                 terms = self.terms(
                     definition, run["project_id"], object_value(run["input"]), session_budget=False
                 )
+            # A still-valid quote issued before isolated procedures joined v3 keeps v1.
+            from tin_lite.codex_api_pricing import isolated_v1_terms, issued_before_isolated_v3
+
+            if quoted_terms and issued_before_isolated_v3(quoted_terms, terms, definition):
+                terms = configured_terms(
+                    isolated_v1_terms(
+                        self._terms(
+                            definition,
+                            run["project_id"],
+                            object_value(run["input"]),
+                            session_budget=False,
+                        )
+                    ),
+                    definition,
+                    object_value(run["input"]),
+                )
             # Previously issued quotes preserve their whole-run funding contract.
             if quoted_terms and "funding" not in quoted_terms:
                 expected = {k: v for k, v in terms.items() if k not in {"funding", "estimate"}}
@@ -655,15 +700,8 @@ class BillingService:
             run["project_id"],
             period,
         )
-        if (
-            not policy
-            or estimate > policy["per_run_nanos"]
-            or usage["exposure"] + estimate > policy["monthly_nanos"]
-            or usage["active"] >= policy["concurrency"]
-        ):
-            raise BillingError(
-                "project_limit", "Project spending or concurrent-run limit reached.", 402
-            )
+        if limit := project_limit_message(policy, estimate, usage):
+            raise BillingError("project_limit", limit, 402)
         if account["balance_nanos"] - account["reserved_nanos"] < estimate:
             raise BillingError(
                 "insufficient_funds",
@@ -1092,12 +1130,15 @@ class BillingService:
             )
             if root["status"] == "settled":
                 return root["charged_nanos"]
+            # ads.launch makes its metered Google Ads calls after approval, so its budget
+            # must stay open while it waits for review.
             active = await conn.fetchval(
                 """SELECT true FROM billing_run_budgets b JOIN workflow_runs r ON r.id=b.run_id
                    WHERE b.root_run_id=$1
                      AND (r.status IN ('pending','running','paused')
                           OR (r.status='needs_input'
-                              AND (b.terms->>'kind'='parent' OR r.executor='project.task'))
+                              AND (b.terms->>'kind'='parent'
+                                   OR r.executor IN ('project.task', 'ads.launch')))
                           OR (r.lease_active AND r.status<>'needs_input'))
                    LIMIT 1""",
                 root_id,
@@ -1268,7 +1309,8 @@ class BillingService:
                      WHERE child.root_run_id=b.run_id
                        AND (r.status IN ('pending','running','paused')
                             OR (r.status='needs_input'
-                                AND (child.terms->>'kind'='parent' OR r.executor='project.task'))
+                                AND (child.terms->>'kind'='parent'
+                                     OR r.executor IN ('project.task', 'ads.launch')))
                             OR (r.lease_active AND r.status<>'needs_input')))
                ORDER BY b.reconcile_by, b.created_at LIMIT 100"""
         )

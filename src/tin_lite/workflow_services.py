@@ -3,6 +3,18 @@
 import re
 from dataclasses import dataclass
 
+# Capabilities a service binding may declare per first-party provider. A provider added here
+# also needs its reviewed operations in code_services.OPERATIONS.
+SERVICE_CAPABILITIES = {
+    "analytics.gsc": frozenset({"sites.list", "search_analytics.read"}),
+    "workspace.google": frozenset({"gmail.messages.read", "calendar.events.read"}),
+    "infra.github": frozenset({"repositories.list"}),
+    "payments.stripe": frozenset(
+        {"subscriptions.read", "customers.read", "invoices.read", "prices.read", "charges.read"}
+    ),
+    "analytics.posthog": frozenset({"query.read", "definitions.read", "insights.read"}),
+}
+
 
 @dataclass(frozen=True)
 class ServiceBinding:
@@ -17,11 +29,7 @@ def service_bindings(value, requirements):
     from tin_lite.integrations import parse_integration_requirements
     from tin_lite.project_connections import CUSTOM_KEY
 
-    allowed = {
-        "analytics.gsc": {"sites.list", "search_analytics.read"},
-        "workspace.google": {"gmail.messages.read", "calendar.events.read"},
-        "infra.github": {"repositories.list"},
-    }
+    allowed = SERVICE_CAPABILITIES
     parsed = {r.provider_key: r for r in parse_integration_requirements(requirements)}
     if not isinstance(value, dict) or len(value) > 4:
         raise ValueError("declare at most four services")

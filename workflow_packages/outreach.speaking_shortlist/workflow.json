@@ -1,0 +1,97 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "outreach.speaking_shortlist",
+    "title": "Find the talks and podcasts worth pitching",
+    "description": "Finds conferences, meetups and podcasts with an open call that fit what your business can speak to, verifies each deadline and submission rule, and drafts one pitch per venue in your voice. Skips venues pitched in earlier runs; never submits or emails anything.",
+    "executor": "codex.procedure",
+    "version": "1.1.0",
+    "schedule_modes": ["on_demand"],
+    "system": "cold-outreach",
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id"],
+      "properties": {
+        "project_id": { "type": "string", "format": "uuid" },
+        "expertise": {
+          "type": "string",
+          "title": "What you're pitching (optional)",
+          "description": "The specific talk, lesson or story, and who in the audience should care. Leave empty to pitch what the Feature map and growth plan show the business can speak to.",
+          "maxLength": 2000,
+          "default": "",
+          "x-tin-ui": { "control": "textarea", "order": 10 }
+        },
+        "format_preference": {
+          "type": "string",
+          "title": "Format",
+          "enum": ["no_preference", "conference_talk", "meetup_talk", "podcast_guest"],
+          "default": "no_preference",
+          "x-tin-ui": { "control": "select", "order": 20 }
+        },
+        "already_pitched": {
+          "type": "string",
+          "title": "Venues pitched outside Tin (optional)",
+          "description": "Conferences, meetups or podcasts to skip because you already submitted or were declined. Venues drafted in earlier runs are skipped automatically.",
+          "maxLength": 2000,
+          "default": "",
+          "x-tin-ui": { "control": "textarea", "order": 30 }
+        },
+        "max_venues": {
+          "type": "integer",
+          "title": "Maximum venues",
+          "minimum": 3,
+          "maximum": 20,
+          "default": 10,
+          "x-tin-ui": { "control": "counter", "order": 40 }
+        },
+        "tone_notes": {
+          "type": "string",
+          "title": "Voice notes (optional)",
+          "description": "How the drafted pitches should sound. The project's writing style guide is used when present; these notes win where they differ.",
+          "maxLength": 1000,
+          "default": "",
+          "x-tin-ui": { "control": "textarea", "order": 50 }
+        }
+      }
+    },
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Feature map",
+        "producer": "product.deep_dive",
+        "reason": "The Feature map supplies the real product detail a pitch cites, and the story to pitch when expertise is empty."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The growth plan says who the business serves and records hard no's such as no cold email."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": ".agents/skills/writing-style/SKILL.md",
+        "producer": "style.capture",
+        "reason": "A captured writing style guide shapes the drafted pitches; tone_notes still win."
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": ["skills/speaking-shortlist/SKILL.md", "skills/speaking-shortlist/SCORING.md"],
+      "entry_skill": "speaking-shortlist",
+      "workspace": { "kind": "project.state" },
+      "sandbox": { "profile": "isolated", "egress": "fenced", "timeout_seconds": 900 },
+      "output": {
+        "kind": "project.artifact",
+        "path_template": "reports/outreach/speaking/{run_id}.md",
+        "media_type": "text/markdown",
+        "max_bytes": 150000
+      }
+    }
+  }
+}

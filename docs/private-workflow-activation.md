@@ -7,7 +7,8 @@ It then appears alongside built-in workflows and runs on Tin's existing compute.
 recipe does not activate or run it. Saving a configuration chooses the latest activated recipe
 automatically; existing configurations and runs keep the recipe they selected.
 
-This remains a project-allowlisted pilot, not unrestricted self-service execution.
+Execution is limited to allowlisted projects unless the operator opens it to every project on
+a billed deployment.
 Private procedures are manual; eligible code workflows also support schedules. There is no
 new engine, version database, filesystem copy, or workflow-specific reader/UI. Current
 capabilities and billing boundaries are summarized in [feature status](feature-status.md).
@@ -28,8 +29,9 @@ workflow_packages/custom.research_digest/
 1. Use `list_project_files` and `commit_project_changes` to commit the package against the current
    project revision. Ordinary file concurrency/conflict rules apply.
 2. `validate_workflow_package(project_id, path, revision)` reads only declared regular files at
-   that exact commit. It returns diagnostics, digest, source paths, output and required
-   integrations. `runtime_available` means the pilot runtime is enabled, **not** that integrations
+   that exact commit. `path` is the manifest, `workflow_packages/custom.<key>/workflow.json`;
+   the package directory is accepted too. It returns diagnostics, digest, source paths, output
+   and required integrations. `runtime_available` means the pilot runtime is enabled, **not** that integrations
    are connected or that a future model run is guaranteed to succeed.
 3. `activate_workflow_package(project_id, path, revision, request_id, expected_revision)` validates
    again and projects the recipe into the existing catalog. Explicit null creates; the current
@@ -69,9 +71,8 @@ See [code workflows](code-workflows.md) and the linked extension contracts.
 - One bounded UTF-8 project artifact, or a bounded unmerged GitHub PR with repository verification.
   GitHub capabilities must match the declared workspace/result and use the connected-project
   gateway. Existing PR overlap checks and result validation remain in force.
-- Repository workspaces may explicitly declare `limits.max_files` up to 1,000 and
-  `limits.max_bytes` up to 100,000,000. Omitting limits retains the historical
-  500-file / 10 MB contract. Individual repository files remain capped at 2 MB.
+- Repository workspaces are snapshots of up to 20,000 eligible files / 100 MB, each file at
+  most 2 MB. The bound belongs to the gateway; a `limits` key in older definitions is ignored.
 - Optional connected Workspace read capabilities: Gmail messages and calendar events. No email
   sending, test identities, browser/Studio, uploaded native executors or recursive starts.
 - Optional existing project skills and normal review eligibility. Managed `wiki/INDEX.md`
@@ -88,6 +89,9 @@ recovery continue to apply.
 
 Configure `TIN_LITE_E2B_ISOLATED_TEMPLATE` with the accepted isolated image and explicitly allow
 pilot project UUIDs in comma-separated `TIN_LITE_PRIVATE_WORKFLOW_PROJECTS`. Default is empty.
+`TIN_LITE_PRIVATE_WORKFLOWS_OPEN=true` admits every project instead. Startup refuses it unless
+`TIN_LITE_BILLING_ENABLED=true`, so private runs are funded through the credit ledger; the
+isolated template remains required either way.
 Do not enable unisolated/browser/Studio execution for private recipes. No migration, new native
 model route, API-key exposure, default image rebuild or credential replacement is required.
 

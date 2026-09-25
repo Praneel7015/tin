@@ -1,0 +1,155 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "growth.score_quiz",
+    "title": "Draft an embeddable score quiz",
+    "description": "Draft a self-contained scored quiz widget to paste onto your own site: a few questions about the visitor's situation, an instant verdict and a call to action. A free interactive tool is a lead magnet, not another article or email. Draft only; Tin never deploys it, and the widget makes no network calls.",
+    "version": "1.1.0",
+    "executor": "workflow.code",
+    "system": "creative-studio",
+    "schedule_modes": [
+      "on_demand"
+    ],
+    "human_review": {
+      "eligible": true,
+      "summary": "Review the quiz questions, scoring and copy before embedding it anywhere."
+    },
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "wiki/INDEX.md",
+        "section": "### Feature map",
+        "producer": "product.deep_dive",
+        "reason": "The Feature map says what the product actually does, which grounds the quiz topic and the call to action."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The growth plan names the audience who should take the quiz."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": ".agents/skills/writing-style/SKILL.md",
+        "producer": "style.capture",
+        "reason": "The founder's writing style guide supplies the voice notes for the quiz copy."
+      }
+    ],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "product_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "title": "Product name",
+          "description": "The name customers know it by, as on the website or README.",
+          "x-tin-ui": {
+            "control": "text",
+            "order": 10
+          }
+        },
+        "quiz_topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "title": "What the quiz scores",
+          "description": "The question a visitor wants answered about themselves, e.g. \"is your API ready for production traffic\". Pick a problem the product solves, from the Feature map in wiki/INDEX.md.",
+          "x-tin-ui": {
+            "control": "text",
+            "order": 20
+          }
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 200,
+          "default": "developers evaluating this space",
+          "title": "Who should take it",
+          "description": "Who should take it, from the audience section of reports/GROWTH_ONBOARDING_PLAN.md when the project has one.",
+          "x-tin-ui": {
+            "control": "text",
+            "order": 30
+          }
+        },
+        "signup_url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 10,
+          "maxLength": 500,
+          "title": "Where the call to action sends people",
+          "description": "The product's real https:// signup, trial or waitlist page, from the website or codebase. It is the only link in the widget.",
+          "x-tin-ui": {
+            "control": "text",
+            "order": 40
+          }
+        },
+        "product_summary": {
+          "type": "string",
+          "maxLength": 600,
+          "default": "",
+          "title": "Optional one-line product summary",
+          "description": "What the product does for this audience, in one or two sentences from the Feature map in wiki/INDEX.md or the README. The call to action never claims more than this.",
+          "x-tin-ui": {
+            "control": "textarea",
+            "order": 50
+          }
+        },
+        "voice_notes": {
+          "type": "string",
+          "maxLength": 1000,
+          "default": "",
+          "title": "Optional voice notes",
+          "description": "A few concrete rules from the founder's style guide (.agents/skills/writing-style/SKILL.md): words to use or avoid, sentence length, emoji habits. Paraphrase; do not paste the whole guide.",
+          "x-tin-ui": {
+            "control": "textarea",
+            "order": 60
+          }
+        }
+      },
+      "required": [
+        "project_id",
+        "product_name",
+        "quiz_topic",
+        "signup_url"
+      ]
+    },
+    "code": {
+      "runtime": "python3.12.8-stdlib-v1",
+      "entrypoint": "main.py",
+      "files": [
+        "main.py"
+      ],
+      "timeout_seconds": 60,
+      "model_routes": {
+        "design_quiz": {
+          "provider": "openai",
+          "model": "gpt-6-luna",
+          "max_calls": 1,
+          "max_input_bytes": 16000,
+          "max_output_tokens": 2200
+        },
+        "write_result_copy": {
+          "provider": "openai",
+          "model": "gpt-6-luna",
+          "max_calls": 1,
+          "max_input_bytes": 16000,
+          "max_output_tokens": 400
+        }
+      },
+      "output": {
+        "kind": "project.artifact",
+        "path": "reports/SCORE_QUIZ.md",
+        "media_type": "text/markdown",
+        "max_bytes": 16000
+      }
+    }
+  }
+}

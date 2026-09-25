@@ -81,7 +81,7 @@ def page_fixture(**changes):
         "resource_type": "html",
         "status_code": 200,
         "meta": {"title": "Example", "description": "A product"},
-        "checks": {"no_title": True, "canonical_to_broken": False},
+        "checks": {"canonical": True, "no_title": True, "canonical_to_broken": False},
         "duplicate_title": True,
         **changes,
     }
@@ -135,7 +135,7 @@ def response(text="Useful answer", *, search=True, citations=None):
     return {
         "id": "resp_test",
         "status": "completed",
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "usage": {"input_tokens": 500, "output_tokens": 200},
         "output": [
             *(

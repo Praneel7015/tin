@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -7,7 +8,13 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from tin_lite import content_draft, content_plan, organic_system, technical_fix
 from tin_lite.domain import RunStatus, Workflow, WorkflowRun
-from tin_lite.executor_gates import keyword_plan_gate, organic_audit_gate, organic_system_gate
+from tin_lite.executor_gates import (
+    google_ads_gate,
+    keyword_plan_gate,
+    organic_audit_gate,
+    organic_system_gate,
+    paid_ads_gate,
+)
 from tin_lite.integrations import (
     IntegrationError,
     load_pinned_integration_requirements,
@@ -15,12 +22,20 @@ from tin_lite.integrations import (
 from tin_lite.keyword_plan import KEY as KEYWORD_KEY
 from tin_lite.keyword_plan import check_inputs as check_keyword_inputs
 from tin_lite.organic_audit import AUDIT_KEY, public_site
+from tin_lite.paid_ads import KEY as PAID_ADS_KEY
+from tin_lite.paid_ads import check_inputs as check_paid_ads_inputs
+from tin_lite.paid_ads_launch import KEY as PAID_ADS_LAUNCH_KEY
+from tin_lite.paid_ads_launch import check_inputs as check_paid_ads_launch_inputs
+from tin_lite.paid_ads_monitor import KEY as PAID_ADS_MONITOR_KEY
+from tin_lite.paid_ads_monitor import check_inputs as check_paid_ads_monitor_inputs
 from tin_lite.runtime import RuntimeServices
 from tin_lite.settings import Settings
 from tin_lite.workflow_definitions import resolve_execution_contract
 from tin_lite.workflow_inputs import WorkflowInputError, normalize_workflow_inputs
 from tin_lite.workflow_prerequisites import PrerequisiteError, evaluate_prerequisites
 from tin_lite.workflows import registered_workflow_implementations
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowExecutorUnavailableError(RuntimeError):
@@ -174,6 +189,19 @@ async def start_workflow_run(
             raise WorkflowInputError(
                 "Choose a valid style source packet in this project's Files before starting."
             ) from None
+    if workflow.key == "brand.capture" and workflow.project_id is None and existing is None:
+        from tin_lite.brand_capture import BrandCaptureSources
+
+        if not await runtime.database.has_project_access(
+            project_id=project_id, clerk_user_id=started_by_clerk_user_id
+        ):
+            raise LookupError("project not found")
+        try:
+            await BrandCaptureSources(database=runtime.database, storage=runtime.storage).inspect(
+                project_id, normalized_inputs
+            )
+        except ValueError as exc:
+            raise WorkflowInputError(str(exc)) from exc
     if workflow.key == technical_fix.KEY:
         from tin_lite.technical_fix_sources import TechnicalFixError, TechnicalFixSources
 
@@ -225,6 +253,27 @@ async def start_workflow_run(
         keyword_reason = keyword_plan_gate(settings)
         if keyword_reason is not None:
             raise WorkflowExecutorUnavailableError(keyword_reason)
+    if workflow.executor == PAID_ADS_KEY:
+        try:
+            check_paid_ads_inputs(normalized_inputs)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise WorkflowInputError(str(exc) or "Invalid paid ads inputs.") from exc
+        paid_ads_reason = paid_ads_gate(settings)
+        if paid_ads_reason is not None:
+            raise WorkflowExecutorUnavailableError(paid_ads_reason)
+    if workflow.executor in {PAID_ADS_LAUNCH_KEY, PAID_ADS_MONITOR_KEY}:
+        check = (
+            check_paid_ads_launch_inputs
+            if workflow.executor == PAID_ADS_LAUNCH_KEY
+            else check_paid_ads_monitor_inputs
+        )
+        try:
+            check(normalized_inputs)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise WorkflowInputError(str(exc) or "Invalid Google Ads inputs.") from exc
+        ads_reason = google_ads_gate(settings)
+        if ads_reason is not None:
+            raise WorkflowExecutorUnavailableError(ads_reason)
     if workflow.executor == content_plan.KEY:
         try:
             content_plan.check_inputs(normalized_inputs)
@@ -400,4 +449,14 @@ async def start_workflow_run(
             error_message="TemporalStartError: workflow did not start",
         )
         raise TemporalStartError(run.id) from exc
+    if created and workflow.executor == "growth.onboarding":
+        # Only a newly created, dispatched run replaces earlier unapproved ones; a replayed
+        # start key returns its existing run and supersedes nothing.
+        from tin_lite.growth_onboarding_control import supersede_earlier_onboarding
+
+        try:
+            await supersede_earlier_onboarding(runtime=runtime, run=run)
+        except Exception:
+            # The new run is already dispatched; an older one simply stays as it was.
+            logger.exception("Could not supersede earlier onboarding runs for %s", run.id)
     return run

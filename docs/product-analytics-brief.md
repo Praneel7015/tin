@@ -7,14 +7,15 @@ customer's product. It does not inspect session replays or fix instrumentation.
 
 ## Set it up once
 
-Connect `custom.api.posthog` in Integrations using the correct regional API origin,
-GET/POST and a personal key restricted to the intended PostHog project with
-`query:read` and `event_definition:read`. POST is needed for read-only queries;
-Tin's `http.write` transport capability does not grant provider mutation authority.
-The key stays in Tin's gateway, never in workflow files, inputs or the sandbox.
+Connect PostHog in the project's Integrations: OAuth with read scopes only, then
+choose the one PostHog project the brief reads (see
+[Stripe and PostHog connections](stripe-and-posthog-connections.md)). The package
+binds `analytics.posthog` with `query.read` and `definitions.read`; tokens stay in
+Tin, never in workflow files, inputs or the sandbox. The brief has no project input:
+it always reads the project selected on the connection, so switching that project
+changes what the next brief reads (its schema check then reports the change).
 
-Save the workflow with the PostHog project number, reporting window and any known
-funnel or exclusions. Leave the funnel empty to have the procedure propose one
+Save the workflow with the reporting window and any known funnel or exclusions. Leave the funnel empty to have the procedure propose one
 from available event evidence and project context. Discovery reads up to 200 event types
 ranked by recent volume and discloses the total catalog size. Selected metrics query their
 complete event/window populations; events outside the discovery list are not assumed absent.
@@ -27,7 +28,7 @@ Existing schedule authorization and billing rules apply. Results arrive in Tin's
 Files and Activity, with a separate `reports/analytics/<run_id>.md` for each run.
 This package does not add email or Slack delivery.
 
-Use a separate saved brief for a separate PostHog project. Website visitors and
+Use a separate Tin project for a separate PostHog project. Website visitors and
 product accounts are different populations; this workflow does not join them.
 A project without pageviews can still produce a useful product brief, with traffic
 explicitly unavailable. When pageviews exist, the procedure checks PostHog's documented web
@@ -39,9 +40,12 @@ event can prevent a same-session funnel without preventing independent website t
 The bounded procedure chooses and explains the analysis. Declared Python/SQL
 resources own query construction, ordered counts, rates and statistical checks.
 Queries return aggregates, with raw identities kept inside PostHog. Source data
-and previous reports are evidence, never instructions. Read-only permissions come from
-the provider key: the generic gateway does not inspect SQL or enforce these analytic
-semantics. The procedure instructions are reviewed behavior, not a new SQL security sandbox.
+and previous reports are evidence, never instructions. Read-only access comes from
+the OAuth scopes. Tin's gateway checks each query's shape (one SELECT of at most
+8000 bytes, final LIMIT of at most 1000, no OFFSET or UNION) but not its analytic
+semantics; the procedure instructions are reviewed behavior, not a SQL sandbox.
+Each run uses at most eight calls: seven aggregate queries and one property-definition
+read that checks the chosen identity and dimension properties are strings.
 
 Every table identifies its window, population, exclusions and unit. Queries use
 explicit UTC boundaries. Missing keys, late instrumentation, zero denominators,

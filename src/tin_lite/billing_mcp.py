@@ -36,8 +36,11 @@ def register_billing_tools(server, *, runtime, settings, caller):
         preview_only: bool,
     ) -> dict[str, Any]:
         from tin_lite.billing_api import QuoteRequest
+        from tin_lite.mcp_server import _mcp_bound_inputs
 
         token = await caller()
+        # Same contract as start_workflow: the tool call binds project_id, not inputs.
+        inputs = _mcp_bound_inputs(inputs, project_id)
         if workflow_id:
             from tin_lite.mcp_server import _mcp_workflow
 

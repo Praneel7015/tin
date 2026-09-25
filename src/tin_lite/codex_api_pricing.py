@@ -15,24 +15,52 @@ from tin_lite.codex_api import (
 from tin_lite.workflow_costs import SESSION_FUNDING
 
 RATE_CARD = {
-    "id": "openai-codex-standard-2026-09-12-v1",
+    "id": "openai-codex-standard-2026-09-23-v1",
     "provider": "openai",
     "model": MODEL,
     "service_tier": "default",
-    "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "source": "https://developers.openai.com/api/docs/models/gpt-6-sol",
     "tool_source": "https://developers.openai.com/api/docs/pricing",
     "cache_source": "https://developers.openai.com/api/docs/guides/prompt-caching",
     "unit": "USD_nanodollars_per_token",
-    "standard": {"input": 10_000, "cached_input": 1_000, "cache_write": 12_500, "output": 50_000},
+    "standard": {"input": 2_000, "cached_input": 200, "cache_write": 2_500, "output": 10_000},
     "long_context_above_input_tokens": 272_000,
     "long_context": {
-        "input": 20_000,
-        "cached_input": 2_000,
-        "cache_write": 25_000,
-        "output": 75_000,
+        "input": 4_000,
+        "cached_input": 400,
+        "cache_write": 5_000,
+        "output": 15_000,
     },
     "web_search_call_nanos": 10_000_000,
 }
+# Cards earlier runs pinned. They still price those runs' outstanding receipts;
+# new runs never select them.
+HISTORICAL_RATE_CARDS = (
+    {
+        "id": "openai-codex-standard-2026-09-12-v1",
+        "provider": "openai",
+        "model": "gpt-6-astra",
+        "service_tier": "default",
+        "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "tool_source": "https://developers.openai.com/api/docs/pricing",
+        "cache_source": "https://developers.openai.com/api/docs/guides/prompt-caching",
+        "unit": "USD_nanodollars_per_token",
+        "standard": {
+            "input": 10_000,
+            "cached_input": 1_000,
+            "cache_write": 12_500,
+            "output": 50_000,
+        },
+        "long_context_above_input_tokens": 272_000,
+        "long_context": {
+            "input": 20_000,
+            "cached_input": 2_000,
+            "cache_write": 25_000,
+            "output": 75_000,
+        },
+        "web_search_call_nanos": 10_000_000,
+    },
+)
 # Reserve the entire pilot input envelope, not a guess at its cache-hit rate.
 # This is a customer liability ceiling, not a promise that the supplier cannot
 # exceed it (e.g. hidden search context). Tin absorbs that excess and stops calls.
@@ -62,8 +90,11 @@ def api_terms(definition, *, session_budget=False):
         "failure_policy": "verified_usage; platform_duplicates_and_overages_absorbed",
         "unknown_policy": "pending_up_to_24h_then_unresolved_cost_absorbed",
     }
+    # Isolated procedures (e.g. onboarding children) joined the procedure contract on
+    # 2026-09-25. Terms already pinned without codex_contract keep the v1 CONTRACT.
     if definition.get("procedure", {}).get("sandbox", {}).get("profile", "default") in {
         "default",
+        "isolated",
         "browser",
         "studio",
     }:
@@ -87,7 +118,8 @@ def api_terms(definition, *, session_budget=False):
     if (
         session_budget
         and definition.get("executor") == "codex.procedure"
-        and procedure.get("sandbox", {}).get("profile", "default") in {"default", "isolated"}
+        and procedure.get("sandbox", {}).get("profile", "default")
+        in {"default", "isolated", "browser"}
         and procedure_contract(procedure.get("output", {}).get("validator")) != DIAGRAM_CONTRACT
     ):
         terms.update(
@@ -99,11 +131,33 @@ def api_terms(definition, *, session_budget=False):
     return terms
 
 
+def isolated_v1_terms(terms):
+    """The pilot v1 shape isolated procedures were quoted with before 2026-09-25.
+
+    Only for honoring an already-issued, unexpired quote; new admissions use v3.
+    """
+    terms = {key: value for key, value in terms.items() if key != "codex_contract"}
+    terms.update(
+        request_maximum_input_bytes=REQUEST_INPUT_ENVELOPE,
+        request_maximum_nanos=REQUEST_MAXIMUM,
+    )
+    return terms
+
+
+def issued_before_isolated_v3(quoted_terms, terms, definition):
+    return (
+        quoted_terms.get("kind") == "codex_api"
+        and "codex_contract" not in quoted_terms
+        and "codex_contract" in terms
+        and definition.get("procedure", {}).get("sandbox", {}).get("profile") == "isolated"
+    )
+
+
 def price_response(card, record):
     """Only complete, internally consistent supplier facts admit a price."""
     usage = record.get("usage")
     if (
-        card != RATE_CARD
+        (card != RATE_CARD and card not in HISTORICAL_RATE_CARDS)
         or record.get("pricing") != card
         or record.get("provider") != card["provider"]
         or record.get("model") != card["model"]

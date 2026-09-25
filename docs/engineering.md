@@ -308,7 +308,7 @@ what is known about the business, the scorer profile (each parameter needs a ver
 the evidence or code drops it), the scope decision (where growth breaks, which few systems, the
 founder's part, one number to watch), one role per system, the table cells and the spoken view
 with the answers to what the founder asked for. The judgment steps (`facts`, `scope`, `view`)
-use `gpt-6-astra`; the mechanical steps use `gpt-5.6-luna`; both at medium effort, pinned in the
+use `gpt-6-sol`; the mechanical steps use `gpt-6-luna`; both at medium effort, pinned in the
 definition with a digest of the rules, rubric, programs, scorer and prompts. When code changes a
 system's setup after its text was written, that text is rewritten to match the final setup; a
 code-side lint then sends only the offending sentences for one or two short repairs. Each step
@@ -338,7 +338,7 @@ joined, kept one release for clients on older instructions.
 extracts what a designer would notice (title, description, headings, calls to action, body
 text, brand colors weighted by where they appear, JSON-LD and Open Graph facts for
 client-rendered shells), pairs that with project memory and the founder's brief, and sends one
-prepared request to `gpt-6-astra` at medium reasoning with a strict JSON schema for the concept
+prepared request to `gpt-6-sol` at medium reasoning with a strict JSON schema for the concept
 and the drawing. The result is one animatable SVG at `characters/{slug}.svg`; the
 `character-svg.v1` contract accepts only pure geometry (no text, images, scripts, or external
 references) with the five state groups the video renderer flips: `mouth-closed`, `mouth-mid`,
@@ -372,7 +372,7 @@ switchboard fetches the product page itself (public HTTPS only, resolved address
 and up to three stylesheets bounded), extracts what a designer would notice (title, description,
 headings, calls to action, body text, brand colors weighted by where they appear, JSON-LD and
 Open Graph facts for client-rendered shells), pairs that with project memory and the founder's
-brief, and sends one prepared request to `gpt-6-astra` at medium reasoning with a strict JSON
+brief, and sends one prepared request to `gpt-6-sol` at medium reasoning with a strict JSON
 schema for the concept and the drawing. The validator's exact complaints go back for at most two
 repairs, and one refinement pass plays the role of the agent's look-and-fix step. Each model call
 and the publication are effect receipts, so a retry replays instead of paying again. Neither
@@ -416,7 +416,7 @@ POST /api/chat
 GET  /api/projects/{project_id}/chat/messages
 ```
 
-Luna uses `gpt-5.6-luna` on the Responses API. Its tools are compiled from `GET /api/workflows`,
+Luna uses `gpt-6-luna` on the Responses API. Its tools are compiled from `GET /api/workflows`,
 and a selected action is executed through `POST /api/workflows/{id}/runs`; there is no privileged
 model-only dispatch path. The trusted switchboard reads `TIN_LITE_LUNA_API_KEY`. That credential
 is never sent to Temporal history or an E2B sandbox. `OPENAI_API_KEY` and
@@ -512,6 +512,17 @@ ID, mints short-lived installation tokens on demand, and never stores a user PAT
 credentials remain on the trusted switchboard and are explicitly rejected from E2B sandbox
 environments.
 
+Google Ads is linked by manager invitation rather than OAuth. Configure Tin's manager account with
+`TIN_LITE_GOOGLE_ADS_MANAGER_CUSTOMER_ID` and `TIN_LITE_GOOGLE_ADS_MANAGER_REFRESH_TOKEN` (a refresh
+token minted once, with a passkey-capable manager admin, against the same Google OAuth client with
+the `https://www.googleapis.com/auth/adwords` scope; when it was minted against another client, set
+`TIN_LITE_GOOGLE_ADS_OAUTH_CLIENT_ID` and `TIN_LITE_GOOGLE_ADS_OAUTH_CLIENT_SECRET` too), optionally
+`TIN_LITE_GOOGLE_ADS_DEVELOPER_TOKEN` and `TIN_LITE_GOOGLE_ADS_API_VERSION`. Enable the Google Ads
+API on the `tin-lite-integrations` Cloud project; API access levels now attach to that project and
+Basic access is required for production accounts. Founders enter their ten-digit customer id, Tin
+sends the invitation from the manager account, and they accept it under Admin, Access and
+security, Managers in Google Ads.
+
 The first provider capabilities are bounded rather than generic HTTP proxies. Search Console can
 list verified properties and read a validated analytics panel for one selected property. GitHub
 can list installation repositories and, only after the write-permission opt-in, create or recover
@@ -539,7 +550,8 @@ creates the sandbox from the `TIN_LITE_E2B_BROWSER_TEMPLATE` alias, which layers
 build (a fingerprint-hardened Firefox), a pinned Cloudflare WARP client, and the Tin-owned
 `camoufox` MCP server on the standard Codex image. The runner starts WARP as a local SOCKS proxy
 and registers the MCP server, which launches one persistent Camoufox on an Xvfb virtual display
-for the whole run and exposes bounded text tools; Codex writes no browser scripts and there is no
+for the whole run and exposes bounded text tools plus viewport resizing and a bounded screenshot
+of the visible page; Codex writes no browser scripts and there is no
 other browser. By default the browser sends only Cloudflare's challenge hosts through WARP (its
 dependencies are IPv6-only) and everything else out directly, so payment processors see the
 sandbox's own cloud address rather than a shared VPN exit; `TIN_BROWSER_EGRESS` selects `split`,

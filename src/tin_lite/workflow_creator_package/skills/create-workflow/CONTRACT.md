@@ -54,7 +54,7 @@ Keep rubric questions independent; no overall score. Maintainers review cases an
   {"path": declared_path, "content": text}. Code has no direct network or secrets.
 - Managed steps: optional code.model_routes, at most four routes and eight total calls.
   Each names provider/model/max_calls/max_input_bytes/max_output_tokens. Supported targets:
-  openai/gpt-5.6-luna and openai/gpt-6-astra. Per-route max_calls 1–4, input bytes 1024–32000,
+  openai/gpt-6-luna and openai/gpt-6-sol. Per-route max_calls 1–4, input bytes 1024–32000,
   output tokens 64–4096. Call await ctx.models.generate(route=..., step=..., instructions=...,
   data=..., output_schema=...). Validate result["parsed"] before use. Keep step IDs stable.
 - codex.procedure: PROMPT.md plus skills/<name>/SKILL.md and declared text resources.
@@ -66,12 +66,24 @@ Keep rubric questions independent; no overall score. Maintainers review cases an
 - API services: declare integration_requirements plus code.services or procedure.services.
   Up to four aliases, eight total provider calls, 16000-byte requests, and responses bounded
   to 1024–64000 bytes per alias. Use these exact byte counts, not KiB conversions.
-  Code calls await ctx.services.request(service=..., step=..., method=..., path=..., params=...,
-  body=...). Procedures use request_service with the same arguments. Provider keys stay in Tin.
-  GET needs http.read; POST needs http.write and the connection's POST permission even for a
-  read-only query. Provider-side key scopes must restrict effects. Never automatically retry
-  an uncertain request under a different step. Custom connections restrict origin and methods,
-  not individual paths. Required setup belongs in the candidate's instructions.
+  The byte bound, not a provider row limit, caps results: GSC search_analytics.read returns
+  the rows that fit plus truncated/next_start_row, and accepts start_row and dimension_filters.
+  Prefer first-party connections over custom ones when they exist: payments.stripe
+  (subscriptions/customers/invoices/prices/charges.list) and analytics.posthog (query.hogql,
+  event_definitions.list, property_definitions.list, insights.list). Tin projects their records
+  to small fields and returns records/truncated/has_more/next_cursor; page by passing
+  next_cursor as cursor in a new step. query.hogql accepts one SELECT with a final LIMIT of at
+  most 1000, no OFFSET, at most 8000 bytes; Tin supplies the PostHog project, never an input.
+  Code calls await ctx.services.call(service=..., step=..., operation=..., arguments=...);
+  procedures use call_service with the same arguments. Operation reference:
+  docs/stripe-and-posthog-connections.md.
+  Custom connections: code calls await ctx.services.request(service=..., step=..., method=...,
+  path=..., params=..., body=...). Procedures use request_service with the same arguments.
+  Provider keys stay in Tin. GET needs http.read; POST needs http.write and the connection's
+  POST permission even for a read-only query. Provider-side key scopes must restrict effects.
+  Never automatically retry an uncertain request under a different step. Custom connections
+  restrict origin and methods, not individual paths. Required setup belongs in the
+  candidate's instructions.
 
 Input schemas are closed objects. project_id is exactly {"type":"string","format":"uuid"}.
 Tin binds and validates project_id before execution. Procedure context.inputs deliberately omits

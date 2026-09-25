@@ -189,6 +189,71 @@ async def test_estimate_rejects_unfunded_start_without_creating_run(billed):
     assert await f.db.pool.fetchval("SELECT count(*) FROM billing_operations") == 0
 
 
+def test_project_limit_message_names_the_limit_that_blocks_admission():
+    from tin_lite.billing import project_limit_message
+
+    policy = {"per_run_nanos": 10_000_000_000, "monthly_nanos": 10_000_000_000, "concurrency": 1}
+    idle = {"exposure": 0, "active": 0}
+    assert project_limit_message(policy, 5_000_000_000, idle) is None
+    no_policy = project_limit_message(None, 5_000_000_000, idle)
+    assert no_policy.startswith("This project has no spending policy yet.")
+    assert "set_project_spending_limits" in no_policy
+    per_run = project_limit_message(policy, 12_500_000_000, idle)
+    assert per_run.startswith(
+        "This workflow is estimated at up to $12.50; the project's per-run limit is $10.00."
+    )
+    assert "set_project_spending_limits" in per_run
+    monthly = project_limit_message(policy, 5_000_000_000, {"exposure": 7_250_000_000, "active": 0})
+    assert monthly.startswith(
+        "This workflow is estimated at up to $5.00, which would exceed this month's "
+        "$10.00 project limit ($7.25 already committed)."
+    )
+    one = project_limit_message(policy, 5_000_000_000, {"exposure": 0, "active": 1})
+    assert one.startswith("1 run is already active; the project's concurrent-run limit is 1.")
+    many = project_limit_message(
+        {**policy, "concurrency": 2}, 5_000_000_000, {"exposure": 0, "active": 3}
+    )
+    assert many.startswith("3 runs are already active; the project's concurrent-run limit is 2.")
+    assert "set_project_spending_limits" in many
+
+
+async def test_project_limit_admission_says_which_limit_and_keeps_its_code(billed):
+    f = billed
+    await fund(f, 1000)
+    await f.billing.update_policy(
+        f.project.id,
+        ACTOR,
+        ProjectSpendingPolicy(
+            per_run_nanos=4_000_000_000,
+            monthly_nanos=100_000_000_000,
+            concurrency=5,
+            expected_revision=1,
+        ),
+    )
+    with pytest.raises(BillingError, match=r"per-run limit is \$4\.00") as error:
+        await direct(f)
+    assert error.value.code == "project_limit" and error.value.status == 402
+    assert await f.db.pool.fetchval("SELECT count(*) FROM workflow_runs") == 0
+
+
+async def test_cost_preview_accepts_the_same_project_id_start_workflow_strips(billed, monkeypatch):
+    f = billed
+    await install(f, "organic.audit")
+    server = mcp(f, monkeypatch)
+    arguments = {"project_id": str(f.project.id), "workflow_id": "organic.audit"}
+    expected = structured(
+        await server.call_tool("estimate_workflow_run", {**arguments, "inputs": SITE})
+    )
+    for tool in ("estimate_workflow_run", "quote_workflow_run"):
+        bound = {**SITE, "project_id": str(f.project.id).upper()}
+        preview = structured(await server.call_tool(tool, {**arguments, "inputs": bound}))
+        assert preview["estimated_usd"] == expected["estimated_usd"]
+        with pytest.raises(Exception, match="inputs.project_id conflicts"):
+            await server.call_tool(
+                tool, {**arguments, "inputs": {**SITE, "project_id": str(uuid4())}}
+            )
+
+
 async def test_parallel_projects_cannot_spend_same_wallet(billed):
     f = billed
     await fund(f, 1000)

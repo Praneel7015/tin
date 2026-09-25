@@ -91,6 +91,8 @@ ROLLOUT_MAX_DEPTH = 5
 ROLLOUT_LIST_TIMEOUT_SECONDS = 20.0
 ROLLOUT_READ_TIMEOUT_SECONDS = 45.0
 ROLLOUT_CAPTURE_BUDGET_SECONDS = 90.0
+# Controller narration frames; the dashboard stores a shorter projection.
+PROGRESS_MAX_CHARS = 1000
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -142,6 +144,7 @@ class SandboxProcedureInput(SandboxRunInput):
     project_revision: str | None = None
     failure_sink: Callable[[BaseException], Awaitable[None]] | None = None
     interrupted_output_sink: Callable[[bytes], Awaitable[None]] | None = None
+    progress_sink: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -520,6 +523,11 @@ class E2BRuntime:
         companion = run_input.context.get("output", {}).get("companion_path")
         if companion:
             envs["TIN_PROCEDURE_COMPANION_PATH"] = companion
+            if run_input.context["output"].get("reviewed_documents"):
+                envs["TIN_PROCEDURE_DOCUMENT_PAIR"] = "1"
+                envs["TIN_PROCEDURE_COMPANION_MAX_BYTES"] = str(
+                    run_input.context["output"]["companion_max_bytes"]
+                )
         envs["TIN_PROCEDURE_OUTPUT_MAX_BYTES"] = str(run_input.output_max_bytes)
         envs["TIN_PROCEDURE_RESULT_KIND"] = run_input.result_kind
         if run_input.project_revision is not None:
@@ -563,6 +571,8 @@ class E2BRuntime:
                         raise RuntimeError("invalid isolated controller observation")
                     assert run_input.usage_sink is not None
                     await run_input.usage_sink(value)
+                elif line.startswith("TIN_CODEX_PROGRESS="):
+                    await _deliver_progress(line.partition("=")[2], run_input)
 
         try:
             if run_input.context.get("output", {}).get("validator") == "content-draft.v3":
@@ -571,6 +581,12 @@ class E2BRuntime:
                 )
                 if ready.stdout.strip() != "TIN_PROCEDURE_EDITORIAL_V1":
                     raise RuntimeError("Sandbox image lacks editorial assessment support")
+            if run_input.context.get("output", {}).get("reviewed_documents"):
+                ready = await sandbox.commands.run(
+                    "/opt/tin-lite/run-procedure --check-reviewed-documents", timeout=15
+                )
+                if ready.stdout.strip() != "TIN_PROCEDURE_DOCUMENTS_V1":
+                    raise RuntimeError("Sandbox image lacks reviewed document support")
             if companion:
                 ready = await sandbox.commands.run(
                     "/opt/tin-lite/run-procedure --check-companion", timeout=15
@@ -655,7 +671,7 @@ class E2BRuntime:
                 diagram_review=(
                     payload.get("diagram_review")
                     if run_input.context.get("output", {}).get("validator")
-                    == "tin-diagram.reviewed.v1"
+                    in {"tin-diagram.reviewed.v1", "tin-diagram.branded.v1"}
                     else None
                 ),
             )
@@ -710,7 +726,7 @@ class E2BRuntime:
             return
         await run_input.interrupted_output_sink(content)
 
-    async def prepare_diagram(self, *, sandbox_id: str) -> None:
+    async def prepare_diagram(self, *, sandbox_id: str, branded: bool = False) -> None:
         # Read-only startup checks precede the paid-attempt receipt. A transient
         # envd stream timeout must remain retryable without implying a model call.
         sandbox = await AsyncSandbox.connect(
@@ -725,6 +741,14 @@ class E2BRuntime:
         )
         if ready.stdout.strip() != "tin-diagram-check.v1":
             raise RuntimeError("sandbox lacks the offline diagram checker")
+        if branded:
+            support = await sandbox.commands.run(
+                "node /opt/tin-lite/diagram/scripts/check_diagram.mjs --brand-version",
+                timeout=45,
+                request_timeout=30,
+            )
+            if support.stdout.strip() != "tin-diagram.branded.v1":
+                raise RuntimeError("sandbox lacks the branded diagram checker; rebuild its image")
         await self._diagram_product_styles(sandbox)
 
     async def validate_diagram(self, *, content: str | bytes, run_id: str, revision: str) -> dict:
@@ -736,12 +760,12 @@ class E2BRuntime:
         import hashlib
         from pathlib import Path
 
-        from tin_lite.diagram_compositions import parse_diagram_v2
+        from tin_lite.brand_diagrams import parse_diagram
 
         raw = content.encode("utf-8") if isinstance(content, str) else content
         if not 0 < len(raw) <= 64_000:
             raise ValueError("diagram source exceeds its byte bound")
-        parse_diagram_v2(raw.decode("utf-8"))
+        parse_diagram(raw.decode("utf-8"))
         source_sha = hashlib.sha256(raw).hexdigest()
         assets = Path(__file__).parent / "static"
         names = [
@@ -1053,6 +1077,28 @@ def _run_secrets(run_input: SandboxRunInput) -> tuple[str, ...]:
 
 def _redact(value: str, secrets: tuple[str, ...]) -> str:
     return redact_text(value, secrets)[0]
+
+
+async def _deliver_progress(encoded: str, run_input: SandboxProcedureInput) -> None:
+    """Narration is display text, not accounting: drop malformed frames, never fail."""
+    sink = getattr(run_input, "progress_sink", None)
+    if sink is None:
+        return
+    try:
+        value = json.loads(encoded)
+    except ValueError:
+        return
+    text = value.get("text") if isinstance(value, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return
+    try:
+        await sink(_redact(text[:PROGRESS_MAX_CHARS], _run_secrets(run_input)))
+    except Exception:
+        logger.warning(
+            "procedure progress update failed",
+            extra={"execution_key": run_input.execution_key},
+            exc_info=True,
+        )
 
 
 def _task_event(line: str) -> SandboxTaskEvent | None:

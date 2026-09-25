@@ -17,7 +17,7 @@ from test_procedure_publication import publication_db as publication_db
 
 from tin_lite.billing_contracts import BillingError, final_charge
 from tin_lite.codex_api import CONTRACT, PROCEDURE_CONTRACT, SESSION_CONTRACT
-from tin_lite.codex_api_pricing import RATE_CARD, api_terms, price_response
+from tin_lite.codex_api_pricing import RATE_CARD, api_terms, isolated_v1_terms, price_response
 from tin_lite.codex_api_relay import request_body
 from tin_lite.workflow_costs import configured_terms, session_funded
 
@@ -37,7 +37,7 @@ def test_session_contract_and_model_capacity(tmp_path):
         == 12345
     )
     config = tmp_path / "config.toml"
-    config.write_text('model="gpt-6-astra"\n')
+    config.write_text('model="gpt-6-sol"\n')
     load_sandbox_module("codex_api_config").configure(
         config,
         {
@@ -64,7 +64,7 @@ def test_only_ordinary_root_procedures_select_session_terms(profile, validator):
         "procedure": {"sandbox": {"profile": profile}, "output": {"validator": validator}},
     }
     selected = api_terms(definition, session_budget=True)
-    eligible = profile in {"default", "isolated"} and validator is None
+    eligible = profile in {"default", "isolated", "browser"} and validator is None
     assert session_funded(selected) == eligible
     if eligible:
         assert selected["codex_contract"] == SESSION_CONTRACT
@@ -83,7 +83,10 @@ async def test_long_session_uses_returned_usage_without_wallet_lock_or_history_r
 
     f = billed
     run, relay, client, sent = await paid_relay(
-        f, contract=SESSION_CONTRACT, provider_usage=(30_000, 1, 30_000, 0)
+        # 150,000 cached x $0.20/M + 5 x $10/M = $0.03005 per response: about $3 over 100.
+        f,
+        contract=SESSION_CONTRACT,
+        provider_usage=(150_000, 5, 150_000, 0),
     )
     prices = []
 
@@ -130,14 +133,17 @@ async def test_long_session_uses_returned_usage_without_wallet_lock_or_history_r
 async def test_final_response_overage_never_increases_customer_ceiling(billed):
     f = billed
     run, relay, client, sent = await paid_relay(
-        f, contract=SESSION_CONTRACT, provider_usage=(300_000, 128_000, 0, 0)
+        # Long context at gpt-6-sol: 1M x $4/M + 128,000 x $15/M = $5.92, over the $5 ceiling.
+        f,
+        contract=SESSION_CONTRACT,
+        provider_usage=(1_000_000, 128_000, 0, 0),
     )
     try:
         assert (await post(client, run)).status_code == 200
         assert (await post(client, run, {**BODY, "input": "another step"})).status_code == 402
         operation = await f.db.pool.fetchrow("SELECT * FROM billing_operations")
         assert operation["observed_nanos"] == MAXIMUM
-        assert json.loads(operation["observation"])["overage_absorbed_nanos"] == 10_600_000_000
+        assert json.loads(operation["observation"])["overage_absorbed_nanos"] == 920_000_000
         await finish(f, run)
         assert await f.billing.settle(run.id) == MAXIMUM
         assert len(sent) == 1
@@ -249,11 +255,10 @@ async def test_issued_private_v1_quotes_keep_their_limits_and_funding(billed, wh
     await fund(f)
     f.settings.codex_api_projects = {f.project.id}
     q = await quote(f)
-    terms = f.billing.terms(
+    terms = configured_terms(
+        isolated_v1_terms(api_terms(f.workflow.definition)),
         f.workflow.definition,
-        f.project.id,
         {"brief": "Explain the public docs"},
-        session_budget=False,
     )
     if whole_run:
         terms.pop("funding")

@@ -91,7 +91,7 @@ async def admit(f, key, inputs=None, *, parent=None, step=None):
     return run
 
 
-def response(*, model="gpt-5.6-luna", searches=2):
+def response(*, model="gpt-6-luna", searches=2):
     return {
         "id": "resp-supplier-fixture",
         "object": "response",
@@ -137,7 +137,7 @@ def test_supplier_rates_caching_search_and_unknowns():
     terms = service_terms(SPECS["visibility.audit"].definition)
     record = {
         "provider": "openai",
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "service_tier": "default",
         "outcome": "response_received",
         "usage": {
@@ -149,7 +149,7 @@ def test_supplier_rates_caching_search_and_unknowns():
             "web_search_calls": 2,
         },
     }
-    assert receipt_charge(terms, "native_model", record)[0] == 20_299_000
+    assert receipt_charge(terms, "native_model", record)[0] == 20_139_500
     for patch in (
         {"model": "unknown"},
         {"provider": "anthropic"},
@@ -162,6 +162,31 @@ def test_supplier_rates_caching_search_and_unknowns():
     old = deepcopy(terms)
     terms["service_pricing"]["models"].clear()
     assert old["service_pricing"] == CARD  # Quotes do not mutate the shared card.
+
+
+def test_gak_tool_receipt_prices_at_zero_on_the_provider_reported_basis():
+    terms = service_terms(SPECS["organic.keyword_plan"].definition)
+    record = {
+        "provider": "gak",
+        "category": "tool",
+        "endpoint": "api/v1/keywords/ideas",
+        "outcome": "response_received",
+        "reported_cost_usd": "0",
+        "usage": {"requests": 1},
+    }
+    assert receipt_charge(terms, "tool", record) == (
+        0,
+        {
+            "provider": "gak",
+            "endpoint": "api/v1/keywords/ideas",
+            "basis": "provider_reported_cost",
+            "reported_cost_usd": "0",
+        },
+    )
+    # Missing usage is not free, and an unlisted tool provider has no pinned price.
+    assert receipt_charge(terms, "tool", {**record, "reported_cost_usd": None}) is None
+    assert receipt_charge(terms, "tool", {**record, "outcome": "unconfirmed"}) is None
+    assert receipt_charge(terms, "tool", {**record, "provider": "unknown"}) is None
 
 
 @pytest.mark.parametrize("lost_write", [False, True])
@@ -179,7 +204,7 @@ async def test_search_response_and_dataforseo_settle_once(billed, monkeypatch, l
 
     client = OpenAIResponsesClient(
         api_key="fake",
-        model="gpt-5.6-luna",
+        model="gpt-6-luna",
         base_url="https://model.test/v1",
         timeout_seconds=5,
         transport=httpx.MockTransport(wire),
@@ -230,9 +255,19 @@ async def test_native_adapter_supplier_usage_and_pre_dispatch_unpriced_rejection
     run = await native_run(f)
     sent = []
 
+    # Four times the shared fixture's usage: 4 x $0.00279 at gpt-6-sol settles as a visible $0.01.
+    body = response(model="gpt-6-sol", searches=0)
+    body["usage"] = {
+        "input_tokens": 4000,
+        "output_tokens": 400,
+        "total_tokens": 4400,
+        "input_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 1200},
+        "output_tokens_details": {"reasoning_tokens": 160},
+    }
+
     def wire(req):
         sent.append(req)
-        return httpx.Response(200, json=response(model="gpt-6-astra", searches=0))
+        return httpx.Response(200, json=body)
 
     from openai import AsyncOpenAI
 
@@ -244,9 +279,7 @@ async def test_native_adapter_supplier_usage_and_pre_dispatch_unpriced_rejection
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(wire)),
         ),
     )  # noqa: S106
-    route = ModelRoute(
-        "test", ProviderName.OPENAI, "gpt-6-astra", frozenset({ModelCapability.TEXT})
-    )
+    route = ModelRoute("test", ProviderName.OPENAI, "gpt-6-sol", frozenset({ModelCapability.TEXT}))
     request = ModelRequest(
         messages=(ModelMessage(MessageRole.USER, "Generate a character"),), max_output_tokens=100
     )
@@ -476,12 +509,12 @@ def test_reservation_uses_cache_write_upper_bound():
         model_maximum(
             terms,
             provider="openai",
-            model="gpt-5.6-luna",
+            model="gpt-6-luna",
             input_tokens=1000,
             output_tokens=100,
             searches=2,
         )
-        == 20_370_000
+        == 20_175_000
     )
 
 
@@ -542,14 +575,15 @@ async def test_start_here_needs_neither_funds_nor_quote(billed, monkeypatch, key
         await admit(f, "organic.audit", SITE)
 
 
+@pytest.mark.parametrize("profile", ["default", "isolated"])
 async def test_free_onboarding_api_records_supplier_usage_without_debiting_credits(
-    billed, monkeypatch
+    billed, monkeypatch, profile
 ):
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
 
     from fastapi import FastAPI
-    from test_codex_api import GRANT, post, result_event
+    from test_codex_api import BODY, GRANT, post, result_event
 
     from tin_lite.codex_api import (
         ATTEMPT,
@@ -560,7 +594,7 @@ async def test_free_onboarding_api_records_supplier_usage_without_debiting_credi
     )
     from tin_lite.codex_api_pricing import RATE_CARD
     from tin_lite.codex_api_relay import CodexAPIRelay, router
-    from tin_lite.free_workflows import ONBOARDING
+    from tin_lite.free_workflows import ONBOARDING, api_terms_for_included
     from tin_lite.procedures import SandboxProfile
 
     f = billed
@@ -568,7 +602,20 @@ async def test_free_onboarding_api_records_supplier_usage_without_debiting_credi
     # No Start here step is a Codex procedure any more; the included-run relay path still serves
     # Tin-funded Codex work, so exercise it with a synthetic included procedure.
     monkeypatch.setitem(ONBOARDING, "research.deep_dive", "codex.procedure")
+    # Onboarding children such as organic.mention_backlinks run in the isolated profile.
+    spec = SPECS["research.deep_dive"]
+    definition = deepcopy(spec.definition)
+    definition["procedure"]["sandbox"]["profile"] = profile
+    fields = ("id", "key", "title", "description", "executor", "version_label")
+    patched = SimpleNamespace(definition=definition, **{k: getattr(spec, k) for k in fields})
+    monkeypatch.setitem(SPECS, "research.deep_dive", patched)
     run = await admit(f, "research.deep_dive", {"question": "Which clinics buy form builders?"})
+    async with f.db.pool.acquire() as conn:
+        included = await api_terms_for_included(f.db, run.id, conn=conn)
+    # Included work gets the v3 procedure contract and its 1 MiB request bound, not the
+    # eight-request pilot contract whose 100,000-token envelope was enforced as bytes.
+    assert included["codex_contract"] == PROCEDURE_CONTRACT
+    assert included["request_maximum_input_bytes"] == 1_048_576
     await f.db.pool.execute(
         """UPDATE workflow_runs SET status='running', lease_active=true,
            sandbox_id='free-test', lease_owner='test' WHERE id=$1""",
@@ -582,7 +629,7 @@ async def test_free_onboarding_api_records_supplier_usage_without_debiting_credi
                 conn=conn,
                 run=run,
                 procedure=SimpleNamespace(
-                    sandbox=SandboxProfile(profile="default", timeout_seconds=1200)
+                    sandbox=SandboxProfile(profile=profile, timeout_seconds=1200)
                 ),
                 settings=SimpleNamespace(codex_api_projects=set(), luna_api_key="synthetic"),
             )
@@ -639,8 +686,10 @@ async def test_free_onboarding_api_records_supplier_usage_without_debiting_credi
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=api), base_url="https://tin.test"
         ) as client:
-            assert (await post(client, run)).status_code == 200
-            assert (await post(client, run)).status_code == 409
+            # A 150 KB request: above the old 100,000-byte envelope, within v3.
+            large = {**BODY, "input": "x" * 150_000}
+            assert (await post(client, run, large)).status_code == 200
+            assert (await post(client, run, large)).status_code == 409
         assert len(sent) == 1
         assert (
             await f.db.pool.fetchval(
@@ -679,7 +728,7 @@ async def test_unfinished_extra_search_never_locks_credits_for_verified_model_us
 
     client = OpenAIResponsesClient(
         api_key="synthetic",
-        model="gpt-5.6-luna",
+        model="gpt-6-luna",
         base_url="https://model.test/v1",
         timeout_seconds=5,
         transport=httpx.MockTransport(wire),
@@ -704,7 +753,7 @@ async def test_unfinished_extra_search_never_locks_credits_for_verified_model_us
 def test_old_partial_search_receipt_prices_tokens_but_waives_unconfirmed_search_fees():
     record = {
         "provider": "openai",
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "service_tier": "default",
         "outcome": "response_received",
         "usage": {
@@ -720,7 +769,7 @@ def test_old_partial_search_receipt_prices_tokens_but_waives_unconfirmed_search_
     amount, proof = receipt_charge(
         service_terms(SPECS["organic.audit"].definition), "native_model", record
     )
-    assert amount == 299_000
+    assert amount == 139_500
     assert proof["unpriced_search_fees_absorbed"] == 4
 
 

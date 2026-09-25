@@ -481,7 +481,10 @@ async def test_paid_case_checks_caller_limit_and_requires_enforced_billing(publi
         request_id=uuid4(),
         maximum_usd="4",
     )
-    with pytest.raises(QualificationError, match="exceeds"):
+    with pytest.raises(
+        QualificationError,
+        match=r"needs maximum_usd of at least \$5\.00 \(you authorized \$4\.00\)",
+    ):
         await start_case(f, selection)
     selection.maximum_usd = "5"
     with pytest.raises(QualificationError, match="enforced run budgets"):
@@ -548,7 +551,8 @@ async def test_live_runner_stops_for_human_review_without_approving(tmp_path):
 
 async def test_unrounded_model_usage_and_actual_settlement_remain_separate(billed):
     f = billed
-    run, _, application, _ = await paid_relay(f, provider_usage=(100, 60, 0, 0))
+    # gpt-6-sol: 500 x $2/M + 300 x $10/M = $0.004, below the one-cent settlement unit.
+    run, _, application, _ = await paid_relay(f, provider_usage=(500, 300, 0, 0))
     response = await post(application, run)
     assert response.status_code == 200
     await application.aclose()

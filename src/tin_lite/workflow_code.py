@@ -17,7 +17,8 @@ POLICY = "bounded-code-v1"
 MODEL_POLICY = "managed-code-model-v1"
 # Explicit supported routes, using the existing trusted adapters and price card.
 # A configured provider credential alone never admits an unpriced model.
-MODEL_TARGETS = frozenset({("openai", "gpt-5.6-luna"), ("openai", "gpt-6-astra")})
+MODEL_TARGETS = frozenset({("openai", "gpt-6-luna"), ("openai", "gpt-6-sol")})
+ROUTE_KEYS = ("provider", "model", "max_calls", "max_input_bytes", "max_output_tokens")
 MAX_FILE_BYTES = 64_000
 MAX_PACKAGE_BYTES = 256_000
 MAX_OUTPUT_BYTES = 64_000
@@ -37,6 +38,10 @@ class CodeModelRoute:
         return f"workflow.code:{self.provider}:{self.model}"
 
 
+def supported_models() -> str:
+    return ", ".join(f"{provider}/{model}" for provider, model in sorted(MODEL_TARGETS))
+
+
 def model_routes(value):
     if not isinstance(value, dict) or len(value) > 4:
         raise ValueError("model_routes must declare at most four named routes")
@@ -48,13 +53,19 @@ def model_routes(value):
             or not isinstance(route, dict)
         ):
             raise ValueError("invalid code model route")
+        if set(route) != set(ROUTE_KEYS):
+            raise ValueError(
+                f"code model route {name!r} keys must be exactly {', '.join(ROUTE_KEYS)}"
+            )
         if (
-            set(route) != {"provider", "model", "max_calls", "max_input_bytes", "max_output_tokens"}
-            or not isinstance(route["provider"], str)
+            not isinstance(route["provider"], str)
             or not isinstance(route["model"], str)
             or (route["provider"], route["model"]) not in MODEL_TARGETS
         ):
-            raise ValueError("unsupported or unpriced code model route")
+            raise ValueError(
+                f"code model route {name!r} uses an unsupported or unpriced model; "
+                f"supported provider/model pairs: {supported_models()}"
+            )
         for field, lower, upper in (
             ("max_calls", 1, 4),
             ("max_input_bytes", 1024, 32_000),

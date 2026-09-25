@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -16,6 +17,14 @@ from tin_lite.growth_onboarding_activities import GrowthOnboardingActivities
 from tin_lite.onboarding_experience import onboarding_experience, result_links, validate_plan
 
 DEFINITIONS = {w.key: w.definition for w in BUILTIN_WORKFLOWS}
+PACKAGES = {
+    key: json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "workflow_packages" / key / "workflow.json"
+        ).read_text()
+    )["definition"]
+    for key in ("organic.mention_backlinks", "competitor.watch")
+}
 SETTINGS = SimpleNamespace(
     switchboard_public_url="https://api.example.test", app_url="https://app.example.test"
 )
@@ -100,15 +109,76 @@ async def test_oversized_focus_has_actionable_error_without_echoing_the_input():
     )
 
 
-async def test_invalid_enum_and_schedule_are_not_silently_changed():
-    issues = await validate_plan(
+async def test_approval_judges_the_repaired_inputs_setup_will_use():
+    # An out-of-set enum with a default is reset by setup, so approval accepts it.
+    assert not await validate_plan(
         database=db_fixture(),
         project_id=uuid4(),
         text=plan("content.public_article", brief="A synthetic guide", goal="get more customers"),
         systems=["progress"],
         timezone="UTC",
     )
+    # A required enum without a default cannot be repaired and still blocks approval.
+    issues = await validate_plan(
+        database=db_fixture(),
+        project_id=uuid4(),
+        text=plan("organic.audit", site_url="https://example.test", market="the moon"),
+        systems=["progress"],
+        timezone="UTC",
+    )
     assert issues[0]["code"] == "invalid_inputs"
+    assert issues[0]["workflow_key"] == "organic.audit"
+    assert "the moon" not in str(issues)
+
+
+async def test_text_numbers_in_a_stored_plan_approve_and_reach_children_typed():
+    """Plans written before code typed their inputs said max_mentions: "10"."""
+    from tin_lite.growth_onboarding import picked_actions, plan_block
+    from tin_lite.growth_onboarding_activities import repaired_action_inputs
+    from tin_lite.workflow_inputs import normalize_workflow_inputs
+
+    packages = PACKAGES
+    db = db_fixture()
+    db.get_registry_workflow = AsyncMock(
+        side_effect=lambda key: SimpleNamespace(definition=packages[key], title=key)
+    )
+    block = {
+        "systems": [
+            {
+                "id": "outreach",
+                "workflows": [
+                    {
+                        "key": "organic.mention_backlinks",
+                        "mode": "once",
+                        "inputs": {"max_mentions": "10"},
+                    },
+                    {
+                        "key": "competitor.watch",
+                        "mode": "once",
+                        "inputs": {"max_competitors": "5", "competitor_urls": "https://a.example"},
+                    },
+                ],
+            }
+        ]
+    }
+    text = "```tin-plan\n" + json.dumps(block) + "\n```"
+    project_id = uuid4()
+    assert not await validate_plan(
+        database=db, project_id=project_id, text=text, systems=["outreach"], timezone="UTC"
+    )
+    started = {}
+    for action in picked_actions(plan_block(text), ["outreach"]):
+        schema = packages[action["key"]]["input_schema"]
+        repaired, _ = repaired_action_inputs(action, schema, {})
+        started[action["key"]] = normalize_workflow_inputs(
+            schema=schema, project_id=project_id, inputs=repaired
+        )
+    assert started["organic.mention_backlinks"]["max_mentions"] == 10
+    assert started["competitor.watch"]["max_competitors"] == 5
+    assert started["competitor.watch"]["competitor_urls"] == ["https://a.example"]
+
+
+async def test_invalid_schedule_is_not_silently_changed():
     issues = await validate_plan(
         database=db_fixture(),
         project_id=uuid4(),

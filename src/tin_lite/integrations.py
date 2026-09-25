@@ -10,7 +10,9 @@ import logging
 import re
 import secrets
 import tarfile
+import tempfile
 import time
+import zlib
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from email.utils import parseaddr
@@ -21,6 +23,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from anyio import Path as AsyncPath
+from anyio import to_thread
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -35,10 +38,10 @@ from tin_lite.domain import (
 )
 from tin_lite.email_outreach import build_email_message, campaign_message_id
 from tin_lite.repository_limits import (
-    LEGACY_REPOSITORY_BYTES,
-    LEGACY_REPOSITORY_FILES,
-    MAX_REPOSITORY_BYTES,
-    MAX_REPOSITORY_FILES,
+    REPOSITORY_BLOB_FALLBACKS,
+    REPOSITORY_DOWNLOAD_MAX_BYTES,
+    REPOSITORY_MAX_BYTES,
+    REPOSITORY_MAX_FILES,
 )
 from tin_lite.settings import Settings
 
@@ -47,7 +50,65 @@ logger = logging.getLogger(__name__)
 GSC_PROVIDER = "analytics.gsc"
 GITHUB_PROVIDER = "infra.github"
 GOOGLE_WORKSPACE_PROVIDER = "workspace.google"
-PROVIDER_KEYS = frozenset({GSC_PROVIDER, GITHUB_PROVIDER, GOOGLE_WORKSPACE_PROVIDER})
+ADS_PROVIDER = "ads.google"
+STRIPE_PROVIDER = "payments.stripe"
+POSTHOG_PROVIDER = "analytics.posthog"
+PROVIDER_KEYS = frozenset(
+    {
+        GSC_PROVIDER,
+        GITHUB_PROVIDER,
+        GOOGLE_WORKSPACE_PROVIDER,
+        ADS_PROVIDER,
+        STRIPE_PROVIDER,
+        POSTHOG_PROVIDER,
+    }
+)
+# Read-only Stripe capabilities; each names the Stripe resources its operation reads.
+STRIPE_CAPABILITIES = (
+    "subscriptions.read",
+    "customers.read",
+    "invoices.read",
+    "prices.read",
+    "charges.read",
+)
+# Read-only PostHog capabilities for the one project the founder selects.
+POSTHOG_CAPABILITIES = ("query.read", "definitions.read", "insights.read")
+ADS_CAPABILITIES = ("account.read", "campaigns.read", "campaigns.write")
+# Google's ManagerLinkStatus values, lower-cased for the connection's configuration.
+ADS_LINK_STATES = {
+    "ACTIVE": "active",
+    "PENDING": "pending",
+    "REFUSED": "refused",
+    "CANCELED": "canceled",
+    "INACTIVE": "inactive",
+}
+ADS_LINK_MESSAGES = {
+    "ManagerLinkError.TOO_MANY_INVITES": (
+        "Google Ads refused the invitation: this account already has too many open manager "
+        "invitations. Decline an old one in Google Ads, then try again."
+    ),
+    "ManagerLinkError.CLIENT_HAS_NO_ADMIN_USER": (
+        "Google Ads refused the invitation: the account has no admin user to accept it."
+    ),
+    "ManagerLinkError.ACCOUNTS_NOT_COMPATIBLE_FOR_LINKING": (
+        "Google Ads refused the invitation: that account cannot be linked to a manager account."
+    ),
+    "ManagerLinkError.TOO_MANY_ACCOUNTS": (
+        "Tin's manager account cannot take another client account right now."
+    ),
+    "ManagerLinkError.SUSPENDED_ACCOUNT_CANNOT_ADD_CLIENTS": (
+        "Tin's manager account cannot send invitations right now."
+    ),
+    "RequestError.INVALID_CUSTOMER_ID": "That is not a Google Ads customer id.",
+    "AuthorizationError.USER_PERMISSION_DENIED": (
+        "Tin's manager account is not allowed to invite that customer id."
+    ),
+}
+ADS_ALREADY_LINKED = {
+    "ManagerLinkError.ALREADY_INVITED_BY_THIS_MANAGER",
+    "ManagerLinkError.ALREADY_MANAGED_BY_THIS_MANAGER",
+    "ManagerLinkError.ALREADY_MANAGED_IN_HIERARCHY",
+}
 GOOGLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
 GOOGLE_IDENTITY_SCOPES = frozenset({"openid", "email", "profile"})
 WORKSPACE_CAPABILITY_SCOPES = {
@@ -65,6 +126,15 @@ WORKSPACE_DEFAULT_CAPABILITIES = (
 GITHUB_OPEN_PULL_REQUEST_LIMIT = 20
 GITHUB_OPEN_PULL_REQUEST_FILE_LIMIT = 100
 GITHUB_OPEN_PULL_REQUEST_EVIDENCE_MAX_BYTES = 250_000
+GSC_FILTER_DIMENSIONS = frozenset({"query", "page", "country", "device", "searchAppearance"})
+GSC_FILTER_OPERATORS = frozenset(
+    {"equals", "notEquals", "contains", "notContains", "includingRegex", "excludingRegex"}
+)
+GSC_MAX_FILTERS = 5
+GSC_MAX_START_ROW = 100_000
+# Serialized size (json.dumps defaults, as service bounds measure) of the smallest row Search
+# Console can return. A response within a byte bound has at most bound // this many rows.
+GSC_MIN_ROW_BYTES = 70
 
 
 class IntegrationError(RuntimeError):
@@ -83,6 +153,36 @@ class IntegrationUpstreamError(IntegrationError):
     pass
 
 
+class IntegrationInputError(IntegrationError):
+    """The person's own input was rejected before anything was stored."""
+
+
+class ServiceResponseTooLarge(IntegrationError):
+    """A received response exceeded its declared byte bound; the outcome is known, not uncertain."""
+
+
+class ServiceCallRefused(IntegrationError):
+    """The provider answered and refused one read: a known outcome with a Tin-authored message.
+
+    The service gateway settles the step with `code` instead of treating it as uncertain, so a
+    later step may try again. Messages never carry provider bodies or credentials.
+    """
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class IntegrationRateLimitedError(ServiceCallRefused):
+    """The provider rate-limited a read; retry it later under a new step."""
+
+    def __init__(
+        self, message: str, *, reason: str | None = None, retry_after: int | None = None
+    ) -> None:
+        super().__init__(message, code="rate_limited")
+        self.reason, self.retry_after = reason, retry_after
+
+
 class GitHubInstallationRequiredError(IntegrationAuthorizationError):
     """The authorizing user has no installation of the Tin app; send them to install it."""
 
@@ -99,6 +199,14 @@ class GitHubInstallationChoiceError(IntegrationAuthorizationError):
         self.choices, self.project_id = choices, project_id
 
 
+class GoogleAdsCallError(IntegrationUpstreamError):
+    """A Google Ads request failed; `code` is the opaque error code, never provider text."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__("Google Ads did not accept the request.")
+        self.code = code
+
+
 class IntegrationDeliveryUnknownError(IntegrationUpstreamError):
     """The provider call may have succeeded, so automatic replay must fail closed."""
 
@@ -112,6 +220,8 @@ class IntegrationDefinition:
     access_label: str
     capabilities: tuple[str, ...]
     unlocks: tuple[str, ...]
+    # Where the founder creates the credential to paste, for key-entry providers.
+    setup_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -242,7 +352,50 @@ def registered_integrations() -> tuple[IntegrationDefinition, ...]:
             capabilities=tuple(WORKSPACE_CAPABILITY_SCOPES),
             unlocks=("Email shortlist", "Approved email campaigns"),
         ),
+        IntegrationDefinition(
+            key=ADS_PROVIDER,
+            name="Google Ads",
+            badge="GA",
+            description=(
+                "Link your Google Ads account to Tin's manager account so Tin can launch "
+                "and look after one Search campaign you approve."
+            ),
+            access_label="Campaign read + write through Tin's manager account",
+            capabilities=ADS_CAPABILITIES,
+            unlocks=("Google Ads launch", "Google Ads monitor"),
+        ),
+        IntegrationDefinition(
+            key=STRIPE_PROVIDER,
+            name="Stripe",
+            badge="ST",
+            description=(
+                "Read subscriptions, customers, invoices, prices and charges through a "
+                "restricted key you create in Stripe with read permissions only."
+            ),
+            access_label="Read only · restricted key",
+            capabilities=STRIPE_CAPABILITIES,
+            unlocks=("Revenue and churn evidence", "Paying-customer research"),
+            setup_url=_stripe_create_key_url(),
+        ),
+        IntegrationDefinition(
+            key=POSTHOG_PROVIDER,
+            name="PostHog",
+            badge="PH",
+            description=(
+                "Run bounded HogQL reads and list event, property and insight definitions "
+                "in one PostHog project you choose."
+            ),
+            access_label="Read only · one project",
+            capabilities=POSTHOG_CAPABILITIES,
+            unlocks=("Activation and funnel evidence", "Product analytics brief"),
+        ),
     )
+
+
+def _stripe_create_key_url() -> str:
+    from tin_lite.stripe_connection import create_key_url
+
+    return create_key_url()
 
 
 def parse_integration_requirements(value: Any) -> tuple[IntegrationRequirement, ...]:
@@ -362,11 +515,13 @@ class IntegrationService:
         database: Database,
         settings: Settings,
         client: httpx.AsyncClient | None = None,
+        google_ads: Any = None,
     ) -> None:
         self._database = database
         self._settings = settings
         self._client = client or httpx.AsyncClient(timeout=30.0)
         self._owns_client = client is None
+        self._google_ads = google_ads
         self._cipher = (
             CredentialCipher(settings.integration_credential_key.get_secret_value())
             if settings.integration_credential_key is not None
@@ -400,13 +555,27 @@ class IntegrationService:
 
     def is_configured(self, provider_key: str) -> bool:
         self._definition(provider_key)
-        if provider_key.startswith("custom.api."):
+        if provider_key.startswith("custom.api.") or provider_key == STRIPE_PROVIDER:
             return self._cipher is not None
         if provider_key in {GSC_PROVIDER, GOOGLE_WORKSPACE_PROVIDER}:
             return bool(
                 self._cipher
                 and self._settings.google_oauth_client_id
                 and self._settings.google_oauth_client_secret
+            )
+        if provider_key == POSTHOG_PROVIDER:
+            from tin_lite.posthog_connection import oauth_ready
+
+            return self._cipher is not None and oauth_ready(self._settings)
+        if provider_key == ADS_PROVIDER:
+            from tin_lite.google_ads import manager_oauth_client
+
+            client_id, client_secret = manager_oauth_client(self._settings)
+            return bool(
+                client_id
+                and client_secret is not None
+                and getattr(self._settings, "google_ads_manager_customer_id", None)
+                and getattr(self._settings, "google_ads_manager_refresh_token", None)
             )
         return bool(
             self._settings.github_app_slug
@@ -426,6 +595,18 @@ class IntegrationService:
         from tin_lite.project_connections import ProjectConnections
 
         return ProjectConnections(self)
+
+    @property
+    def stripe(self):
+        from tin_lite.stripe_connection import StripeConnections
+
+        return StripeConnections(self)
+
+    @property
+    def posthog(self):
+        from tin_lite.posthog_connection import PostHogConnections
+
+        return PostHogConnections(self)
 
     def definitions(self, connections):
         from tin_lite.project_connections import CUSTOM_KEY, custom_definition
@@ -486,6 +667,44 @@ class IntegrationService:
                         "Google Workspace needs additional permission before starting this workflow"
                     )
                 continue
+            if requirement.provider_key == STRIPE_PROVIDER:
+                missing = set(requirement.capabilities) - _granted(connection)
+                if connection.credential_ciphertext is None or missing:
+                    raise IntegrationAuthorizationError(
+                        "Stripe's restricted key does not allow "
+                        + ", ".join(sorted(missing) or ["these reads"])
+                        + "; add the read permission in Stripe, then press Check again"
+                    )
+                continue
+            if requirement.provider_key == POSTHOG_PROVIDER:
+                if not _selected_string(connection, "selected_project_id"):
+                    raise IntegrationAuthorizationError(
+                        "Choose a PostHog project before starting this workflow"
+                    )
+                missing = set(requirement.capabilities) - _granted(connection)
+                if connection.credential_ciphertext is None or missing:
+                    raise IntegrationAuthorizationError(
+                        "PostHog did not grant "
+                        + ", ".join(sorted(missing) or ["these reads"])
+                        + "; reconnect PostHog and approve the read access"
+                    )
+                continue
+            if requirement.provider_key == ADS_PROVIDER:
+                link = connection.configuration.get("link_status")
+                if link != "active":
+                    raise IntegrationAuthorizationError(
+                        "Accept Tin's manager request in Google Ads before starting this workflow"
+                        if link == "pending"
+                        else "Reconnect Google Ads before starting this workflow"
+                    )
+                if (
+                    "campaigns.write" in requirement.capabilities
+                    and connection.configuration.get("write_opted_in") is not True
+                ):
+                    raise IntegrationAuthorizationError(
+                        "Google Ads campaign changes must be explicitly enabled for this workflow"
+                    )
+                continue
             if any(
                 capability in requirement.capabilities
                 for capability in (
@@ -525,6 +744,16 @@ class IntegrationService:
             raise IntegrationError("Use the secure Custom API form in project Integrations.")
         self._require_configured(provider_key)
         definition = self._definition(provider_key)
+        if provider_key == STRIPE_PROVIDER:
+            # A restricted key is pasted only in Tin's own page, never through chat or MCP.
+            from tin_lite.product_urls import dashboard_url
+
+            return ConnectStart(
+                authorization_url=(
+                    f"{dashboard_url(self._settings)}/connect?project={project_id}"
+                    f"&providers={STRIPE_PROVIDER}"
+                )
+            )
         if capabilities is None:
             requested_capabilities = (
                 WORKSPACE_DEFAULT_CAPABILITIES
@@ -554,10 +783,11 @@ class IntegrationService:
                             ]
                         )
                     )
+        pkce = {GSC_PROVIDER, GOOGLE_WORKSPACE_PROVIDER, POSTHOG_PROVIDER}
         state = secrets.token_urlsafe(32)
         state_hash = _sha256(state)
         verifier_ciphertext = None
-        if provider_key in {GSC_PROVIDER, GOOGLE_WORKSPACE_PROVIDER}:
+        if provider_key in pkce:
             verifier = secrets.token_urlsafe(64)
             assert self._cipher is not None
             verifier_ciphertext = self._cipher.encrypt(
@@ -572,12 +802,21 @@ class IntegrationService:
             requested_capabilities=requested_capabilities,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
-        if provider_key in {GSC_PROVIDER, GOOGLE_WORKSPACE_PROVIDER}:
+        if provider_key in pkce:
             challenge = (
                 base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
                 .rstrip(b"=")
                 .decode()
             )
+        if provider_key == POSTHOG_PROVIDER:
+            from tin_lite.posthog_connection import authorization_url
+
+            return ConnectStart(
+                authorization_url=authorization_url(
+                    self._settings, state=state, challenge=challenge
+                )
+            )
+        if provider_key in {GSC_PROVIDER, GOOGLE_WORKSPACE_PROVIDER}:
             query = urlencode(
                 {
                     "client_id": self._settings.google_oauth_client_id,
@@ -1389,17 +1628,8 @@ class IntegrationService:
         execution_key: str,
         run_id: UUID | None = None,
         expected_binding: GitHubRepositoryBinding | None = None,
-        max_files: int = LEGACY_REPOSITORY_FILES,
-        max_bytes: int = LEGACY_REPOSITORY_BYTES,
     ) -> GitHubRepositoryBundle:
         """Build a bounded immutable repository archive without exposing GitHub auth to E2B."""
-        if (
-            type(max_files) is not int
-            or not 1 <= max_files <= MAX_REPOSITORY_FILES
-            or type(max_bytes) is not int
-            or not 1 <= max_bytes <= MAX_REPOSITORY_BYTES
-        ):
-            raise IntegrationError("GitHub repository workspace limits are invalid")
         if not execution_key or len(execution_key) > 200:
             raise IntegrationError("GitHub execution key is invalid")
         connection = await self._connection(project_id, GITHUB_PROVIDER)
@@ -1416,9 +1646,7 @@ class IntegrationService:
             raise IntegrationAuthorizationError(
                 "Choose a GitHub repository with contents access first"
             )
-        selector = {"repository": repository, "selector": "procedure-repository-v1"}
-        if (max_files, max_bytes) != (LEGACY_REPOSITORY_FILES, LEGACY_REPOSITORY_BYTES):
-            selector["limits"] = {"max_files": max_files, "max_bytes": max_bytes}
+        selector = {"repository": repository, "selector": "procedure-repository-v2"}
         fingerprint = _sha256(_canonical_json(selector))
         token = await self._github_installation_token(_installation_id(connection))
         headers = self._github_headers(token)
@@ -1539,43 +1767,31 @@ class IntegrationService:
             raise IntegrationAuthorizationError(
                 "The selected repository has no eligible files for a procedure workspace"
             )
-        if len(blobs) > max_files or total_bytes > max_bytes:
+        if len(blobs) > REPOSITORY_MAX_FILES or total_bytes > REPOSITORY_MAX_BYTES:
             raise IntegrationAuthorizationError(
                 "The selected repository is outside the procedure workspace limits: "
                 f"{len(blobs):,} files / {total_bytes:,} bytes; "
-                f"this workflow allows {max_files:,} files / {max_bytes:,} bytes"
+                f"this workflow allows {REPOSITORY_MAX_FILES:,} files / "
+                f"{REPOSITORY_MAX_BYTES:,} bytes"
             )
-        archive_buffer = io.BytesIO()
-        with tarfile.open(
-            fileobj=archive_buffer, mode="w:gz", format=tarfile.PAX_FORMAT
-        ) as archive:
-            for item in sorted(blobs, key=lambda value: value["path"]):
-                blob_response = await self._client.get(
-                    f"https://api.github.com/repos/{repository_path}/git/blobs/{item['sha']}",
-                    headers=headers,
-                )
-                blob_payload = _provider_json(blob_response, provider="GitHub")
-                encoded = blob_payload.get("content")
-                if not isinstance(encoded, str) or blob_payload.get("encoding") != "base64":
-                    raise IntegrationUpstreamError("GitHub repository blob is unreadable")
-                try:
-                    content = base64.b64decode("".join(encoded.split()), validate=True)
-                except ValueError as exc:
-                    raise IntegrationUpstreamError("GitHub repository blob is invalid") from exc
-                if len(content) != item["size"]:
-                    raise IntegrationUpstreamError("GitHub repository blob size changed")
-                info = tarfile.TarInfo(name=item["path"])
-                info.size = len(content)
-                info.mode = 0o755 if item["mode"] == "100755" else 0o644
-                info.mtime = 0
-                info.uid = info.gid = 0
-                info.uname = info.gname = ""
-                archive.addfile(info, io.BytesIO(content))
+        wanted = {item["path"]: item for item in blobs}
+        # One tarball request instead of one API call per file. Every file is checked
+        # against its blob hash in the pinned tree, so the archive is exactly head_sha.
+        with tempfile.SpooledTemporaryFile(max_size=16_000_000) as download:
+            await self._github_tarball(repository_path, head_sha, headers, download)
+            contents = await to_thread.run_sync(_verified_tarball_blobs, download, wanted)
+        missing = [item for path, item in wanted.items() if path not in contents]
+        if len(missing) > REPOSITORY_BLOB_FALLBACKS:
+            raise IntegrationUpstreamError("GitHub repository tarball is missing pinned files")
+        for item in missing:
+            # export-ignore drops a path from the tarball and export-subst rewrites it.
+            contents[item["path"]] = await self._github_blob_content(repository_path, headers, item)
+        archive = await to_thread.run_sync(_repository_archive, blobs, contents)
         return GitHubRepositoryBundle(
             repository=repository,
             default_branch=default_branch,
             head_sha=head_sha,
-            archive=archive_buffer.getvalue(),
+            archive=archive,
             file_count=len(blobs),
             complete=len(blobs)
             == len(
@@ -2129,9 +2345,12 @@ class IntegrationService:
         end_date: str,
         dimensions: tuple[str, ...] = ("date",),
         row_limit: int = 1000,
+        start_row: int = 0,
+        dimension_filters: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
         execution_key: str | None = None,
         run_id: UUID | None = None,
         expected_site_url: str | None = None,
+        max_response_bytes: int | None = None,
     ) -> dict[str, Any]:
         connection = await self._connection(project_id, GSC_PROVIDER)
         selected_site = connection.configuration.get("selected_site_url")
@@ -2153,14 +2372,27 @@ class IntegrationService:
             or any(item not in allowed_dimensions for item in dimensions)
         ):
             raise IntegrationError("Search Console dimensions are unsupported")
-        if not 1 <= row_limit <= 25_000:
+        if type(row_limit) is not int or not 1 <= row_limit <= 25_000:
             raise IntegrationError("Search Console row limit must be between 1 and 25000")
-        request_body = {
+        if type(start_row) is not int or not 0 <= start_row <= GSC_MAX_START_ROW:
+            raise IntegrationError(
+                f"Search Console start row must be between 0 and {GSC_MAX_START_ROW}"
+            )
+        filters = _search_console_filters(dimension_filters)
+        sent_limit = row_limit
+        if max_response_bytes is not None:
+            # Lossless: a response that fits the bound cannot hold more rows than this.
+            sent_limit = max(1, min(row_limit, max_response_bytes // GSC_MIN_ROW_BYTES))
+        request_body: dict[str, Any] = {
             "startDate": start_date,
             "endDate": end_date,
             "dimensions": list(dimensions),
-            "rowLimit": row_limit,
+            "rowLimit": sent_limit,
         }
+        if start_row:
+            request_body["startRow"] = start_row
+        if filters:
+            request_body["dimensionFilterGroups"] = [{"groupType": "and", "filters": filters}]
         fingerprint = _sha256(_canonical_json({"site": selected_site, **request_body}))
         receipt_key = execution_key or f"integration:{uuid4()}"
         access_token = await self._google_access_token(connection)
@@ -2188,6 +2420,20 @@ class IntegrationService:
             )
             raise
         rows = payload.get("rows", [])
+        truncated = False
+        if max_response_bytes is not None:
+            payload = _fit_search_console_rows(
+                payload,
+                max_response_bytes=max_response_bytes,
+                start_row=start_row,
+                clamped=sent_limit < row_limit,
+                sent_limit=sent_limit,
+            )
+            truncated = bool(payload.get("truncated"))
+        summary: dict[str, Any] = {"row_count": len(rows) if isinstance(rows, list) else 0}
+        if truncated:
+            summary["returned_row_count"] = len(payload["rows"])
+            summary["truncated"] = True
         await self._database.record_integration_call(
             execution_key=receipt_key,
             project_id=project_id,
@@ -2197,9 +2443,11 @@ class IntegrationService:
             capability="search_analytics.read",
             request_fingerprint=fingerprint,
             status="completed",
-            response_summary={"row_count": len(rows) if isinstance(rows, list) else 0},
+            response_summary=summary,
             provider_request_id=response.headers.get("x-guploader-uploadid"),
         )
+        if max_response_bytes is not None and not payload.get("rows") and rows:
+            raise ServiceResponseTooLarge("A single Search Console row exceeds the response bound.")
         return payload
 
     async def github_create_pull_request(
@@ -3034,6 +3282,8 @@ class IntegrationService:
     async def select_option(
         self, *, project_id: UUID, provider_key: str, option_id: str
     ) -> IntegrationConnection:
+        if provider_key == POSTHOG_PROVIDER:
+            return await self.posthog.select_project(project_id=project_id, option_id=option_id)
         if provider_key == GSC_PROVIDER:
             options = await self.google_sites(project_id=project_id)
             config_key = "selected_site_url"
@@ -3066,6 +3316,19 @@ class IntegrationService:
 
     async def disconnect(self, *, project_id: UUID, provider_key: str) -> bool:
         definition = self._definition(provider_key)
+        if provider_key == ADS_PROVIDER:
+            connection = await self._database.get_integration_connection(
+                project_id=project_id, provider_key=provider_key
+            )
+            if connection is not None:
+                await self._cancel_google_ads_link(connection)
+        if provider_key == POSTHOG_PROVIDER:
+            connection = await self._database.get_integration_connection(
+                project_id=project_id, provider_key=provider_key
+            )
+            if connection is not None:
+                # Best effort, like Google: local disconnection is authoritative.
+                await self.posthog.revoke(connection)
         if provider_key in {GSC_PROVIDER, GOOGLE_WORKSPACE_PROVIDER}:
             connection = await self._database.get_integration_connection(
                 project_id=project_id, provider_key=provider_key
@@ -3195,6 +3458,383 @@ class IntegrationService:
         if not isinstance(first, dict):
             return None
         return _gmail_send_result(first)
+
+    # ------------------------------------------------------------------ Google Ads
+
+    @property
+    def google_ads(self):
+        """Tin's manager-account client; built once from settings, injectable for tests."""
+        if self._google_ads is None:
+            from tin_lite.google_ads import api_from_settings
+
+            self._google_ads = api_from_settings(self._settings)
+        if self._google_ads is None:
+            raise IntegrationNotConfiguredError(
+                "Google Ads is not configured on this Tin deployment"
+            )
+        return self._google_ads
+
+    async def connect_google_ads(
+        self, *, project_id: UUID, customer_id: str, clerk_user_id: str
+    ) -> IntegrationConnection:
+        """Record the founder's account and send Tin's manager invitation to it.
+
+        Nothing about the founder's Google identity is stored; accepting the invitation inside
+        their own Google Ads account is the proof of ownership.
+        """
+        self._require_configured(ADS_PROVIDER)
+        from tin_lite.google_ads import GoogleAdsError
+        from tin_lite.google_ads_requests import customer_id as normalize_customer_id
+
+        try:
+            account = normalize_customer_id(customer_id)
+        except ValueError as exc:
+            raise IntegrationError(
+                "Enter the ten-digit Google Ads customer id, for example 123-456-7890"
+            ) from exc
+        manager = normalize_customer_id(self._settings.google_ads_manager_customer_id)
+        if account == manager:
+            raise IntegrationError("Enter your own Google Ads customer id, not Tin's")
+        existing = await self._database.get_integration_connection(
+            project_id=project_id, provider_key=ADS_PROVIDER
+        )
+        if (
+            existing is not None
+            and existing.external_account_id not in {None, account}
+            and existing.configuration.get("link_status") == "active"
+        ):
+            raise IntegrationAuthorizationError(
+                "Disconnect the linked Google Ads account before connecting another one"
+            )
+        configuration = {
+            **(dict(existing.configuration) if existing is not None else {}),
+            "customer_id": account,
+            "manager_customer_id": manager,
+            "link_status": "pending",
+            "manager_link_id": None,
+            "write_opted_in": True,
+            "health": {},
+            "invited_at": datetime.now(UTC).isoformat(),
+        }
+        connection = await self._database.upsert_integration_connection(
+            project_id=project_id,
+            provider_key=ADS_PROVIDER,
+            external_account_id=account,
+            external_account_label=f"Google Ads {_format_customer_id(account)}",
+            configuration=configuration,
+            credential_ciphertext=None,
+            credential_key_version=None,
+            connected_by_clerk_user_id=clerk_user_id,
+        )
+        execution_key = f"integration:{uuid4()}"
+        fingerprint = _sha256(f"{project_id}:{ADS_PROVIDER}:link:{account}")
+        try:
+            result = await self.google_ads.client_link(account)
+        except GoogleAdsError as exc:
+            await self._record_ads_call(
+                execution_key=execution_key,
+                connection=connection,
+                capability="account.read",
+                fingerprint=fingerprint,
+                status="completed" if exc.code in ADS_ALREADY_LINKED else "failed",
+                response_summary={"code": exc.code},
+                error_code=None if exc.code in ADS_ALREADY_LINKED else exc.code[:120],
+            )
+            if exc.code in ADS_ALREADY_LINKED:
+                return await self.google_ads_link_status(project_id=project_id)
+            raise IntegrationUpstreamError(
+                ADS_LINK_MESSAGES.get(
+                    exc.code,
+                    "Google Ads could not send the manager invitation. Check the customer id "
+                    "and try again.",
+                )
+            ) from None
+        await self._record_ads_call(
+            execution_key=execution_key,
+            connection=connection,
+            capability="account.read",
+            fingerprint=fingerprint,
+            status="completed",
+            response_summary={"resource_name": result.get("resource_name")},
+            provider_request_id=result.get("provider_request_id"),
+        )
+        configuration["manager_link_id"] = _manager_link_id(result.get("resource_name"))
+        updated = await self._database.update_integration_configuration(
+            project_id=project_id, provider_key=ADS_PROVIDER, configuration=configuration
+        )
+        await self._record_activity(
+            updated,
+            "integration_connected",
+            f"Google Ads invitation sent to {_format_customer_id(account)}. Accept it in "
+            "Google Ads under Admin, Access and security, Managers.",
+            suffix=f"{account}:{configuration['invited_at']}",
+        )
+        return updated
+
+    async def google_ads_link_status(self, *, project_id: UUID) -> IntegrationConnection:
+        """Read the manager link from Tin's side and record the founder's answer."""
+        from tin_lite.google_ads import GoogleAdsError
+        from tin_lite.google_ads_requests import QUERIES
+
+        connection = await self._connection(project_id, ADS_PROVIDER)
+        account = _ads_account(connection)
+        manager = connection.configuration.get("manager_customer_id") or ""
+        execution_key = f"integration:{uuid4()}"
+        fingerprint = _sha256(f"{project_id}:{ADS_PROVIDER}:link_status:{account}")
+        try:
+            result = await self.google_ads.search(manager, QUERIES["client_link_status"](account))
+        except GoogleAdsError as exc:
+            await self._record_ads_call(
+                execution_key=execution_key,
+                connection=connection,
+                capability="account.read",
+                fingerprint=fingerprint,
+                status="failed",
+                error_code=exc.code[:120],
+            )
+            raise IntegrationUpstreamError(
+                "Google Ads did not answer the link status check. Try again in a minute."
+            ) from None
+        rows = result.get("rows") or []
+        raw = None
+        for row in rows:
+            link = row.get("customerClientLink") if isinstance(row, dict) else None
+            if isinstance(link, dict) and isinstance(link.get("status"), str):
+                raw = link
+                # Prefer an active link over stale refused or canceled rows.
+                if link["status"] == "ACTIVE":
+                    break
+        status = ADS_LINK_STATES.get(raw["status"], "pending") if raw else "missing"
+        await self._record_ads_call(
+            execution_key=execution_key,
+            connection=connection,
+            capability="account.read",
+            fingerprint=fingerprint,
+            status="completed",
+            response_summary={"link_status": status, "rows": len(rows)},
+            provider_request_id=result.get("provider_request_id"),
+        )
+        previous = connection.configuration.get("link_status")
+        configuration = {
+            **dict(connection.configuration),
+            "link_status": status,
+            "manager_link_id": (
+                str(raw.get("managerLinkId"))
+                if raw and raw.get("managerLinkId") is not None
+                else connection.configuration.get("manager_link_id")
+            ),
+            "link_checked_at": datetime.now(UTC).isoformat(),
+        }
+        updated = await self._database.update_integration_configuration(
+            project_id=project_id, provider_key=ADS_PROVIDER, configuration=configuration
+        )
+        if status in {"refused", "canceled", "inactive", "missing"}:
+            await self._database.mark_integration_attention(
+                project_id=project_id,
+                provider_key=ADS_PROVIDER,
+                error_code=f"manager_link_{status}",
+            )
+            updated = await self._connection(project_id, ADS_PROVIDER)
+        if status == "active" and previous != "active":
+            await self._record_activity(
+                updated,
+                "integration_configured",
+                f"Google Ads account {_format_customer_id(account)} is linked to Tin's manager "
+                "account.",
+                suffix=f"{account}:active",
+            )
+        return updated
+
+    async def google_ads_health(self, *, project_id: UUID) -> IntegrationConnection:
+        """Account status, billing and whether any conversion action records data."""
+        from tin_lite.google_ads import GoogleAdsError
+        from tin_lite.google_ads_requests import QUERIES
+
+        connection = await self._connection(project_id, ADS_PROVIDER)
+        if connection.configuration.get("link_status") != "active":
+            raise IntegrationAuthorizationError(
+                "Accept Tin's manager request in Google Ads before checking the account"
+            )
+        account = _ads_account(connection)
+        reads: dict[str, list] = {}
+        for name, query in (
+            ("account", QUERIES["account"]()),
+            ("billing", QUERIES["billing"]()),
+            ("conversions", QUERIES["conversion_actions"](30)),
+        ):
+            execution_key = f"integration:{uuid4()}"
+            fingerprint = _sha256(f"{project_id}:{ADS_PROVIDER}:health:{name}:{account}")
+            try:
+                result = await self.google_ads.search(account, query)
+            except GoogleAdsError as exc:
+                await self._record_ads_call(
+                    execution_key=execution_key,
+                    connection=connection,
+                    capability="account.read",
+                    fingerprint=fingerprint,
+                    status="failed",
+                    error_code=exc.code[:120],
+                )
+                if exc.code.startswith("AuthorizationError."):
+                    raise IntegrationAuthorizationError(
+                        "Google Ads has not granted Tin's manager account access yet"
+                    ) from None
+                raise IntegrationUpstreamError(
+                    "Google Ads did not answer the account check. Try again in a minute."
+                ) from None
+            reads[name] = result.get("rows") or []
+            await self._record_ads_call(
+                execution_key=execution_key,
+                connection=connection,
+                capability="account.read",
+                fingerprint=fingerprint,
+                status="completed",
+                response_summary={"rows": len(reads[name])},
+                provider_request_id=result.get("provider_request_id"),
+            )
+        health = ads_health_summary(reads)
+        configuration = {**dict(connection.configuration), "health": health}
+        return await self._database.update_integration_configuration(
+            project_id=project_id,
+            provider_key=ADS_PROVIDER,
+            configuration=configuration,
+            external_account_label=(
+                f"{health['descriptive_name']} · {_format_customer_id(account)}"
+                if health.get("descriptive_name")
+                else None
+            ),
+        )
+
+    async def refresh_google_ads(self, *, project_id: UUID) -> IntegrationConnection:
+        connection = await self.google_ads_link_status(project_id=project_id)
+        if connection.configuration.get("link_status") == "active":
+            connection = await self.google_ads_health(project_id=project_id)
+        return connection
+
+    async def google_ads_account(self, *, project_id: UUID) -> str:
+        """The linked customer id for a run; refuses unless the manager link is active."""
+        connection = await self._connection(project_id, ADS_PROVIDER)
+        if connection.status != "connected":
+            raise IntegrationAuthorizationError("Google Ads needs attention")
+        if connection.configuration.get("link_status") != "active":
+            raise IntegrationAuthorizationError("Accept Tin's manager request in Google Ads first")
+        return _ads_account(connection)
+
+    async def google_ads_call(
+        self,
+        *,
+        project_id: UUID,
+        kind: str,
+        request: dict[str, Any],
+        execution_key: str,
+        run_id: UUID | None = None,
+        expected_customer_id: str | None = None,
+    ) -> dict[str, Any]:
+        """One receipted Google Ads request for a run: search, bulk mutate or resource mutate.
+
+        `kind` is search | mutate | mutate_resource; `request` carries `query`, or `operations`
+        and `validate_only`, or `segment` and `body`. Writes require the connection's explicit
+        opt-in. Provider failures surface as GoogleAdsCallError with the opaque error code so
+        the owning receipt can keep it; nothing else from the provider leaves this method.
+        """
+        from tin_lite.google_ads import GoogleAdsError
+
+        connection = await self._connection(project_id, ADS_PROVIDER)
+        account = await self.google_ads_account(project_id=project_id)
+        if expected_customer_id is not None and account != expected_customer_id:
+            raise IntegrationAuthorizationError(
+                "The linked Google Ads account changed after this run started"
+            )
+        write = kind in {"mutate", "mutate_resource"}
+        if write and connection.configuration.get("write_opted_in") is not True:
+            raise IntegrationAuthorizationError("Google Ads campaign changes are not enabled")
+        capability = "campaigns.write" if write else "campaigns.read"
+        fingerprint = _sha256(_canonical_json({"kind": kind, "account": account, **request}))
+        try:
+            if kind == "search":
+                result = await self.google_ads.search(account, request["query"])
+            elif kind == "mutate":
+                result = await self.google_ads.mutate(
+                    account,
+                    request["operations"],
+                    validate_only=bool(request.get("validate_only", False)),
+                )
+            elif kind == "mutate_resource":
+                result = await self.google_ads.mutate_resource(
+                    account, request["segment"], request["body"]
+                )
+            else:
+                raise IntegrationError("unknown Google Ads request kind")
+        except GoogleAdsError as exc:
+            await self._record_ads_call(
+                execution_key=execution_key,
+                run_id=run_id,
+                connection=connection,
+                capability=capability,
+                fingerprint=fingerprint,
+                status="failed",
+                error_code=exc.code[:120],
+            )
+            raise GoogleAdsCallError(exc.code) from None
+        await self._record_ads_call(
+            execution_key=execution_key,
+            run_id=run_id,
+            connection=connection,
+            capability=capability,
+            fingerprint=fingerprint,
+            status="completed",
+            response_summary={
+                "rows": len(result.get("rows") or []),
+                "results": len(result.get("results") or []),
+            },
+            provider_request_id=result.get("provider_request_id"),
+        )
+        return {**result, "customer_id": account}
+
+    async def _cancel_google_ads_link(self, connection: IntegrationConnection) -> None:
+        """Best effort: the local disconnect is authoritative even when Google is down."""
+        link = connection.configuration.get("link_status")
+        manager_link_id = connection.configuration.get("manager_link_id")
+        if link not in {"pending", "active"} or not manager_link_id:
+            return
+        try:
+            await self.google_ads.client_link_update(
+                _ads_account(connection),
+                str(manager_link_id),
+                "CANCELED" if link == "pending" else "INACTIVE",
+            )
+        except Exception:
+            logger.warning(
+                "Google Ads manager link could not be ended",
+                extra={"project_id": str(connection.project_id)},
+            )
+
+    async def _record_ads_call(
+        self,
+        *,
+        execution_key: str,
+        connection: IntegrationConnection,
+        capability: str,
+        fingerprint: str,
+        status: str,
+        run_id: UUID | None = None,
+        response_summary: dict[str, Any] | None = None,
+        provider_request_id: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        await self._database.record_integration_call(
+            execution_key=execution_key,
+            project_id=connection.project_id,
+            run_id=run_id,
+            connection_id=connection.id,
+            provider_key=ADS_PROVIDER,
+            capability=capability,
+            request_fingerprint=fingerprint,
+            status=status,
+            response_summary=response_summary,
+            provider_request_id=provider_request_id,
+            error_code=error_code,
+        )
 
     async def _google_access_token(self, connection: IntegrationConnection) -> str:
         if connection.credential_ciphertext is None or self._cipher is None:
@@ -3332,6 +3972,56 @@ class IntegrationService:
                 project_id=attempt.project_id,
             )
         return int(found[0]["id"])
+
+    async def _github_tarball(
+        self, repository_path: str, head_sha: str, headers: dict[str, str], sink: Any
+    ) -> None:
+        url = f"https://api.github.com/repos/{repository_path}/tarball/{head_sha}"
+        async with self._client.stream("GET", url, headers=headers) as response:
+            if response.status_code == 200:
+                await _download_bounded(response, sink)
+                return
+            location = response.headers.get("location", "")
+            if not response.is_redirect or not location:
+                raise IntegrationUpstreamError(
+                    f"GitHub could not complete the request ({response.status_code})"
+                )
+        target = urlsplit(location)
+        if (
+            target.scheme != "https"
+            or target.hostname != "codeload.github.com"
+            or target.port not in {None, 443}
+            or target.username is not None
+            or target.password is not None
+        ):
+            raise IntegrationUpstreamError("GitHub redirected the repository tarball unexpectedly")
+        # The signed codeload URL carries its own short-lived grant; never forward the token.
+        public = {key: value for key, value in headers.items() if key != "Authorization"}
+        async with self._client.stream("GET", location, headers=public) as response:
+            if response.status_code != 200:
+                raise IntegrationUpstreamError(
+                    f"GitHub could not complete the request ({response.status_code})"
+                )
+            await _download_bounded(response, sink)
+
+    async def _github_blob_content(
+        self, repository_path: str, headers: dict[str, str], item: dict[str, Any]
+    ) -> bytes:
+        blob_response = await self._client.get(
+            f"https://api.github.com/repos/{repository_path}/git/blobs/{item['sha']}",
+            headers=headers,
+        )
+        blob_payload = _provider_json(blob_response, provider="GitHub")
+        encoded = blob_payload.get("content")
+        if not isinstance(encoded, str) or blob_payload.get("encoding") != "base64":
+            raise IntegrationUpstreamError("GitHub repository blob is unreadable")
+        try:
+            content = base64.b64decode("".join(encoded.split()), validate=True)
+        except ValueError as exc:
+            raise IntegrationUpstreamError("GitHub repository blob is invalid") from exc
+        if len(content) != item["size"] or _git_blob_sha(content, item["sha"]) != item["sha"]:
+            raise IntegrationUpstreamError("GitHub repository blob does not match the pinned tree")
+        return content
 
     def _github_headers(self, token: str) -> dict[str, str]:
         return {
@@ -3477,6 +4167,83 @@ class IntegrationService:
         if definition is None:
             raise IntegrationError("unknown integration provider")
         return definition
+
+
+def _format_customer_id(value: str) -> str:
+    return f"{value[:3]}-{value[3:6]}-{value[6:]}" if len(value) == 10 else value
+
+
+def _ads_account(connection: IntegrationConnection) -> str:
+    account = connection.configuration.get("customer_id") or connection.external_account_id
+    if not isinstance(account, str) or not account.isdigit() or len(account) != 10:
+        raise IntegrationAuthorizationError("Google Ads is not connected to an account")
+    return account
+
+
+def _manager_link_id(resource_name: Any) -> str | None:
+    if not isinstance(resource_name, str) or "~" not in resource_name:
+        return None
+    tail = resource_name.rsplit("~", 1)[-1]
+    return tail if tail.isdigit() else None
+
+
+def ads_health_summary(reads: dict[str, list]) -> dict[str, Any]:
+    """Bounded facts from the account, billing and conversion-action queries."""
+
+    def first(rows, key):
+        for row in rows:
+            value = row.get(key) if isinstance(row, dict) else None
+            if isinstance(value, dict):
+                return value
+        return {}
+
+    customer = first(reads.get("account") or [], "customer")
+    tracking = customer.get("conversionTrackingSetting") or {}
+    billing_statuses = sorted(
+        {
+            str((row.get("billingSetup") or {}).get("status"))
+            for row in reads.get("billing") or []
+            if isinstance(row, dict) and isinstance(row.get("billingSetup"), dict)
+        }
+    )
+    actions = []
+    for row in reads.get("conversions") or []:
+        if not isinstance(row, dict) or not isinstance(row.get("conversionAction"), dict):
+            continue
+        action = row["conversionAction"]
+        metrics = row.get("metrics") or {}
+        try:
+            conversions = float(metrics.get("allConversions") or 0)
+        except (TypeError, ValueError):
+            conversions = 0.0
+        actions.append(
+            {
+                "resource_name": action.get("resourceName"),
+                "id": str(action.get("id") or ""),
+                "name": str(action.get("name") or "")[:120],
+                "category": action.get("category"),
+                "status": action.get("status"),
+                "type": action.get("type"),
+                "primary_for_goal": bool(action.get("primaryForGoal")),
+                "conversions_30d": conversions,
+            }
+        )
+    actions.sort(key=lambda item: -item["conversions_30d"])
+    return {
+        "checked_at": datetime.now(UTC).isoformat(),
+        "descriptive_name": str(customer.get("descriptiveName") or "")[:120],
+        "account_status": customer.get("status"),
+        "currency_code": customer.get("currencyCode"),
+        "time_zone": customer.get("timeZone"),
+        "auto_tagging_enabled": bool(customer.get("autoTaggingEnabled")),
+        "conversion_tracking_status": tracking.get("conversionTrackingStatus"),
+        "accepted_customer_data_terms": bool(tracking.get("acceptedCustomerDataTerms")),
+        "conversion_tracking_id": str(tracking.get("conversionTrackingId") or ""),
+        "billing_statuses": billing_statuses,
+        "billing_approved": "APPROVED" in billing_statuses,
+        "conversion_actions": actions[:50],
+        "conversion_actions_with_data": sum(1 for a in actions if a["conversions_30d"] >= 1),
+    }
 
 
 def _test_identity_context(project_id: UUID, identity_id: UUID) -> str:
@@ -3663,9 +4430,78 @@ def _installation_id(connection: IntegrationConnection) -> int:
         raise IntegrationAuthorizationError("GitHub installation is invalid") from exc
 
 
+def _granted(connection: IntegrationConnection) -> set[str]:
+    granted = connection.configuration.get("granted_capabilities", [])
+    return (
+        {item for item in granted if isinstance(item, str)} if isinstance(granted, list) else set()
+    )
+
+
 def _selected_string(connection: IntegrationConnection, key: str) -> str | None:
     value = connection.configuration.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _search_console_filters(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)) or len(value) > GSC_MAX_FILTERS:
+        raise IntegrationError(f"Search Console accepts at most {GSC_MAX_FILTERS} filters")
+    filters = []
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"dimension", "operator", "expression"}
+            or item["dimension"] not in GSC_FILTER_DIMENSIONS
+            or item["operator"] not in GSC_FILTER_OPERATORS
+            or not isinstance(item["expression"], str)
+            or not 1 <= len(item["expression"]) <= 4096
+        ):
+            raise IntegrationError("Search Console filters are unsupported")
+        filters.append(
+            {
+                "dimension": item["dimension"],
+                "operator": item["operator"],
+                "expression": item["expression"],
+            }
+        )
+    return filters
+
+
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
+
+
+def _fit_search_console_rows(
+    payload: dict[str, Any],
+    *,
+    max_response_bytes: int,
+    start_row: int,
+    clamped: bool,
+    sent_limit: int,
+) -> dict[str, Any]:
+    """Keep Google's leading rows that fit the bound and say where the next page starts."""
+    rows = payload.get("rows", [])
+    if not isinstance(rows, list):
+        raise IntegrationError("Search Console returned an unexpected response")
+    more = clamped and len(rows) >= sent_limit
+    if not more and _json_size(payload) <= max_response_bytes:
+        return payload
+    # Budget the envelope with the widest metadata it can carry, then add rows in order.
+    envelope = {
+        **{k: v for k, v in payload.items() if k != "rows"},
+        "rows": [],
+        "truncated": True,
+        "next_start_row": start_row + len(rows),
+    }
+    used = _json_size(envelope)
+    kept = 0
+    for index, row in enumerate(rows):
+        used += _json_size(row) + (2 if index else 0)  # ", " between rows
+        if used > max_response_bytes:
+            break
+        kept += 1
+    return {**envelope, "rows": rows[:kept], "next_start_row": start_row + kept}
 
 
 def _sha256(value: str) -> str:
@@ -3827,6 +4663,78 @@ def _safe_github_source_path(value: str) -> bool:
         return False
     path = PurePosixPath(value)
     return not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts)
+
+
+async def _download_bounded(response: httpx.Response, sink: Any) -> None:
+    declared = response.headers.get("content-length", "")
+    total = 0
+    if declared.isdigit() and int(declared) > REPOSITORY_DOWNLOAD_MAX_BYTES:
+        total = int(declared)
+    else:
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > REPOSITORY_DOWNLOAD_MAX_BYTES:
+                break
+            sink.write(chunk)
+    if total > REPOSITORY_DOWNLOAD_MAX_BYTES:
+        raise IntegrationAuthorizationError(
+            "The selected repository is outside the procedure workspace limits: its archive "
+            f"exceeds {REPOSITORY_DOWNLOAD_MAX_BYTES:,} bytes"
+        )
+    sink.seek(0)
+
+
+def _git_blob_sha(content: bytes, expected: str) -> str:
+    digest = hashlib.sha256() if len(expected) == 64 else hashlib.sha1(usedforsecurity=False)
+    digest.update(b"blob %d\0" % len(content))
+    digest.update(content)
+    return digest.hexdigest()
+
+
+def _verified_tarball_blobs(fileobj: Any, wanted: dict[str, dict[str, Any]]) -> dict[str, bytes]:
+    """Read the tree's eligible files from a GitHub tarball; skip anything unverified."""
+    contents: dict[str, bytes] = {}
+    root: str | None = None
+    try:
+        with tarfile.open(fileobj=fileobj, mode="r|gz") as archive:
+            for member in archive:
+                head, _, path = member.name.partition("/")
+                root = head if root is None else root
+                if not head or head != root:
+                    raise IntegrationUpstreamError("GitHub repository tarball layout is invalid")
+                item = wanted.get(path)
+                if (
+                    item is None
+                    or path in contents
+                    or not member.isreg()
+                    or member.size != item["size"]
+                ):
+                    continue
+                handle = archive.extractfile(member)
+                content = handle.read() if handle is not None else b""
+                if (
+                    len(content) == item["size"]
+                    and _git_blob_sha(content, item["sha"]) == item["sha"]
+                ):
+                    contents[path] = content
+    except (tarfile.TarError, EOFError, OSError, zlib.error) as exc:
+        raise IntegrationUpstreamError("GitHub repository tarball is unreadable") from exc
+    return contents
+
+
+def _repository_archive(blobs: list[dict[str, Any]], contents: dict[str, bytes]) -> bytes:
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+        for item in sorted(blobs, key=lambda value: value["path"]):
+            content = contents[item["path"]]
+            info = tarfile.TarInfo(name=item["path"])
+            info.size = len(content)
+            info.mode = 0o755 if item["mode"] == "100755" else 0o644
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            archive.addfile(info, io.BytesIO(content))
+    return archive_buffer.getvalue()
 
 
 def _safe_github_ref(value: str) -> bool:

@@ -1,5 +1,5 @@
 {
-  "provenance": "Fabricated inline event CTEs executed through PostHog HogQL on 2026-09-21 and 2026-09-22; no customer events or metadata. CI replays these responses, without live access.",
+  "provenance": "Fabricated inline event CTEs executed through PostHog HogQL on 2026-09-21 and 2026-09-22; no customer events or metadata. CI replays these responses, without live access. On 2026-09-24 the coverage and dimensions builders were restructured for Tin's analytics.posthog HogQL guard (one SELECT, at most 8000 bytes); their hashes were updated and the recorded aggregates kept, pending live requalification of those two queries.",
   "cases": {
     "accounts": {
       "inventory": {
@@ -49,7 +49,7 @@
         }
       },
       "coverage": {
-        "query_sha256": "a99b0fbeb92c3d8c8b5543307b040512851b956f989b637cbdc79a94953dd692",
+        "query_sha256": "e1a486eec393c8a464e4ac01bf3e9052129fc8ee53afeab12fafc5909703f0ab",
         "data": {
           "columns": [
             "event",
@@ -232,7 +232,7 @@
         }
       },
       "coverage": {
-        "query_sha256": "ea3c24cc2fd0d3cef126d2ade1b75f45fb9a92550e94c29f2758947832e78cc9",
+        "query_sha256": "77b80113d74d69dea02423fcdad3dae79144c7c812e32a8ada1226554b6ac94e",
         "data": {
           "columns": [
             "event",
@@ -381,7 +381,7 @@
         }
       },
       "dimensions": {
-        "query_sha256": "5cf1908ed3eda74037da04c0393805f515709d542acfaa243541fcf986ecb9df",
+        "query_sha256": "dd94b690057b10f4c8d3ee9a621916e40bece71afb7d1273198db4a4db6fce53",
         "data": {
           "columns": [
             "kind",

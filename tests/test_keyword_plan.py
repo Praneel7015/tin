@@ -17,7 +17,7 @@ from test_procedure_publication import HistoryStorage
 from tin_lite import keyword_plan as v1
 from tin_lite import keyword_plan_v2 as v2
 from tin_lite import keyword_plan_v3 as v3
-from tin_lite import keyword_plan_v4 as v4
+from tin_lite import keyword_plan_v5 as v5
 from tin_lite.catalog import BUILTIN_WORKFLOWS
 from tin_lite.dataforseo import DataForSEOError
 from tin_lite.domain import EffectReceipt, RunStatus
@@ -203,6 +203,15 @@ async def fixture(*, prepare=True, inputs=None, budget=10, modern=False):
             "keyword_instructions": v3.INSTRUCTIONS,
             "keyword_schemas": v3.SCHEMAS,
         }
+    elif modern == "v4":
+        from tin_lite import keyword_plan_v4 as v4
+
+        definition = {
+            **definition,
+            "keyword_policy": v4.POLICY,
+            "keyword_instructions": v4.INSTRUCTIONS,
+            "keyword_schemas": v4.SCHEMAS,
+        }
     storage.read_canonical_artifact = AsyncMock(return_value=canonical_json(definition))
     provider, model = providers()
     activities = KeywordPlanActivities(
@@ -229,14 +238,14 @@ async def finish(activities, run_id):
 def test_catalog_pins_native_contract_and_supported_form():
     assert len({item.id for item in BUILTIN_WORKFLOWS}) == len(BUILTIN_WORKFLOWS)
     assert SPEC.executor == KEY and SPEC.review_policy is None
-    assert SPEC.definition["keyword_policy"] == v4.POLICY
+    assert SPEC.definition["keyword_policy"] == v5.POLICY
     assert SPEC.definition["system"] == "organic-traffic"
     assert registered_workflow_implementations()[KEY] is KeywordPlanWorkflow
     normalized = normalize_workflow_inputs(
         schema=SPEC.input_schema, inputs=INPUTS, project_id="00000000-0000-4000-8000-000000000001"
     )
     check_inputs(normalized)
-    assert normalized["use_search_console"] is False and normalized["audit_run_id"] == ""
+    assert normalized["use_search_console"] is True and normalized["audit_run_id"] == ""
 
 
 def test_normalization_preserves_distinctions_unknowns_and_provenance():
@@ -305,12 +314,16 @@ def test_review_rejects_invented_or_missing_assignments(mutation):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", list(ENDPOINTS))
 async def test_live_adapter_uses_fixed_scope_and_bounds_without_retries(kind):
-    value = (
-        {"host": "example.com", "seeds": ["scheduling"]}
-        if kind == "ranked_relevant"
-        else ["scheduling"]
-        if kind == "overview"
-        else ("example.com" if kind in {"ranked", "competitors"} else "scheduling")
+    value = {
+        "ranked_relevant": {"host": "example.com", "seeds": ["scheduling"]},
+        "overview": ["scheduling"],
+        "overview_batch": ["scheduling"],
+        "ad_traffic": {"keywords": ["scheduling"], "bid": 2.5},
+    }.get(
+        kind,
+        "example.com"
+        if kind in {"ranked", "competitors", "ads_search", "ranked_paid"}
+        else "scheduling",
     )
     expected = request_for(kind, market="US", value=value, tag="fixture")
     calls = []
@@ -319,6 +332,20 @@ async def test_live_adapter_uses_fixed_scope_and_bounds_without_retries(kind):
         calls.append(request)
         assert str(request.url) == f"https://api.dataforseo.com/v3/{ENDPOINTS[kind]}"
         assert json.loads(request.content) == [expected]
+        # The traffic forecast answers with aggregate rows, not an items envelope.
+        result = (
+            []
+            if kind == "ad_traffic"
+            else [
+                {
+                    "items": [],
+                    "items_count": 0,
+                    "total_count": 0,
+                    "location_code": 2840,
+                    "language_code": "en",
+                }
+            ]
+        )
         return httpx.Response(
             200,
             json={
@@ -329,15 +356,7 @@ async def test_live_adapter_uses_fixed_scope_and_bounds_without_retries(kind):
                         "status_code": 20000,
                         "cost": 0.01,
                         "data": expected,
-                        "result": [
-                            {
-                                "items": [],
-                                "items_count": 0,
-                                "total_count": 0,
-                                "location_code": 2840,
-                                "language_code": "en",
-                            }
-                        ],
+                        "result": result,
                     }
                 ],
             },
@@ -346,6 +365,85 @@ async def test_live_adapter_uses_fixed_scope_and_bounds_without_retries(kind):
     provider = KeywordData("fixture", "not-a-credential", transport=httpx.MockTransport(handler))
     result = await provider.query(kind, market="US", value=value, tag="fixture")
     assert result["items"] == [] and len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_search_results_is_a_completed_empty_lookup():
+    expected = request_for("ads_search", market="US", value="quiet.example", tag="fixture")
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "status_code": 20000,
+                "tasks": [
+                    {
+                        "id": "test",
+                        "status_code": 20100,
+                        "status_message": "No Search Results.",
+                        "cost": 0.002,
+                        "result_count": 0,
+                        "data": expected,
+                        "result": None,
+                    }
+                ],
+            },
+        )
+
+    provider = KeywordData("fixture", "x", transport=httpx.MockTransport(handler))
+    result = await provider.query("ads_search", market="US", value="quiet.example", tag="fixture")
+    assert result["items"] == [] and result["reported_cost_usd"] == "0.002"
+
+
+def test_request_for_paid_kinds_are_bounded():
+    with pytest.raises(ValueError):
+        request_for("overview_batch", market="US", value=["k"] * 41, tag="t")
+    with pytest.raises(ValueError):
+        request_for("ad_traffic", market="US", value={"keywords": ["k"] * 41, "bid": 2}, tag="t")
+    with pytest.raises(ValueError):
+        request_for("ad_traffic", market="US", value={"keywords": ["k"], "bid": 0}, tag="t")
+    with pytest.raises(ValueError):
+        request_for("ad_traffic", market="US", value={"keywords": ["k"], "bid": True}, tag="t")
+    forecast = request_for("ad_traffic", market="US", value={"keywords": ["k"], "bid": 3}, tag="t")
+    assert forecast["match"] == "phrase" and forecast["bid"] == 3.0
+    assert "language_code" not in request_for("ads_search", market="US", value="a.example", tag="t")
+    assert request_for("ranked_paid", market="US", value="a.example", tag="t")["item_types"] == [
+        "paid"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ad_traffic_accepts_one_aggregate_row_and_rejects_more_than_requested():
+    value = {"keywords": ["scheduling"], "bid": 2.5}
+    expected = request_for("ad_traffic", market="US", value=value, tag="fixture")
+    row = {"keyword": None, "bid": 2.5, "match": "phrase", "clicks": 12.5, "cost": 31.2}
+
+    def respond(rows):
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={
+                    "status_code": 20000,
+                    "tasks": [
+                        {
+                            "id": "test",
+                            "status_code": 20000,
+                            "cost": 0.09,
+                            "data": expected,
+                            "result": rows,
+                        }
+                    ],
+                },
+            )
+
+        return KeywordData("fixture", "x", transport=httpx.MockTransport(handler))
+
+    result = await respond([row]).query("ad_traffic", market="US", value=value, tag="fixture")
+    assert result["items"] == [row] and result["reported_cost_usd"] == "0.09"
+    with pytest.raises(DataForSEOError):
+        await respond([row, row]).query("ad_traffic", market="US", value=value, tag="fixture")
+    with pytest.raises(DataForSEOError):
+        await respond(["row"]).query("ad_traffic", market="US", value=value, tag="fixture")
 
 
 @pytest.mark.asyncio

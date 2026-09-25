@@ -484,6 +484,21 @@ WORKFLOW_EXPECTATIONS: dict[str, dict[str, str]] = {
         "lands": "Files, the keyword inventory",
         "watch": "the content plan uses it within days",
     },
+    "ads.assessment": {
+        "first": "about fifteen minutes",
+        "lands": "Files, reports/paid-ads/<run>/ASSESSMENT.md",
+        "watch": "the verdict and the fix-before-spend list; nothing is spent on ads",
+    },
+    "ads.launch": {
+        "first": "about ten minutes, then your approval",
+        "lands": "Files, ads/google/<run>/PLAN.md and after approval RESULT.md",
+        "watch": "the plan before approving; the campaign goes live in your Ads account",
+    },
+    "ads.monitor": {
+        "first": "a few minutes on each scheduled day once a campaign is live",
+        "lands": "Files, ads/google/<launch>/monitor/<run>.md",
+        "watch": "proposals that need your approval; automatic changes are listed each day",
+    },
     "content.plan": {
         "first": "the first weekly batch on its scheduled day",
         "lands": "My system, as an editable program",
@@ -579,6 +594,66 @@ WORKFLOW_EXPECTATIONS: dict[str, dict[str, str]] = {
         "first": "usually under an hour",
         "lands": "the dedicated task view, with approval before any project-file changes",
         "watch": "one task per run",
+    },
+    "competitor.watch": {
+        "first": "about twenty minutes; the first run records a baseline",
+        "lands": "Files, reports/competitor-watch/<run>.md",
+        "watch": "most weeks say nothing changed; a report with changes names its response",
+    },
+    "qa.buyer_trust": {
+        "first": "about fifteen minutes",
+        "lands": "Files, reports/BUYER_TRUST.md",
+        "watch": "the verdict and fixes; code fixes go to Improve site health",
+    },
+    "organic.error_surface": {
+        "first": "about thirty minutes",
+        "lands": "Files, reports/error-surface/<run>.md",
+        "watch": "add it to the content plan as a context file",
+    },
+    "organic.mention_backlinks": {
+        "first": "about fifteen minutes",
+        "lands": "Files, reports/backlink-asks/<run>.md",
+        "watch": "send the asks you like yourself; later weeks recheck for the link",
+    },
+    "outreach.paying_segment": {
+        "first": "a few minutes",
+        "lands": "Files, reports/outreach/PAYING_SEGMENT.md",
+        "watch": "who keeps paying, and the inputs it hands to the shortlist and keyword plan",
+    },
+    "outreach.speaking_shortlist": {
+        "first": "about twenty minutes",
+        "lands": "Files, reports/outreach/speaking/<run>.md",
+        "watch": "deadlines first; you submit the pitches",
+    },
+    "outreach.syllabus_placement": {
+        "first": "about thirty minutes",
+        "lands": "Files, reports/outreach/syllabus/<run>.md",
+        "watch": "when each instructor next picks tools; you send the notes",
+    },
+    "outreach.marketplace_listings": {
+        "first": "about twenty minutes, after the Code map",
+        "lands": "Files, reports/outreach/marketplaces/<run>.md",
+        "watch": "one to three filled-in listings to submit yourself",
+    },
+    "outreach.campus_events": {
+        "first": "about twenty minutes",
+        "lands": "Files, reports/outreach/campus-events/<run>.md",
+        "watch": "one activation to pitch; nothing is booked or paid",
+    },
+    "content.release_announce": {
+        "first": "a minute or two",
+        "lands": "Files, reports/RELEASE_ANNOUNCE.md",
+        "watch": "post and send the drafts you approve",
+    },
+    "growth.score_quiz": {
+        "first": "a minute or two",
+        "lands": "Files, reports/SCORE_QUIZ.md",
+        "watch": "embed the widget you approve on your own site",
+    },
+    "product.analytics_brief": {
+        "first": "about fifteen minutes",
+        "lands": "Files, reports/analytics/<run>.md",
+        "watch": "activation and trends on each scheduled day",
     },
 }
 DEFAULT_EXPECTATION = {

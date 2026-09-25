@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 from copy import deepcopy
 from typing import Any
 from uuid import UUID
@@ -104,3 +106,85 @@ def normalize_workflow_inputs(
         label = f"workflow input {location}" if location else "workflow input"
         raise WorkflowInputError(f"{label}: {exc.message}") from exc
     return normalized
+
+
+_TRUE = {"true", "yes", "y", "on", "1"}
+_FALSE = {"false", "no", "n", "off", "0"}
+_LIST_SEPARATOR = re.compile(r"[,\n]")
+
+
+def _number(value: Any, integer: bool) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip().replace("_", "")
+        try:
+            value = int(text)
+        except ValueError:
+            try:
+                value = float(text)
+            except ValueError:
+                return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            value = int(value)
+        elif integer:
+            return None
+    return value if isinstance(value, int | float) else None
+
+
+def coerce_schema_inputs(
+    schema: dict[str, Any], values: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    """Type textual values (e.g. model-written plan inputs) by their top-level schema.
+
+    Converts integer, number and boolean strings, splits a string on commas/newlines for an
+    array of strings, and clamps to minimum/maximum and maxItems. An unparseable value is
+    dropped with a note so the schema default applies. Strings, enums and unknown fields are
+    left to the caller and the schema validator. Pure: no I/O; the input is not mutated.
+    """
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    fixed = dict(values)
+    if not isinstance(properties, dict):
+        return fixed, []
+    notes: list[str] = []
+    for name, value in values.items():
+        prop = properties.get(name)
+        kind = prop.get("type") if isinstance(prop, dict) else None
+        if kind in {"integer", "number"}:
+            number = _number(value, kind == "integer")
+            if number is None:
+                del fixed[name]
+                notes.append(f"{name} dropped; {value!r} is not a {kind}")
+                continue
+            low, high = prop.get("minimum"), prop.get("maximum")
+            if isinstance(low, int | float) and number < low:
+                notes.append(f"{name} raised to its minimum {low}; the plan wrote {value!r}")
+                number = low
+            elif isinstance(high, int | float) and number > high:
+                notes.append(f"{name} lowered to its maximum {high}; the plan wrote {value!r}")
+                number = high
+            fixed[name] = number
+        elif kind == "boolean" and not isinstance(value, bool):
+            text = str(value).strip().lower()
+            if text in _TRUE or text in _FALSE:
+                fixed[name] = text in _TRUE
+            else:
+                del fixed[name]
+                notes.append(f"{name} dropped; {value!r} is not true or false")
+        elif kind == "array":
+            items = prop.get("items") if isinstance(prop.get("items"), dict) else {}
+            if isinstance(value, str) and items.get("type") == "string":
+                value = [part.strip() for part in _LIST_SEPARATOR.split(value) if part.strip()]
+            if not isinstance(value, list):
+                del fixed[name]
+                notes.append(f"{name} dropped; {value!r} is not a list")
+                continue
+            limit = prop.get("maxItems")
+            if isinstance(limit, int) and len(value) > limit:
+                notes.append(f"{name} cut to its first {limit} items")
+                value = value[:limit]
+            fixed[name] = value
+    return fixed, notes

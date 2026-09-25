@@ -80,7 +80,7 @@ class FakeDatabase:
         assert values["exclude_run_id"] == self.run.id
         return [self.source]
 
-    async def get_effect(self, execution_key: str):
+    async def get_effect(self, execution_key: str, conn=None):
         return self.receipts.get(execution_key)
 
     async def project_memory_success(self, **values) -> None:

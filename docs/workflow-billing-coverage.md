@@ -18,7 +18,12 @@ hosted-default policy does so. Neither enables live Stripe charging.
 
 - Native model workflows: `content.plan`, `style.capture`, `creative.character`,
   `content.answer_page`, `project.memory`, `project.weekly_brief`, `scan.report`,
-  `visibility.audit`, `organic.audit`, and `organic.keyword_plan`.
+  `visibility.audit`, `organic.audit`, `organic.keyword_plan` and
+  `ads.assessment` (its ceiling is the run's `max_cost_usd` input, default $6,
+  operator-gated at $3; DataForSEO calls carry their provider-reported cost and the
+  operator-run gak Keyword Planner service reports $0), `ads.launch` (ceiling
+  `max_cost_usd`, default $4) and `ads.monitor` (default $2); both are model steps
+  only, since the Google Ads API reports no cost and its calls are receipted at $0.
 - OpenAI Responses search and DataForSEO crawl/keyword task costs, using trusted
   supplier responses, including usage recorded before content validation fails.
 - `organic.traffic_system`: one root spending ceiling;
@@ -51,13 +56,13 @@ attempt can recover its checkpoint but cannot purchase the model work again.
 
 ### Prices and ceilings
 
-`service_pricing.py` pins `tin-native-supplier-2026-09-14-v1` in each new budget.
-Its currently used routes are OpenAI GPT-5.6 Luna and GPT-6 Astra, standard tier.
+`service_pricing.py` pins `tin-native-supplier-2026-09-22-v1` in each new budget.
+Its currently used routes are OpenAI GPT-6 Luna and GPT-6 Sol, standard tier.
 The card distinguishes uncached input, cached reads, cache writes, output, long
 context and web search. Pricing sources:
 
 - [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
-- [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna)
+- [GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna)
 - [DataForSEO task response cost](https://docs.dataforseo.com/v3/on_page/task_post/)
 
 Provider adapters remain independent from pricing. A new Anthropic, Gemini or

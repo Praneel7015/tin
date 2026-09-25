@@ -1,10 +1,14 @@
 """Reviewed analytics resources, synthetic data only; no provider/model calls in CI."""
 
+import json
 import math
 import re
 from pathlib import Path
 
 import pytest
+from connection_fakes import FakePostHogConnection
+
+from tin_lite.posthog_connection import check_hogql
 
 ROOT = Path(__file__).parents[1]
 PACKAGE = ROOT / "workflow_packages/product.analytics_brief"
@@ -105,7 +109,7 @@ def plan(name="accounts"):
 
 
 def windows():
-    return analytics()["settings"]({"posthog_project_id": "101", "as_of_utc": "2026-01-12"})[1]
+    return analytics()["settings"]({"as_of_utc": "2026-01-12"})[1]
 
 
 @pytest.mark.parametrize("name", ["accounts", "website"])
@@ -137,7 +141,7 @@ def test_inputs_freeze_complete_utc_windows_and_separate_semantics_binding():
     from datetime import UTC, datetime
 
     a = analytics()
-    inputs = {"posthog_project_id": "101"}
+    inputs = {}
     _, w, binding = a["settings"](inputs, datetime(2026, 1, 12, 11, tzinfo=UTC))
     assert [x.isoformat() for x in w] == [
         "2025-12-29T00:00:00+00:00",
@@ -147,8 +151,9 @@ def test_inputs_freeze_complete_utc_windows_and_separate_semantics_binding():
     assert a["settings"]({**inputs, "as_of_utc": "2026-01-19"})[2] == binding
     assert a["settings"]({**inputs, "event_mapping": "Changed meaning"})[2] != binding
     for change in [
-        {"posthog_project_id": "../2"},
-        {"posthog_project_id": 101},
+        # The PostHog project is the one selected in Integrations, never an input.
+        {"posthog_project_id": "101"},
+        {"website_hosts": ["example.com/../admin"]},
         {"reporting_days": True},
         {"reporting_days": 32},
         {"as_of_utc": "yesterday"},
@@ -158,20 +163,45 @@ def test_inputs_freeze_complete_utc_windows_and_separate_semantics_binding():
             a["settings"]({**inputs, **change})
 
 
-def test_queries_are_bounded_and_provider_project_bound():
-    import json
+STEPS = ["inventory", "coverage", "trends", "funnel", "dimensions", "traffic", "breakdown"]
 
-    a, p = analytics(), plan("website")
-    c = {"posthog_project_id": "101"}
-    for step in ["inventory", "coverage", "trends", "funnel", "dimensions", "traffic", "breakdown"]:
+
+def largest_plan():
+    """Every bound at its maximum: six steps, eight labels per dimension, six exclusions."""
+    p = plan("website")
+    p["steps"] = [f"event_number_{i}_long_name" for i in range(6)]
+    p["labels"] = list(p["steps"])
+    p["key_events"] = p["steps"][:4]
+    p["error_events"] = ["job_failed_badly", "job_errored_again"]
+    p["categories"] = [f"Category name {i}" for i in range(8)]
+    p["paths"] = [f"/some/long/path/{i}" for i in range(8)]
+    p["sources"] = [f"source{i}.example.com" for i in range(8)]
+    p["exclusions"] = [
+        {"property": f"person:email_{i}", "value": "a@example.test"} for i in range(6)
+    ]
+    p["actor_key"], p["chain_key"] = "event:account_identifier", "event:attempt_identifier"
+    return p
+
+
+@pytest.mark.parametrize("largest", [False, True])
+def test_queries_are_single_bounded_selects_tins_hogql_guard_accepts(largest):
+    a = analytics()
+    p = largest_plan() if largest else plan("website")
+    hosts = [f"{name}.example.com" for name in ("www", "app", "docs", "blog", "shop")]
+    c = {"website_hosts": hosts if largest else []}
+    for step in STEPS:
         request = a["request"](c, step, p, windows())
-        assert request["path"] == "/api/projects/101/query/"
-        assert request["method"] == "POST"
-        assert len(json.dumps(request).encode()) <= 16000
-        assert "LIMIT" in request["body"]["query"]["query"]
+        assert set(request) == {"service", "step", "operation", "arguments"}
+        assert request["operation"] == "query.hogql" and request["service"] == "analytics"
+        query = request["arguments"]["query"]
+        # No project id or host: Tin injects the project selected in Integrations.
+        assert "/api/projects" not in json.dumps(request)
+        assert len(query.encode()) <= 8000 and "UNION" not in query
+        assert check_hogql(query) == query
+    p = plan("website")
     p["steps"] = [f"step {i}" for i in range(6)]
     p["labels"] = list(p["steps"])
-    query = a["request"](c, "funnel", p, windows())["body"]["query"]["query"]
+    query = a["request"]({}, "funnel", p, windows())["arguments"]["query"]
     assert "n6" in query and "median_d1_6" in query
     assert a["literal"]("I'm here") == "'I\\'m here'"
     for key in ["email;DELETE", "person:email", "event:bad.key", None]:
@@ -199,8 +229,8 @@ def test_exclusions_preserve_types_null_inclusion_and_do_not_publish_values():
         a["restore_pin"](public, "another", rules)
     with pytest.raises(ValueError, match="exclusions"):
         a["restore_pin"](public, "binding", [])
-    query = a["request"]({"posthog_project_id": "101"}, "inventory", p, windows())
-    assert "team@example.test" not in a["safe_sql"](query["body"]["query"]["query"], rules)
+    query = a["request"]({}, "inventory", p, windows())
+    assert "team@example.test" not in a["safe_sql"](query["arguments"]["query"], rules)
 
 
 def test_repeat_keeps_labels_and_saved_input_edits_explicitly_reconfigure():
@@ -219,27 +249,41 @@ def test_repeat_keeps_labels_and_saved_input_edits_explicitly_reconfigure():
     assert a["plan_state"](previous, "new binding", proposed, {})["state"] == "reconfigured"
 
 
+def result(**changes):
+    """A query.hogql result as Tin's gateway returns it."""
+    return {
+        "columns": ["n"],
+        "types": ["UInt64"],
+        "rows": [[1]],
+        "has_more": False,
+        "truncated": False,
+        **changes,
+    }
+
+
 @pytest.mark.parametrize(
     "bad",
     [
-        {"error": "failed"},
-        {"hasMore": True},
-        {"next": "page2"},
-        {"is_partial": True},
-        {"query_status": {"complete": False}},
+        {"has_more": True},
+        {"truncated": True},
+        {"has_more": None},
         {"columns": ["unexpected"]},
-        {"results": [[1, 2]]},
-        {"results": [[1]] * 2},
+        {"rows": None},
+        {"rows": [[1, 2]]},
+        {"rows": [[1]] * 2},
     ],
 )
 def test_plausible_but_unusable_provider_result_is_rejected(bad):
     with pytest.raises(ValueError):
-        analytics()["table"]({"columns": ["n"], "results": [[1]], **bad}, ["n"], 2)
+        analytics()["table"](result(**bad), ["n"], 2)
+    # PostHog's own response shape is not what the gateway returns; it is never read directly.
+    with pytest.raises(ValueError):
+        analytics()["table"]({"columns": ["n"], "results": [[1]], "hasMore": False}, ["n"], 2)
 
 
-def test_cached_complete_results_are_usable_and_zero_is_not_failure():
+def test_complete_results_are_usable_and_zero_is_not_failure():
     a = analytics()
-    assert a["table"]({"columns": ["n"], "results": [], "is_cached": True}, ["n"], 2) == []
+    assert a["table"](result(rows=[]), ["n"], 2) == []
     assert a["ratio"](0, 0) is None
     assert a["change"](5, 0) == {"current": 5, "prior": 0, "delta": 5, "relative_pct": None}
     totals, rows = a["reconcile_funnel"]([], plan(), windows(), {})
@@ -297,9 +341,7 @@ def test_website_keys_are_independent_from_account_funnel():
         }
     )
     a["validate_plan"](p)
-    sql = a["request"]({"posthog_project_id": "101"}, "traffic", p, windows())["body"]["query"][
-        "query"
-    ]
+    sql = a["request"]({}, "traffic", p, windows())["arguments"]["query"]
     assert "account_id" not in sql and "job_id" not in sql
     assert "$session_id" in sql and "distinct_id" in sql
     p["steps"][0] = "$pageview"
@@ -332,7 +374,8 @@ async def test_registered_package_publishes_pinned_resources_and_run_owned_repor
     assert pinned.output_path == f"reports/analytics/{run_id}.md"
     assert pinned.resolve_inputs(inputs={}, run_id=run_id).output_path == pinned.output_path
     assert procedure.resolve_inputs(inputs={}, run_id=uuid4()).output_path != pinned.output_path
-    assert procedure.services[0].provider_key == "custom.api.posthog"
+    assert procedure.services[0].provider_key == "analytics.posthog"
+    assert set(procedure.services[0].capabilities) == {"query.read", "definitions.read"}
     assert procedure.services[0].max_calls == 8
     assert procedure.sandbox.egress == "fenced"
     assert (
@@ -386,19 +429,33 @@ async def test_package_uses_shared_qualification_and_diagnostic_fails_normal_cas
     assert result["status"] == "failed"
 
 
-@pytest.mark.parametrize("name", ["accounts", "website"])
-def test_provider_fixtures_reconcile_exact_generated_queries(name):
+async def replay(recorded, p):
+    """Send each generated request through Tin's offline PostHog binding, which applies the
+    HogQL guard and projects the recorded PostHog response exactly as the gateway does."""
     import hashlib
 
-    a, p = analytics(), plan(name)
-    saved = fixture("provider_results")["cases"][name]
+    a = analytics()
+    queries = {f"analytics brief {step}": saved["data"] for step, saved in recorded.items()}
+    posthog = FakePostHogConnection({}, service="analytics", queries=queries)
     rows = {}
-    for step, recorded in saved.items():
-        query = a["request"]({"posthog_project_id": "101"}, step, p, windows())["body"]["query"][
-            "query"
-        ]
-        assert hashlib.sha256(query.encode()).hexdigest() == recorded["query_sha256"]
-        rows[step] = a["table"](recorded["data"], *a["query_columns"](step, p))
+    for step, saved in recorded.items():
+        request = a["request"]({}, step, p, windows())
+        query = request["arguments"]["query"]
+        assert hashlib.sha256(query.encode()).hexdigest() == saved["query_sha256"]
+        data = await posthog.call(
+            service=request["service"],
+            step=request["step"],
+            operation=request["operation"],
+            arguments=request["arguments"],
+        )
+        rows[step] = a["table"](data, *a["query_columns"](step, p))
+    return rows
+
+
+@pytest.mark.parametrize("name", ["accounts", "website"])
+async def test_provider_fixtures_reconcile_exact_generated_queries(name):
+    a, p = analytics(), plan(name)
+    rows = await replay(fixture("provider_results")["cases"][name], p)
     _, keys = a["coverage"](p, windows())
     cov = a["validate_coverage"](rows["coverage"], a["event_list"](p), windows(), keys)
     a["reconcile_coverage"](cov, rows["inventory"], p, windows())
@@ -437,6 +494,8 @@ def discovery_rows(total=205):
 
 
 def test_large_catalog_does_not_turn_undiscovered_events_into_zero_counts():
+    from tin_lite.posthog_connection import project_query
+
     a, p = analytics(), plan("accounts")
     inventory = discovery_rows()
     a["validate_inventory"](inventory, windows())
@@ -445,7 +504,10 @@ def test_large_catalog_does_not_turn_undiscovered_events_into_zero_counts():
         "total_event_types": 205,
         "complete": False,
     }
-    data = fixture("provider_results")["cases"]["accounts"]["coverage"]["data"]
+    data = project_query(
+        fixture("provider_results")["cases"]["accounts"]["coverage"]["data"],
+        max_response_bytes=64_000,
+    )
     rows = a["table"](data, *a["query_columns"]("coverage", p))
     _, keys = a["coverage"](p, windows())
     cov = a["validate_coverage"](rows, a["event_list"](p), windows(), keys)
@@ -492,18 +554,11 @@ def test_empty_discovery_is_complete_and_small_discovery_stays_exact():
 
 
 @pytest.mark.parametrize("name", ["six", "empty", "exclusions", "mixed"])
-def test_provider_boundary_fixtures(name):
-    import hashlib
-
+async def test_provider_boundary_fixtures(name):
     a = analytics()
     case = fixture("provider_edges")["cases"][name]
-    p, rows = case["plan"], {}
-    for step, response in case["responses"].items():
-        query = a["request"]({"posthog_project_id": "101"}, step, p, windows())["body"]["query"][
-            "query"
-        ]
-        assert hashlib.sha256(query.encode()).hexdigest() == response["query_sha256"]
-        rows[step] = a["table"](response["data"], *a["query_columns"](step, p))
+    p = case["plan"]
+    rows = await replay(case["responses"], p)
     if name in {"six", "empty"}:
         totals = a["validate_funnel"](rows["funnel"], p, windows())
         assert totals["current"] == ([1] * 6 if name == "six" else [0] * 3)
@@ -540,3 +595,70 @@ def test_configured_dimensions_have_the_same_safe_labels_as_discovery(value):
         a["validate_dimensions"](
             [{"kind": "categories", "value": value, "volume": 2}], plan("website")
         )
+
+
+def test_host_scope_is_bound_and_applies_to_inventory_and_traffic():
+    a = analytics()
+    c, w, binding = a["settings"](
+        {"as_of_utc": "2026-09-22", "website_hosts": ["example.com", "www.example.com"]}
+    )
+    _, _, unscoped = a["settings"]({"as_of_utc": "2026-09-22"})
+    assert binding != unscoped
+    request = a["request"](c, "inventory", {"exclusions": []}, w)
+    sql = request["arguments"]["query"]
+    assert "event!='$pageview' OR" in sql and "'www.example.com'" in sql
+    assert "$host" in sql
+    for bad in [["example.com/path"], ["example.com", "example.com"], ["x'); DROP TABLE events"]]:
+        with pytest.raises(ValueError):
+            a["settings"]({"website_hosts": bad})
+
+
+def website_properties():
+    """Property definitions for the website fixture's events, as PostHog lists them."""
+    events = ["$pageview", "signup_started", "signup_completed", "first_export"]
+    rows = [
+        ("$session_id", "String", events),
+        ("$pathname", "String", ["$pageview"]),
+        ("$referring_domain", "String", ["$pageview"]),
+        ("$device_type", "String", events),
+        ("plan_seats", "Numeric", ["signup_completed"]),
+    ]
+    return {
+        "property_definitions": [
+            {
+                "id": f"p{i}",
+                "name": name,
+                "property_type": kind,
+                "is_numerical": kind == "Numeric",
+                "_fixture_events": used,
+            }
+            for i, (name, kind, used) in enumerate(rows)
+        ]
+    }
+
+
+async def test_property_definitions_check_declared_types_through_the_binding():
+    a, p = analytics(), plan("website")
+    request = a["properties_request"](a["event_list"](p))
+    assert request["operation"] == "property_definitions.list"
+    posthog = FakePostHogConnection(website_properties(), service="analytics")
+    page = await posthog.call(**request)
+    found = a["property_types"](page)
+    assert found["complete"] and found["types"]["$pathname"] == "String"
+    checked = a["check_property_types"](found, p)
+    assert checked == {"conflicts": [], "unverified": [], "complete": True}
+    p["category_property"] = "plan_seats"
+    p["categories"] = []
+    checked = a["check_property_types"](found, p)
+    assert checked["conflicts"] == [
+        {"property": "plan_seats", "type": "Numeric", "expected": "String"}
+    ]
+    # A property missing from the listing is unverified, never proof it is absent.
+    p["chain_key"] = "event:job_id"
+    assert "job_id" in a["check_property_types"](found, p)["unverified"]
+    for events in [[], ["x"] * 2, [f"e{i}" for i in range(21)], [None]]:
+        with pytest.raises(ValueError):
+            a["properties_request"](events)
+    for bad in [{"records": None}, {**page, "has_more": None}, {**page, "records": [{"x": 1}]}]:
+        with pytest.raises(ValueError):
+            a["property_types"](bad)

@@ -1,0 +1,100 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "organic.mention_backlinks",
+    "title": "Turn unlinked mentions into backlink asks",
+    "description": "Each week, find pages and AI-cited sources that name your product without linking to your site, and get one short ask per page in your voice, never repeating an ask from an earlier week. It never sends, posts or contacts anyone.",
+    "executor": "codex.procedure",
+    "version": "2.0.0",
+    "system": "organic-traffic",
+    "schedule_modes": ["on_demand", "weekly"],
+    "prerequisites": [
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": "reports/GROWTH_ONBOARDING_PLAN.md",
+        "producer": "growth.onboarding_plan",
+        "reason": "The plan names the business and its hard no's, so brand_name can stay empty and a no-cold-email rule withholds drafts."
+      },
+      {
+        "kind": "run",
+        "level": "recommended",
+        "workflow": "organic.audit",
+        "reason": "The audit's evidence holds the brand name, aliases and site hosts, and the pages AI answers cited when they named the brand."
+      },
+      {
+        "kind": "artifact",
+        "level": "recommended",
+        "path": ".agents/skills/writing-style/SKILL.md",
+        "producer": "style.capture",
+        "reason": "The writing guide shapes every drafted ask; without it drafts stay plain."
+      }
+    ],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id"],
+      "properties": {
+        "project_id": { "type": "string", "format": "uuid" },
+        "brand_name": {
+          "type": "string",
+          "title": "Brand or product name",
+          "description": "Leave empty to use the name Tin already holds: the onboarding plan, the latest organic audit, or project memory.",
+          "maxLength": 200,
+          "default": "",
+          "x-tin-ui": { "control": "text", "order": 10 }
+        },
+        "domain": {
+          "type": "string",
+          "title": "Site domain",
+          "description": "A bare host such as example.com. Leave empty to use the site from the latest organic audit, keyword plan or project memory.",
+          "maxLength": 253,
+          "default": "",
+          "x-tin-ui": { "control": "text", "order": 20 }
+        },
+        "aliases": {
+          "type": "string",
+          "title": "Other names people use for it",
+          "description": "Founder name, former name, common misspelling, etc. One per line. Added to the aliases the audit already found.",
+          "maxLength": 1000,
+          "default": "",
+          "x-tin-ui": { "control": "textarea", "order": 30 }
+        },
+        "max_mentions": {
+          "type": "integer",
+          "title": "New pages to fully investigate",
+          "minimum": 3,
+          "maximum": 30,
+          "default": 15,
+          "x-tin-ui": { "control": "counter", "order": 40 }
+        },
+        "recency_days": {
+          "type": "integer",
+          "title": "Prefer pages published within (days)",
+          "description": "A soft recency preference, not a hard filter; older durable pages can still qualify.",
+          "minimum": 7,
+          "maximum": 730,
+          "default": 180,
+          "x-tin-ui": { "control": "counter", "order": 50 }
+        }
+      }
+    },
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": [
+        "skills/mention-to-backlink/SKILL.md",
+        "skills/mention-to-backlink/LEDGER.md"
+      ],
+      "entry_skill": "mention-to-backlink",
+      "workspace": { "kind": "project.state" },
+      "sandbox": { "profile": "isolated", "egress": "fenced", "timeout_seconds": 900 },
+      "output": {
+        "kind": "project.artifact",
+        "path_template": "reports/backlink-asks/{run_id}.md",
+        "media_type": "text/markdown",
+        "max_bytes": 120000
+      }
+    }
+  }
+}

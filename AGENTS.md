@@ -36,9 +36,11 @@ cross-cutting implementation safeguards, not historical deployment logs.
     `skills/<name>/SKILL.md`. The contract still bounds inputs, workspace, integrations
     and output, which is a project artifact or an unmerged GitHub PR.
 - Packages live in `workflow_packages/<key>/` with the same key in the manifest, and ship
-  offline fixture tests that include a plausible but unusable model result. Check with
-  `uv run tin-lite validate-community`. Copy from `example.csv_summary` and
-  `example.feedback_digest`; `example.*` and `custom.*` keys are reserved.
+  offline fixture tests that include a plausible but unusable model result. A procedure
+  without model routes shows the same for a provider response or input instead, such as a
+  truncated read or a missing selection. Check with `uv run tin-lite validate-community`.
+  Copy from `example.csv_summary` and `example.feedback_digest`; `example.*` and
+  `custom.*` keys are reserved.
 - Respect the package boundary: no `pip`, raw credentials or direct network access, and
   bounded runtime and model calls; see [code execution](docs/code-workflows.md) and
   [model steps](docs/code-model-workflows.md). Longer durable orchestration is a native
@@ -103,13 +105,15 @@ cross-cutting implementation safeguards, not historical deployment logs.
   connections use the trusted service gateway; author code receives a service binding,
   not an API key. Preserve endpoint/redirect/private-address checks and stable operation IDs.
 - Private workflow packages require explicit validation and activation of an immutable
-  revision plus the existing operator allowlist. workflow.code supports bounded code,
-  managed model steps, service requests and eligible schedules. Private procedures remain
-  isolated and on demand; they are not interactive project.task sessions.
+  revision plus the private execution gate: the operator allowlist, or the open setting on
+  a billed deployment. workflow.code supports bounded code, managed model steps, service
+  requests and eligible schedules. Private procedures remain isolated and on demand; they
+  are not interactive project.task sessions.
 - Public contributions also support deterministic Python and multi-step managed-model code,
   not only Codex procedures. Validate packages without executing author code; select them
   explicitly in PUBLIC_WORKFLOWS for catalog publication. Keep examples unregistered, and
-  preserve the separate private activation gate. See docs/adding-a-workflow.md.
+  preserve the separate private activation gate: explicit validation and activation of an
+  immutable custom.* revision in the isolated runtime. See docs/adding-a-workflow.md.
 
 ## Billing
 

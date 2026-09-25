@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +17,9 @@ from tin_lite.domain import GROWTH_ONBOARDING_PLAN_PATH, GROWTH_ONBOARDING_PLAN_
 from tin_lite.growth_onboarding import plan_block, plan_picks, plan_view
 from tin_lite.growth_plan_assets import score as scorer
 from tin_lite.growth_plan_site import evidence_text, read_site
+from tin_lite.public_workflows import PUBLIC_WORKFLOWS
+
+ROOT = Path(__file__).resolve().parents[1]
 
 TODAY = "2026-09-18"
 NOTES = (
@@ -327,7 +331,7 @@ async def test_plan_says_what_arrives_first_and_never_promises_publication():
     # A blank repository field does not hide GitHub; it is conditional on confirming the repository.
     connections = text.split("## Connections\n", 1)[1].split("```tin-plan", 1)[0]
     assert "analytics.gsc" in connections and "actual queries and impressions" in connections
-    assert "product analytics" in connections and "does not connect" in connections
+    assert "product analytics" in connections and "reads PostHog directly" in connections
     # The mailbox is requested only when the selected work needs it.
     needed = {i for item in block_of(text) for i in item["integrations"]}
     assert ("workspace.google" in connections) == ("workspace.google" in needed)
@@ -369,6 +373,88 @@ def test_workflow_inputs_are_held_to_the_input_schema():
     assert "depth" not in kept[0]["inputs"]
     assert 0 < len(kept[0]["inputs"]["focus"]) <= 240
     assert any("depth" in n for n in notes) and any("240" in n for n in notes)
+
+
+def package_schema(key):
+    path = ROOT / "workflow_packages" / key / "workflow.json"
+    return json.loads(path.read_text())["definition"]["input_schema"]
+
+
+def test_numbers_and_lists_are_typed_before_the_founder_sees_them():
+    """The model writes every input as text; the tin-plan block must carry schema types."""
+    mentions = workflow("organic.mention_backlinks", "Mention backlinks")
+    mentions.update(
+        optional_inputs=["max_mentions", "recency_days"],
+        input_schema=package_schema("organic.mention_backlinks"),
+    )
+    watch = workflow("competitor.watch", "Competitor watch")
+    watch.update(
+        optional_inputs=["competitor_urls", "max_competitors"],
+        input_schema=package_schema("competitor.watch"),
+    )
+    avail = {
+        "outreach": {"workflows": [dict(mentions, includable=True), dict(watch, includable=True)]}
+    }
+    item = {
+        "id": "outreach",
+        "workflows": [
+            {
+                "key": "organic.mention_backlinks",
+                "mode": "once",
+                "weekdays": [],
+                "local_time": "",
+                "inputs": [
+                    {"name": "max_mentions", "value": "10"},
+                    {"name": "recency_days", "value": "lots"},
+                ],
+            },
+            {
+                "key": "competitor.watch",
+                "mode": "once",
+                "weekdays": [],
+                "local_time": "",
+                "inputs": [
+                    {"name": "max_competitors", "value": "9"},
+                    {"name": "competitor_urls", "value": "https://a.example, https://b.example"},
+                ],
+            },
+        ],
+    }
+
+    kept, notes = plan.validate_system(item, avail, inputs())
+
+    assert kept[0]["inputs"] == {"max_mentions": 10}  # "lots" is dropped; the default applies.
+    assert kept[1]["inputs"] == {
+        "max_competitors": 5,
+        "competitor_urls": ["https://a.example", "https://b.example"],
+    }
+    assert any("recency_days dropped" in n for n in notes)
+    assert any("max_competitors lowered to its maximum 5" in n for n in notes)
+
+
+def test_schema_coercion_is_pure_and_bounded():
+    from tin_lite.workflow_inputs import coerce_schema_inputs
+
+    schema = {
+        "properties": {
+            "count": {"type": "integer", "minimum": 1, "maximum": 5},
+            "ratio": {"type": "number"},
+            "flag": {"type": "boolean"},
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+            "name": {"type": "string"},
+        }
+    }
+    values = {"count": "0", "ratio": "2.5", "flag": "Yes", "tags": "a\nb, c", "name": "7"}
+    fixed, notes = coerce_schema_inputs(schema, values)
+    assert fixed == {"count": 1, "ratio": 2.5, "flag": True, "tags": ["a", "b"], "name": "7"}
+    assert values["count"] == "0"  # The caller's dict is not mutated.
+    assert len(notes) == 2
+    fixed, notes = coerce_schema_inputs(schema, {"count": "2.5", "flag": "maybe", "ratio": "nan"})
+    assert fixed == {} and len(notes) == 3
+    assert coerce_schema_inputs(schema, {"count": 3, "flag": False}) == (
+        {"count": 3, "flag": False},
+        [],
+    )
 
 
 async def test_hard_nos_and_founder_rulings_are_enforced_by_code():
@@ -506,6 +592,7 @@ def test_definition_pins_the_contract_and_the_assets_stay_consistent():
     """Moved from the procedure contract test when the plan stopped being a Codex procedure."""
     registry = {item.key: item for item in BUILTIN_WORKFLOWS}
     onboarding_keys = {GROWTH_ONBOARDING_PLAN_WORKFLOW_NAME, "growth.onboarding"}
+    public_keys = {item.key for item in PUBLIC_WORKFLOWS}
     definition, files = registry[
         GROWTH_ONBOARDING_PLAN_WORKFLOW_NAME
     ].definition_and_resource_files()
@@ -517,8 +604,8 @@ def test_definition_pins_the_contract_and_the_assets_stay_consistent():
     assert definition["plan_policy"] == plan.POLICY
     assert definition["plan_contract_sha256"] == plan.contract_digest()
     assert [(r["provider"], r["model"]) for r in definition["plan_routes"]] == [
-        ("openai", "gpt-6-astra"),
-        ("openai", "gpt-5.6-luna"),
+        ("openai", "gpt-6-sol"),
+        ("openai", "gpt-6-luna"),
     ]
     properties = definition["input_schema"]["properties"]
     assert definition["input_schema"]["required"] == ["project_id"]
@@ -533,21 +620,35 @@ def test_definition_pins_the_contract_and_the_assets_stay_consistent():
     } <= set(properties)
 
     programs = plan.PROGRAMS["programs"]
-    providers = {"infra.github", "workspace.google", "analytics.gsc"}
+    providers = {"infra.github", "workspace.google", "analytics.gsc", "ads.google"}
     assert len(programs) == 15 and len({row["id"] for row in programs}) == 15
     for row in programs:
         assert row["tin"]["coverage"] in {"full", "partial", "none"}
         assert 0 <= row["tin"]["impact"] <= 1 and row["tin"]["impact_note"]
         assert row["needs"]["founder_hours"] in {"min", "some", "lots"}
-        assert set(row["tin"]["workflows"]) <= set(registry), row["id"]
+        assert set(row["tin"]["workflows"]) <= set(registry) | set(public_keys), row["id"]
         assert not set(row["tin"]["workflows"]) & onboarding_keys
         assert set(row["tin"]["integrations"]) <= providers, row["id"]
     system_fields = {entry["input"] for entry in plan.PROGRAMS["systems_checklist"]}
     assert len(system_fields) == 11 and system_fields <= set(properties)
+    # A checklist system that names a Tin integration names a registered, labelled one.
+    from tin_lite.integrations import registered_integrations
+
+    named = {e["tin_integration"] for e in plan.PROGRAMS["systems_checklist"]} - {None}
+    assert named <= {d.key for d in registered_integrations()} and named <= set(plan.PROVIDERS)
+    assert {"payments.stripe", "analytics.posthog"} <= named
     titles = plan.PROGRAMS["workflow_titles"]
-    assert titles == {
-        item.key: item.title for item in BUILTIN_WORKFLOWS if item.key not in onboarding_keys
+    public = {
+        item.key: json.loads((ROOT / "workflow_packages" / item.key / "workflow.json").read_text())[
+            "definition"
+        ]["title"]
+        for item in PUBLIC_WORKFLOWS
     }
+    assert (
+        titles
+        == {item.key: item.title for item in BUILTIN_WORKFLOWS if item.key not in onboarding_keys}
+        | public
+    )
     assert set(plan.PROGRAMS["workflow_scope"]) == set(titles)
     assert {system["id"] for system in plan.RUBRIC["systems"]} == {row["id"] for row in programs}
     known = {param["id"] for param in plan.RUBRIC["params"]}

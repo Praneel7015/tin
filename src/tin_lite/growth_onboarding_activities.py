@@ -38,7 +38,11 @@ from tin_lite.product_urls import dashboard_url
 from tin_lite.run_reports import publish_report_file
 from tin_lite.schedules import TemporalScheduleService, WorkflowSchedule, next_run_after
 from tin_lite.workflow_definitions import ensure_schedule_allowed
-from tin_lite.workflow_inputs import WorkflowInputError, normalize_workflow_inputs
+from tin_lite.workflow_inputs import (
+    WorkflowInputError,
+    coerce_schema_inputs,
+    normalize_workflow_inputs,
+)
 from tin_lite.workflow_prerequisites import PrerequisiteError
 
 ACTIVE_STATUSES = {"pending", "running", "needs_input"}
@@ -106,8 +110,10 @@ def repaired_action_inputs(action: dict, schema: dict, run_input: dict) -> tuple
     Billing admits onboarding children by recomputing this, so both must agree.
     """
     tidied, tidy_notes = tidy_known_inputs(action["key"], action["inputs"], run_input or {})
-    coerced, notes = coerce_enum_inputs(schema, tidied)
-    return coerced, tidy_notes + notes
+    # Plans written before code typed their inputs carry numbers and booleans as text.
+    typed, type_notes = coerce_schema_inputs(schema, tidied)
+    coerced, notes = coerce_enum_inputs(schema, typed)
+    return coerced, tidy_notes + type_notes + notes
 
 
 def child_handles(actions):
@@ -306,6 +312,7 @@ class GrowthOnboardingActivities:
             text=text,
             systems=offered,
             timezone=(run.input or {}).get("timezone") or "UTC",
+            run_input=run.input or {},
         )
         view = plan_view(text)[:1200]
         await self.db.project_run_progress(
@@ -753,6 +760,8 @@ class GrowthOnboardingActivities:
     @activity.defn
     async def growth_onboarding_failure(self, run_id: str) -> None:
         run = await self.db.get_run(UUID(run_id))
+        if run.status.value == "superseded":
+            return  # A newer onboarding replaced it before approval; nothing failed.
         analytics.capture(
             "onboarding_failed",
             distinct_id=run.project_id,

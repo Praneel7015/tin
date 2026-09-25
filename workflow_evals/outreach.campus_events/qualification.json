@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "assumptions": [
+    "Cases run on 2026-09-24 or later in a project without a growth plan, so business and audience are passed as overrides; with a plan and Feature map they may be left empty.",
+    "Supplied event briefs are public descriptions with source labels. With event_briefs empty the run uses at most 12 web searches and 20 page reads through the fenced sandbox proxy."
+  ],
+  "cost_drivers": [
+    "One Codex procedure session; web research mode adds bounded search and page reads, supplied briefs add none."
+  ],
+  "effects": [
+    "Writes reports/outreach/campus-events/{run_id}.md in the project; makes no external changes.",
+    "Never contacts organizers or students, registers, buys, publishes or starts another workflow."
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "Compare a relevant upcoming coding event with an unrelated festival for a student developer product.",
+      "inputs": {
+        "business": "Local developer tools startup offering a free API debugging workshop.",
+        "audience": "Computer science students in Guna, India.",
+        "event_briefs": "Campus Hack Day, October 18, 2026, Guna. Coding teams and student developers. Workshop slots may be requested; sponsorship price not published. Source: campus.example/hackday.\n\nSpring Dance Festival, March 2, 2027, Guna. Dance performances; audience not described. Source: campus.example/dance.",
+        "budget": "Up to INR 5000; one staff member for two hours."
+      },
+      "expect": {
+        "contains": [
+          "Status: recommended",
+          "Event source: supplied briefs",
+          "Business from: input",
+          "Campus Hack Day",
+          "Spring Dance Festival",
+          "unknown",
+          "permission",
+          "tin-campus-events-state"
+        ]
+      }
+    },
+    {
+      "id": "missing_evidence",
+      "description": "An event name with no date, audience, organizer rules or price must not become a confirmed opportunity.",
+      "inputs": {
+        "business": "A student budgeting app.",
+        "audience": "University students in Guna, India.",
+        "event_briefs": "Student Expo. Source: flyer supplied by founder.",
+        "budget": ""
+      },
+      "expect": {
+        "contains": ["unknown", "Student Expo", "date unconfirmed"],
+        "excludes": ["Status: recommended"]
+      }
+    },
+    {
+      "id": "all_supplied_events_past",
+      "description": "Plausible but unusable: well-described, relevant briefs whose dates have all passed. The report must list them as past, recommend nothing and not swap in researched events.",
+      "inputs": {
+        "business": "A flashcard app for medical students.",
+        "audience": "First-year medical students in Leeds, UK.",
+        "event_briefs": "MedSoc Freshers Fair, September 20, 2025, University of Leeds. Stalls for student societies and local businesses; stall fee GBP 80. Source: leedsmedsoc.example/freshers-2025.\n\nAnatomy Revision Night, May 3, 2026, Leeds. Peer-led revision for first-year medics; sponsors may provide prizes. Source: leedsmedsoc.example/revision-night.",
+        "budget": "Up to GBP 150."
+      },
+      "expect": {
+        "contains": [
+          "Status: no current fit",
+          "Event source: supplied briefs",
+          "MedSoc Freshers Fair",
+          "Anatomy Revision Night",
+          "past"
+        ],
+        "excludes": ["Status: recommended", "Event source: web research"]
+      }
+    },
+    {
+      "id": "research_when_no_briefs",
+      "description": "With event_briefs empty the run researches upcoming events itself, cites a source for each and keeps run-to-run state.",
+      "inputs": {
+        "business": "A collaborative LaTeX editor with a free student plan.",
+        "audience": "Engineering and maths students at universities in Munich, Germany.",
+        "event_briefs": "",
+        "budget": "No cash budget; the founder can give one two-hour workshop."
+      },
+      "expect": {
+        "contains": ["Event source: web research", "Limits:", "tin-campus-events-state"],
+        "excludes": ["Event source: supplied briefs"]
+      }
+    }
+  ],
+  "rubric": [
+    {
+      "id": "grounding",
+      "question": "Are event facts and scores tied to a cited source, without invented contacts, dates, attendance or prices?"
+    },
+    {
+      "id": "fit",
+      "question": "Does the activation demonstrate a real product feature to the named students within the stated limits and hard no's, without implying a partnership?"
+    }
+  ]
+}

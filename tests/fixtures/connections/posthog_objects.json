@@ -1,0 +1,471 @@
+{
+ "_comment": "Synthetic PostHog API responses for offline package tests. `_fixture_events` on property definitions models which events carry each property; it is not a PostHog field.",
+ "user": {
+  "uuid": "0192f0a0-0000-7000-8000-0000000000aa",
+  "email": "founder@fixture.example",
+  "first_name": "Fixture"
+ },
+ "projects": [
+  {
+   "id": 101,
+   "uuid": "0192f0a0-0000-7000-8000-000000000101",
+   "name": "Fixture App",
+   "organization": "0192f0a0-0000-7000-8000-0000000000ff",
+   "api_token": "phc_fixture_not_stored"
+  },
+  {
+   "id": 102,
+   "uuid": "0192f0a0-0000-7000-8000-000000000102",
+   "name": "Fixture Staging",
+   "organization": "0192f0a0-0000-7000-8000-0000000000ff",
+   "api_token": "phc_fixture_staging"
+  }
+ ],
+ "event_definitions": [
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000000",
+   "name": "$pageview",
+   "volume_30_day": 48210,
+   "query_usage_30_day": 312,
+   "last_seen_at": "2026-09-23T22:10:04Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  },
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000001",
+   "name": "signed_up",
+   "volume_30_day": 1204,
+   "query_usage_30_day": 88,
+   "last_seen_at": "2026-09-23T21:58:40Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  },
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000002",
+   "name": "onboarding_completed",
+   "volume_30_day": 611,
+   "query_usage_30_day": 41,
+   "last_seen_at": "2026-09-23T20:01:12Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  },
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000003",
+   "name": "project_created",
+   "volume_30_day": 540,
+   "query_usage_30_day": 37,
+   "last_seen_at": "2026-09-23T19:44:03Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  },
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000004",
+   "name": "workflow_started",
+   "volume_30_day": 2890,
+   "query_usage_30_day": 120,
+   "last_seen_at": "2026-09-23T22:02:51Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  },
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000005",
+   "name": "subscription_started",
+   "volume_30_day": 97,
+   "query_usage_30_day": 25,
+   "last_seen_at": "2026-09-22T17:30:00Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  },
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000006",
+   "name": "$autocapture",
+   "volume_30_day": 90133,
+   "query_usage_30_day": 4,
+   "last_seen_at": "2026-09-23T22:11:59Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  },
+  {
+   "id": "0192f0a1-0000-7000-8000-000000000007",
+   "name": "invite_sent",
+   "volume_30_day": 143,
+   "query_usage_30_day": 6,
+   "last_seen_at": "2026-09-21T09:12:44Z",
+   "created_at": "2026-01-10T12:00:00Z",
+   "owner": {
+    "email": "owner@fixture.example"
+   },
+   "tags": [
+    "fixture"
+   ],
+   "verified": false
+  }
+ ],
+ "property_definitions": [
+  {
+   "id": "0192f0a2-0000-7000-8000-000000000000",
+   "name": "$current_url",
+   "property_type": "String",
+   "is_numerical": false,
+   "type": 1,
+   "_fixture_events": [
+    "$pageview",
+    "$autocapture"
+   ],
+   "example": "hidden@fixture.example"
+  },
+  {
+   "id": "0192f0a2-0000-7000-8000-000000000001",
+   "name": "$browser",
+   "property_type": "String",
+   "is_numerical": false,
+   "type": 1,
+   "_fixture_events": [
+    "$pageview",
+    "$autocapture",
+    "signed_up"
+   ],
+   "example": "hidden@fixture.example"
+  },
+  {
+   "id": "0192f0a2-0000-7000-8000-000000000002",
+   "name": "plan",
+   "property_type": "String",
+   "is_numerical": false,
+   "type": 1,
+   "_fixture_events": [
+    "signed_up",
+    "subscription_started"
+   ],
+   "example": "hidden@fixture.example"
+  },
+  {
+   "id": "0192f0a2-0000-7000-8000-000000000003",
+   "name": "seats",
+   "property_type": "Numeric",
+   "is_numerical": true,
+   "type": 1,
+   "_fixture_events": [
+    "subscription_started"
+   ],
+   "example": "hidden@fixture.example"
+  },
+  {
+   "id": "0192f0a2-0000-7000-8000-000000000004",
+   "name": "signup_source",
+   "property_type": "String",
+   "is_numerical": false,
+   "type": 1,
+   "_fixture_events": [
+    "signed_up"
+   ],
+   "example": "hidden@fixture.example"
+  },
+  {
+   "id": "0192f0a2-0000-7000-8000-000000000005",
+   "name": "steps_completed",
+   "property_type": "Numeric",
+   "is_numerical": true,
+   "type": 1,
+   "_fixture_events": [
+    "onboarding_completed"
+   ],
+   "example": "hidden@fixture.example"
+  },
+  {
+   "id": "0192f0a2-0000-7000-8000-000000000006",
+   "name": "workflow_key",
+   "property_type": "String",
+   "is_numerical": false,
+   "type": 1,
+   "_fixture_events": [
+    "workflow_started"
+   ],
+   "example": "hidden@fixture.example"
+  }
+ ],
+ "insights": [
+  {
+   "id": 5001,
+   "short_id": "AbC12xYz",
+   "name": "Signup to activation funnel",
+   "derived_name": null,
+   "query": {
+    "kind": "InsightVizNode",
+    "source": {
+     "kind": "FunnelsQuery",
+     "series": []
+    }
+   },
+   "last_refresh": "2026-09-23T06:00:00Z",
+   "result": [
+    {
+     "count": 1204
+    }
+   ],
+   "created_by": {
+    "email": "owner@fixture.example"
+   }
+  },
+  {
+   "id": 5002,
+   "short_id": "DeF34uVw",
+   "name": "",
+   "derived_name": "Pageview count",
+   "query": {
+    "kind": "InsightVizNode",
+    "source": {
+     "kind": "TrendsQuery"
+    }
+   },
+   "last_refresh": "2026-09-23T05:00:00Z"
+  },
+  {
+   "id": 5003,
+   "short_id": "GhI56sTu",
+   "name": "Weekly retention",
+   "query": {
+    "kind": "InsightVizNode",
+    "source": {
+     "kind": "RetentionQuery"
+    }
+   },
+   "last_refresh": null
+  },
+  {
+   "id": 5004,
+   "short_id": "JkL78qRs",
+   "name": "Top referrers (SQL)",
+   "query": {
+    "kind": "DataVisualizationNode",
+    "source": {
+     "kind": "HogQLQuery",
+     "query": "select 1"
+    }
+   },
+   "last_refresh": "2026-09-20T12:00:00Z"
+  }
+ ],
+ "queries": {
+  "signups_by_day": {
+   "columns": [
+    "day",
+    "signups"
+   ],
+   "types": [
+    [
+     "day",
+     "Date"
+    ],
+    [
+     "signups",
+     "UInt64"
+    ]
+   ],
+   "results": [
+    [
+     "2026-09-17",
+     151
+    ],
+    [
+     "2026-09-18",
+     162
+    ],
+    [
+     "2026-09-19",
+     149
+    ],
+    [
+     "2026-09-20",
+     98
+    ],
+    [
+     "2026-09-21",
+     104
+    ],
+    [
+     "2026-09-22",
+     177
+    ],
+    [
+     "2026-09-23",
+     181
+    ]
+   ],
+   "hasMore": false,
+   "is_cached": false,
+   "timings": [
+    {
+     "k": "total",
+     "t": 0.21
+    }
+   ]
+  },
+  "recent_signups": {
+   "columns": [
+    "timestamp",
+    "distinct_id",
+    "plan"
+   ],
+   "types": [
+    [
+     "timestamp",
+     "DateTime64(6, 'UTC')"
+    ],
+    [
+     "distinct_id",
+     "String"
+    ],
+    [
+     "plan",
+     "Nullable(String)"
+    ]
+   ],
+   "results": [
+    [
+     "2026-09-23T21:00:00Z",
+     "user_1000",
+     "free"
+    ],
+    [
+     "2026-09-23T20:07:00Z",
+     "user_1001",
+     "pro"
+    ],
+    [
+     "2026-09-23T19:14:00Z",
+     "user_1002",
+     "team"
+    ],
+    [
+     "2026-09-23T18:21:00Z",
+     "user_1003",
+     "free"
+    ],
+    [
+     "2026-09-23T17:28:00Z",
+     "user_1004",
+     "pro"
+    ],
+    [
+     "2026-09-23T16:35:00Z",
+     "user_1005",
+     "team"
+    ],
+    [
+     "2026-09-23T15:42:00Z",
+     "user_1006",
+     "free"
+    ],
+    [
+     "2026-09-23T14:49:00Z",
+     "user_1007",
+     "pro"
+    ],
+    [
+     "2026-09-23T13:56:00Z",
+     "user_1008",
+     "team"
+    ],
+    [
+     "2026-09-23T12:03:00Z",
+     "user_1009",
+     "free"
+    ],
+    [
+     "2026-09-23T11:10:00Z",
+     "user_1010",
+     "pro"
+    ],
+    [
+     "2026-09-23T10:17:00Z",
+     "user_1011",
+     "team"
+    ],
+    [
+     "2026-09-23T09:24:00Z",
+     "user_1012",
+     "free"
+    ],
+    [
+     "2026-09-23T08:31:00Z",
+     "user_1013",
+     "pro"
+    ],
+    [
+     "2026-09-23T07:38:00Z",
+     "user_1014",
+     "team"
+    ],
+    [
+     "2026-09-23T06:45:00Z",
+     "user_1015",
+     "free"
+    ],
+    [
+     "2026-09-23T05:52:00Z",
+     "user_1016",
+     "pro"
+    ],
+    [
+     "2026-09-23T04:59:00Z",
+     "user_1017",
+     "team"
+    ],
+    [
+     "2026-09-23T03:06:00Z",
+     "user_1018",
+     "free"
+    ],
+    [
+     "2026-09-23T02:13:00Z",
+     "user_1019",
+     "pro"
+    ]
+   ],
+   "hasMore": true
+  }
+ }
+}

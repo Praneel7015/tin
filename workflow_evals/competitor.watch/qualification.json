@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "assumptions": [
+    "Competitor pricing and changelog pages are public and change without notice, so live cases assert the report's structure and status against a stated project history, not specific prices.",
+    "Earlier reports under reports/competitor-watch/ are the only history. A case that needs history states which earlier report the project holds.",
+    "Search competitors from organic.keyword_plan and ads.assessment are overlap-based suggestions; the run confirms each one sells to the same buyer before watching it."
+  ],
+  "cost_drivers": [
+    "One bounded Codex session under the existing procedure ceiling, with no managed-model routes and no connected-provider calls.",
+    "Web actions: at most 30 per run, driven by max_competitors (1 to 5) and up to four pages each. A weekly run with recorded page URLs costs less than the first run.",
+    "No measured live cost yet."
+  ],
+  "effects": [
+    "Writes one run-owned reports/competitor-watch/<run_id>.md in project state.",
+    "Reads earlier reports/competitor-watch/ reports, reports/GROWTH_ONBOARDING_PLAN.md, wiki/INDEX.md, reports/keyword-plan/*/evidence.json, reports/paid-ads/*/assessment.json and public web pages through fenced web access.",
+    "No sign-up, sign-in, form submission, contact, publication, memory edit or workflow start."
+  ],
+  "rubric": [
+    { "id": "diff_not_summary", "question": "Does the report list only changes against the previous evidence block, with before -> after and the source page, rather than restating the competitor's site?" },
+    { "id": "no_invented_urgency", "question": "Is every suggested response tied to a material change listed under What changed, and does a week with no material change say 'Nothing needs a response this week' with no table?" },
+    { "id": "grounded_in_project", "question": "Is impact judged against the project's own plans from the Feature map, Code map or onboarding plan (or the stated override), citing where it came from?" },
+    { "id": "real_workflows", "question": "Does each suggested response name a real Tin workflow (content.public_article, research.deep_dive or content.plan) with concrete inputs, and none that a hard no rules out?" },
+    { "id": "honest_coverage", "question": "Is every page that was not read listed under Not read with its status, and was nothing filled in from snippets or memory?" }
+  ],
+  "cases": [
+    {
+      "id": "ordinary_first_watch",
+      "description": "A project with a Feature map and no earlier competitor watch. The founder supplies one competitor's pricing and changelog URLs. Expect a baseline with a pricing table and an evidence block.",
+      "inputs": {
+        "competitor_urls": ["https://linear.app/pricing", "https://linear.app/changelog"],
+        "max_competitors": 1,
+        "watch_for": "A cheaper entry plan or a free tier with more seats.",
+        "our_positioning": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: baseline",
+          "linear.app",
+          "from input",
+          "## Current pricing",
+          "| Tier |",
+          "## Sources",
+          "```tin-competitor-watch"
+        ],
+        "excludes": ["Status: diagnostic", "Status: changes", "data/competitor_watch"]
+      }
+    },
+    {
+      "id": "from_project_memory",
+      "description": "No URLs given. The project holds a succeeded keyword plan whose evidence.json lists three search competitors, one of which is a review site. Expect the review site dropped and the others watched with source keyword_plan.",
+      "inputs": { "competitor_urls": [], "max_competitors": 3, "watch_for": "", "our_positioning": "" },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: baseline", "from keyword_plan", "## Sources", "```tin-competitor-watch"],
+        "excludes": ["Status: diagnostic", "from input"]
+      }
+    },
+    {
+      "id": "quiet_week",
+      "description": "The project holds last week's report for the same competitor and nothing on its pricing page changed. Expect silence: no-change, no response table, pricing unchanged since the earlier date.",
+      "inputs": { "competitor_urls": [], "max_competitors": 1, "watch_for": "", "our_positioning": "" },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: no-change",
+          "from previous_watch",
+          "Nothing needs a response this week.",
+          "unchanged since",
+          "```tin-competitor-watch"
+        ],
+        "excludes": ["| Change | Response |", "Status: baseline", "| Tier |"]
+      }
+    },
+    {
+      "id": "js_rendered_pricing",
+      "description": "Plausible but unusable page: last week's report holds a read pricing page; this week the pricing page returns only a JavaScript shell with no plans. Expect the page listed as empty under Not read, pricing carried forward and not compared, and no invented tier removals or responses.",
+      "inputs": { "competitor_urls": [], "max_competitors": 1, "watch_for": "", "our_positioning": "" },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: no-change", "## Not read", "empty", "carried from", "not compared"],
+        "excludes": ["tier_removed", "removed all plans", "| Change | Response |", "Status: changes"]
+      }
+    },
+    {
+      "id": "malformed_prior_evidence",
+      "description": "Plausible but unusable history: the only earlier report has a truncated tin-competitor-watch block. Expect it skipped and named under Not read, and this run treated as a baseline rather than diffed.",
+      "inputs": {
+        "competitor_urls": ["https://linear.app/pricing"],
+        "max_competitors": 1,
+        "watch_for": "",
+        "our_positioning": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: baseline", "unreadable evidence block", "## Not read", "```tin-competitor-watch"],
+        "excludes": ["Status: changes", "Status: no-change"]
+      }
+    },
+    {
+      "id": "no_competitors_known",
+      "description": "No URLs, no earlier watch, no onboarding plan competitors, no keyword plan or paid-ads assessment. Expect a diagnostic naming both ways forward and no evidence block.",
+      "inputs": { "competitor_urls": [], "max_competitors": 3, "watch_for": "", "our_positioning": "" },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: diagnostic", "competitor_urls", "organic.keyword_plan"],
+        "excludes": ["```tin-competitor-watch", "## Suggested responses"]
+      }
+    }
+  ]
+}

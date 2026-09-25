@@ -20,6 +20,7 @@ from test_rollouts import base_values
 from tin_lite.codex_api import (
     ATTEMPT,
     CONTRACT,
+    PROCEDURE_CONTRACT,
     USAGE,
     attempt_key,
     pinned_contract,
@@ -298,7 +299,7 @@ async def test_compaction_crlf_and_missing_usage_stays_unknown(publication_db, o
 
 def test_config_and_environment_never_include_provider_key(tmp_path):
     config = tmp_path / "config.toml"
-    config.write_text('model = "gpt-6-astra"\n[mcp_servers.tin]\nurl="https://tin.test/tools"\n')
+    config.write_text('model = "gpt-6-sol"\n[mcp_servers.tin]\nurl="https://tin.test/tools"\n')
     url = f"https://tin.test/internal/codex-api/{uuid4()}/v1"
     module = load_sandbox_module("codex_api_config")
     module.configure(
@@ -346,7 +347,7 @@ def test_studio_shell_policy_delegates_only_voice_capability(tmp_path):
         "FAL_KEY": "provider-only",
     }
     config = tmp_path / "config.toml"
-    config.write_text('model = "gpt-6-astra"\n')
+    config.write_text('model = "gpt-6-sol"\n')
     module.configure(config, env)
     policy = tomllib.loads(config.read_text())["shell_environment_policy"]
     assert policy == {
@@ -376,7 +377,8 @@ async def test_pinned_auth_survives_flags_and_ambiguous_attempt_not_restarted(pu
         key = f"{run.id}:procedure_sandbox_create"
         await db.start_effect(conn, execution_key=key, operation="procedure_sandbox_create")
         await db.complete_effect(conn, execution_key=key, result={"codex_auth": selected})
-        assert await pinned_contract(db, run.id, conn=conn) == CONTRACT
+        assert selected == PROCEDURE_CONTRACT  # Unpinned isolated runs now select v3.
+        assert await pinned_contract(db, run.id, conn=conn) == selected
         input = SandboxProcedureInput(
             **{**base_values()},
             context={},

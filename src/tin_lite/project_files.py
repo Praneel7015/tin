@@ -238,6 +238,12 @@ class ProjectFileService:
                     message=normalized_message,
                     changes=normalized,
                 )
+            except ValueError:
+                # Nothing was committed; do not leave the request looking in flight.
+                await self._database.fail_project_file_change(
+                    project_id=project.id, request_id=request_id, error_code="invalid"
+                )
+                raise
             except RuntimeError as exc:
                 await self._database.fail_project_file_change(
                     project_id=project.id,

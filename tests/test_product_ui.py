@@ -362,7 +362,7 @@ def test_product_ui_assets_are_packaged_beside_the_application() -> None:
     assert "api(`/api/projects/${projectId}/integrations`)" in script
     assert "No product integrations yet" not in script
     assert "data-integration-connect" in script
-    assert 'new Set(["analytics.gsc", "infra.github"])' in script
+    assert 'new Set(["analytics.gsc", "infra.github", "analytics.posthog"])' in script
     assert 'id="integration-project-dialog"' in index
     assert 'role="radiogroup"' in index
     assert "function chooseIntegrationProject(providerKey, capabilities)" in script
@@ -597,14 +597,17 @@ def test_product_ui_assets_are_packaged_beside_the_application() -> None:
     assert 'projectAccess: "loading"' in script
     assert "if (!hasProject)" in script
     assert ".nav-item:disabled" in stylesheet
-    # Browser sign-ups: a project with no workflow yet is locked behind the coding-agent page.
+    # Browser sign-ups: a project without a workflow or run is locked behind the coding-agent page.
     assert 'data-browser-lock-enabled="{{BROWSER_LOCK_ENABLED}}"' in index
     assert (
         '"{{BROWSER_LOCK_ENABLED}}": str(getattr(settings, "browser_lock_enabled", True)).lower()'
         in api_source
     )
-    assert "state.projectAccess = BROWSER_LOCK_ENABLED && !projectWorkflows.length" in script
-    assert '!projectWorkflows.length ? "locked" : "ready"' in script
+    assert (
+        "state.projectAccess = BROWSER_LOCK_ENABLED && !projectWorkflows.length && !runs.length"
+        in script
+    )
+    assert '!runs.length ? "locked" : "ready"' in script
     # Lock routing, including the agent connection exception, is exercised in Chromium
     # by web/lock-page.browser.test.js rather than matching one rendering branch here.
     assert "function renderLockPage()" in script
@@ -857,7 +860,8 @@ def test_approval_offers_pull_request_or_publish_now_when_github_is_connected() 
     assert "data-decision-not-now>Not now</button>" in script
     assert "Approved drafts stay in Tin until GitHub is connected." in script
     assert 'href="/integrations" data-decision-connect-github>Connect GitHub</a>' in script
-    assert 'const label = run?.content_delivery?.approval_label || "Approve"' in script
+    assert "const label = run?.content_delivery?.approval_label ||" in script
+    assert '? "Use documents" : "Approve"' in script
     assert "!run?.content_delivery?.system_run_id && isContentDraftReview(run)" in script
     assert 'main.querySelectorAll("[data-apply-decision]").forEach' in script
     assert "const delivery = button.dataset.delivery || null;" in script

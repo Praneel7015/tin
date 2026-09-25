@@ -127,7 +127,7 @@ def adjudication() -> dict:
 
 
 class FakeResponses:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     def __init__(self, *responses: dict) -> None:
         self.responses = list(responses)
@@ -255,7 +255,7 @@ def test_visibility_workflow_exposes_one_editable_target_with_a_project_default(
     workflow = next(item for item in BUILTIN_WORKFLOWS if item.id == VISIBILITY_AUDIT_WORKFLOW_ID)
     schema = workflow.definition["input_schema"]
 
-    assert workflow.version_label == "1.1.0"
+    assert workflow.version_label == "1.2.0"
     assert schema["required"] == ["project_id", "target"]
     assert schema["properties"]["target"] == {
         "type": "string",
@@ -351,6 +351,8 @@ class FakeStorage:
         self.publishes = 0
 
     async def read_canonical_artifact(self, *, path: str, **values) -> bytes:
+        if path == "workflows/visibility.audit.json":
+            return b'{"key":"visibility.audit"}'
         if path == "wiki/INDEX.md":
             return b"# Project memory\n\nVirvid is at virvid.app.\n"
         return self.documents[path]
@@ -363,7 +365,7 @@ class FakeStorage:
 
 
 class FakeAuditor:
-    model = "gpt-5.6-luna"
+    model = "gpt-6-luna"
 
     def __init__(self) -> None:
         self.panel_calls = 0
@@ -485,3 +487,61 @@ async def test_visibility_duplicate_execution_reuses_calls_commit_and_projection
     assert database.run.status == RunStatus.SUCCEEDED
     assert database.run.artifact_path == "reports/AI_VISIBILITY.md"
     assert database.events == ["visibility_audit_created", "visibility_audit_ready"]
+
+
+@pytest.mark.asyncio
+async def test_visibility_question_ids_are_normalized_and_adjudication_lines_up() -> None:
+    raw = panel()
+    long_id = "Buyer Question About Automation Tools"
+    for item, question_id in zip(raw["questions"], ["Q1", "Q 2", "q3", "Q3", long_id], strict=True):
+        item["id"] = question_id
+    normalized = ["q1", "q_2", "q3", "q3-2", "buyer_question_about_automation_"]
+    scored_raw = adjudication()
+    for outcome, question_id in zip(scored_raw["outcomes"], normalized, strict=True):
+        outcome["question_id"] = question_id
+    scored_raw["outcomes"][0]["question_id"] = "Q1"  # the pre-normalization spelling
+    scored_raw["recommendations"][0]["evidence_question_ids"] = ["Q1", "Q 2", "q3-2"]
+    responses = FakeResponses(
+        response_text("resp_panel", json.dumps(raw)),
+        response_text("resp_score", json.dumps(scored_raw)),
+    )
+    auditor = VisibilityAuditor(responses=responses, skill_suite="# Audit rules")
+
+    prepared = await auditor.prepare_panel(
+        project_name="virvid.app", target_request="virvid.app", sources=[]
+    )
+    panel_schema = responses.payloads[0]["text"]["format"]["schema"]
+    id_schema = panel_schema["properties"]["questions"]["items"]["properties"]["id"]
+    assert id_schema["pattern"] == "^[a-z0-9_-]{1,32}$"
+    assert [item["id"] for item in prepared["questions"]] == normalized
+    again = await VisibilityAuditor(
+        responses=FakeResponses(response_text("resp_panel", json.dumps(raw))),
+        skill_suite="# Audit rules",
+    ).prepare_panel(project_name="virvid.app", target_request="virvid.app", sources=[])
+    assert again["panel_hash"] == prepared["panel_hash"]  # receipts keyed by these IDs
+
+    answer = response_text("resp_web", "Virvid is one product to evaluate.", searched=True)
+    searched = await VisibilityAuditor(
+        responses=FakeResponses(answer), skill_suite="# Audit rules"
+    ).answer(question=prepared["questions"][0]["text"], searched=True)
+    measurements = [
+        {"question_id": item["id"], "searched": searched, "probe": searched}
+        for item in prepared["questions"]
+    ]
+    scored = await auditor.adjudicate(panel=prepared, measurements=measurements)
+    assert [item["question_id"] for item in scored["outcomes"]] == normalized
+    assert scored["recommendations"][0]["evidence_question_ids"] == ["q1", "q_2", "q3-2"]
+
+
+@pytest.mark.asyncio
+async def test_visibility_question_id_that_cannot_be_normalized_still_fails() -> None:
+    raw = panel()
+    raw["questions"][0]["id"] = 7
+    auditor = VisibilityAuditor(
+        responses=FakeResponses(response_text("resp_panel", json.dumps(raw))),
+        skill_suite="# Audit rules",
+    )
+    with pytest.raises(VisibilityProtocolError, match="question ID is invalid"):
+        await auditor.prepare_panel(
+            project_name="virvid.app", target_request="virvid.app", sources=[]
+        )

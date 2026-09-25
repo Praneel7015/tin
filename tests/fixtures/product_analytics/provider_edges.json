@@ -1,5 +1,5 @@
 {
-  "provenance": "Fabricated inline event CTEs executed through PostHog HogQL on 2026-09-21 and 2026-09-22; no customer data.",
+  "provenance": "Fabricated inline event CTEs executed through PostHog HogQL on 2026-09-21 and 2026-09-22; no customer data. On 2026-09-24 the coverage and dimensions builders were restructured for Tin's analytics.posthog HogQL guard (one SELECT, at most 8000 bytes); their hashes were updated and the recorded aggregates kept, pending live requalification of those two queries.",
   "cases": {
     "six": {
       "plan": {
@@ -357,7 +357,7 @@
           }
         },
         "coverage": {
-          "query_sha256": "8de8a2452084082fecce850791c2c7af6b35647ca3e512f1331c168940b80379",
+          "query_sha256": "17a4116f1cd8722a27e5117f6911239b08178f96fc60b1161b19909a0cdc9c5a",
           "data": {
             "columns": [
               "event",
@@ -783,7 +783,7 @@
       "empty": false,
       "responses": {
         "coverage": {
-          "query_sha256": "9b58229e3ebf2f1f4734b452fc06ae584e193a20166faa24527960775c943e20",
+          "query_sha256": "57b6c551256eb0cbef274b5aec2e78d2dba9679decf989d803577de22dc883f6",
           "data": {
             "columns": [
               "event",

@@ -107,6 +107,32 @@ def test_declared_model_routes_reject_unsupported_authority(change):
         validate_code_definition(body)
 
 
+def test_model_route_errors_say_whether_the_shape_or_the_model_is_wrong():
+    from tin_lite.private_workflows import authoring_guide
+
+    extra = definition()
+    extra["code"]["model_routes"]["classification"]["capabilities"] = ["json"]
+    with pytest.raises(
+        ValueError,
+        match="route 'classification' keys must be exactly provider, model, max_calls, "
+        "max_input_bytes, max_output_tokens",
+    ):
+        validate_code_definition(extra)
+    unknown = definition()
+    unknown["code"]["model_routes"]["classification"]["model"] = "gpt-5"
+    with pytest.raises(
+        ValueError,
+        match="unsupported or unpriced model; supported provider/model pairs: "
+        "openai/gpt-6-luna, openai/gpt-6-sol",
+    ):
+        validate_code_definition(unknown)
+    guide = authoring_guide(settings=SimpleNamespace(), project_id=uuid4())
+    assert guide["code_contract"]["models"]["routes"] == [
+        {"provider": "openai", "model": "gpt-6-luna"},
+        {"provider": "openai", "model": "gpt-6-sol"},
+    ]
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -187,10 +213,11 @@ def sdk_router(f, *, invalid=False, uncertain=False, calls=None, outputs=None):
                         "content": [{"type": "output_text", "text": text, "annotations": []}],
                     }
                 ],
+                # gpt-6-sol: 5,000 x $2/M + 500 x $10/M = $0.015, settled as a visible $0.02.
                 "usage": {
-                    "input_tokens": 1000,
-                    "output_tokens": 100,
-                    "total_tokens": 1100,
+                    "input_tokens": 5000,
+                    "output_tokens": 500,
+                    "total_tokens": 5500,
                     "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
                     "output_tokens_details": {"reasoning_tokens": 0},
                 },
@@ -261,8 +288,8 @@ async def prepare(
     f.settings.luna_api_key = SecretStr("fixture-server-key")
     files = example_files(KEY, model_steps=True)
     manifest = json.loads(files[PATH])
-    # Astra makes the fixture's actual metered usage visibly nonzero at cent settlement.
-    manifest["definition"]["code"]["model_routes"]["classification"]["model"] = "gpt-6-astra"
+    # Sol makes the fixture's actual metered usage visibly nonzero at cent settlement.
+    manifest["definition"]["code"]["model_routes"]["classification"]["model"] = "gpt-6-sol"
     files[PATH] = json.dumps(manifest)
     f.revision = f.storage.repo.edit({p: raw.encode() for p, raw in files.items()})
     selection = {"project_id": str(f.project.id), "path": PATH, "revision": f.revision}
@@ -430,7 +457,7 @@ async def test_validation_failure_preserves_incurred_usage_and_settlement(
     assert record["outcome"] == (
         "invalid_output" if supplier_schema_failure else "response_received"
     )
-    assert record["usage"]["total_tokens"] == 1100 and len(calls) == 1
+    assert record["usage"]["total_tokens"] == 5500 and len(calls) == 1
     await f.billing.settle(run.id)
     assert (await f.billing.run_charge(run.id, ACTOR))["charged_usd"] == "0.02"
     await code.models.router.close()

@@ -16,21 +16,27 @@ Fisher example, symmetric/empty tables, Holm correction and small-sample rejecti
 Plausible but inconsistent provider tables are negative cases.
 
 For an authorized live case, use an isolated PostHog test project with the matching
-fixture events and metadata, then substitute its actual project number in an
-explicitly versioned case copy. Do not seed a customer's analytics with fixtures.
+fixture events and metadata, and select it in the Tin project's analytics.posthog
+connection (the web and backend cases need separate Tin projects or a reselection
+between runs; the package never names a PostHog project). Do not seed a customer's analytics with fixtures.
 Name the Tin project, authorized payer and spending ceiling before starting through
 the existing evaluator. Retain source/case digests, usage receipts, report, query
 outcomes and human rubric judgments. A mocked response or deterministic provider
 SQL probe does not establish agent quality or expected model cost.
 
 The `repeat_labels` case supplies the previous report as project context. Negative
-provider cases use a controlled response fixture: HTTP 403, or a monotone but wrong
+provider cases use a controlled response fixture: a permission_denied refusal from
+Tin's gateway (see tests/connection_fakes.py), or a monotone but wrong
 funnel count. These are offline response/quality tests, not permission to alter a
 real provider's response. Normal output assertions require `Status: complete`;
 headings or successful artifact delivery alone cannot pass.
 
 Provider SQL probes can substitute an inline fabricated `fixture` CTE for `events`
-and execute through an authorized read-only connection, without ingestion. Their
+and execute through an authorized read-only connection, without ingestion. Such a
+probe must itself pass Tin's HogQL guard (one SELECT, final LIMIT <= 1000, no UNION
+or OFFSET, at most 8000 bytes); build fixture rows with arrayJoin, not UNION ALL.
+The coverage and dimensions queries were restructured for that guard and their
+recorded responses await live requalification. Their
 sanitized columns/results can be retained as regression fixtures. Query compilation
 and numerical provider compatibility are distinct from a full agent report and
 from scheduled execution after deployment.

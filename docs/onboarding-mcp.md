@@ -50,8 +50,17 @@ links are emitted only when a durable artifact revision exists. The document rea
 continues to enforce its own membership checks.
 
 The planner receives workflow input schemas, including enum and length constraints.
-Before presenting the plan, Tin checks proposed inputs and schedule shapes. Approval
-validates selected workflows again, before sealing the plan or creating schedules.
+Before presenting the plan, Tin checks proposed inputs and schedule shapes; code types
+number, boolean and list inputs by their schema, clamping to declared bounds and dropping
+an unparseable value (with a note) so its default applies. Approval validates selected
+workflows again, before sealing the plan or creating schedules, against the same repaired
+inputs setup will start each workflow with.
+
+Starting a new `growth.onboarding` marks earlier runs of the project that are still pending,
+running or waiting for picks, and were never approved, as `superseded`, together with
+their plan child, and cancels them. A replayed start request supersedes nothing, and an
+approved or finished onboarding is never superseded. `get_started` reports the latest
+active onboarding run as `active_run_id`, and its `setup_status` reflects that run.
 An invalid selection returns `invalid_plan`; the plan can be corrected and approved
 again. Malformed machine-plan fields remain readable through `get_run`, with an
 `invalid_plan` issue instead of an exception. Valid approval receipts remain immutable

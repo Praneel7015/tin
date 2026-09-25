@@ -8,8 +8,17 @@ from datetime import UTC, datetime
 
 import httpx
 
+from tin_lite import posthog_connection, stripe_connection
 from tin_lite.billing_contracts import digest
-from tin_lite.integrations import IntegrationError, IntegrationRequirement
+from tin_lite.connection_records import ServiceArgumentError
+from tin_lite.integrations import (
+    POSTHOG_PROVIDER,
+    STRIPE_PROVIDER,
+    IntegrationError,
+    IntegrationRequirement,
+    ServiceCallRefused,
+    ServiceResponseTooLarge,
+)
 from tin_lite.project_connections import CUSTOM_KEY, READ_METHODS, request_api, request_contract
 
 OPERATION = "code_service_call_v1"
@@ -18,7 +27,9 @@ OPERATIONS = {
     ("analytics.gsc", "sites.list"): ("sites.list", frozenset()),
     ("analytics.gsc", "search_analytics.read"): (
         "search_analytics.read",
-        frozenset({"start_date", "end_date", "dimensions", "row_limit"}),
+        frozenset(
+            {"start_date", "end_date", "dimensions", "row_limit", "start_row", "dimension_filters"}
+        ),
     ),
     ("infra.github", "repositories.list"): ("repositories.list", frozenset()),
     ("workspace.google", "gmail.messages.search"): (
@@ -30,11 +41,36 @@ OPERATIONS = {
         "calendar.events.read",
         frozenset({"time_min", "time_max", "query", "max_results"}),
     ),
+    # Stripe's reviewed read table: operation name -> (capability, closed argument names).
+    **{
+        (STRIPE_PROVIDER, name): (op.capability, op.arguments)
+        for name, op in stripe_connection.OPERATIONS.items()
+    },
+    # PostHog's reviewed reads; the selected project is Tin's, never an argument.
+    **{
+        (POSTHOG_PROVIDER, name): (op.capability, op.arguments)
+        for name, op in posthog_connection.OPERATIONS.items()
+    },
+}
+# Providers whose argument values are checked before a receipt exists, so a malformed call is
+# a contract error the author can fix rather than an uncertain provider attempt.
+ARGUMENT_CHECKS = {
+    STRIPE_PROVIDER: stripe_connection.check_arguments,
+    POSTHOG_PROVIDER: posthog_connection.check_arguments,
 }
 
 
 class CodeServiceError(ValueError):
     """Fixed safe errors; never supplier exceptions, bodies, URLs or authentication."""
+
+
+def _too_large(service):
+    # The bound is the author's own declared value; naming it lets them size the next request.
+    return CodeServiceError(
+        f"The service response exceeded this binding's max_response_bytes "
+        f"({service.max_response_bytes}); request less data, for example a smaller "
+        "row_limit or the next start_row page."
+    )
 
 
 class CodeServices:
@@ -68,11 +104,18 @@ class CodeServices:
                 capability, fields = OPERATIONS[(service.provider_key, payload["operation"])]
                 if not isinstance(args, dict) or set(args) - fields:
                     raise ValueError
+                check = ARGUMENT_CHECKS.get(service.provider_key)
+                if check is not None:
+                    check(payload["operation"], args)
             if (
                 capability not in service.capabilities
                 or len(json.dumps(args, allow_nan=False).encode()) > 16_000
             ):
                 raise ValueError
+        except ServiceArgumentError as exc:
+            raise CodeServiceError(
+                f"The service request differs from its declared contract: {exc}."
+            ) from None
         except (ValueError, TypeError, KeyError, StopIteration, RecursionError):
             raise CodeServiceError(
                 "The service request differs from its declared contract."
@@ -134,6 +177,10 @@ class CodeServices:
                 if record.get("fingerprint") != fingerprint:
                     raise CodeServiceError("This service step already has a different request.")
                 if saved.status == "completed":
+                    if record.get("error") == "response_too_large":
+                        raise _too_large(service)
+                    if record.get("error"):
+                        raise CodeServiceError(record.get("message") or "The provider refused it.")
                     return record["response"]
                 raise CodeServiceError(
                     "A service request has an unconfirmed result; "
@@ -206,14 +253,45 @@ class CodeServices:
                         )
                         if custom
                         else await self.adapter(
-                            service.provider_key, payload["operation"], args, run, connection, key
+                            service.provider_key,
+                            payload["operation"],
+                            args,
+                            run,
+                            connection,
+                            key,
+                            max_response_bytes=service.max_response_bytes,
                         )
                     )
                 if (
                     len(json.dumps(response, ensure_ascii=False, allow_nan=False).encode())
                     > service.max_response_bytes
                 ):
-                    raise ValueError("oversized response")
+                    raise ServiceResponseTooLarge("oversized response")
+            except ServiceResponseTooLarge:
+                # A response arrived and was refused by size: a known outcome, not an uncertain
+                # one. Settle both receipts so later steps are not blocked; the call still counts.
+                async with conn.transaction():
+                    await self.db.complete_effect(
+                        conn, execution_key=key, result={**record, "error": "response_too_large"}
+                    )
+                    await self.db.complete_effect(
+                        conn,
+                        execution_key=usage_key,
+                        result={**usage, "outcome": "response_received", "usage": {"requests": 1}},
+                    )
+                raise _too_large(service) from None
+            except ServiceCallRefused as exc:
+                # The provider answered and refused (rate limit, missing permission, revoked
+                # key): settle the step with Tin's own message so a new step may try again.
+                refused = {**record, "error": exc.code, "message": str(exc)[:500]}
+                async with conn.transaction():
+                    await self.db.complete_effect(conn, execution_key=key, result=refused)
+                    await self.db.complete_effect(
+                        conn,
+                        execution_key=usage_key,
+                        result={**usage, "outcome": "response_received", "usage": {"requests": 1}},
+                    )
+                raise CodeServiceError(refused["message"]) from None
             except (
                 IntegrationError,
                 httpx.HTTPError,
@@ -269,8 +347,18 @@ class CodeServices:
                     )
             return response
 
-    async def adapter(self, provider, operation, args, run, connection, key):
+    async def adapter(self, provider, operation, args, run, connection, key, *, max_response_bytes):
         service = self.integrations
+        if provider in {STRIPE_PROVIDER, POSTHOG_PROVIDER}:
+            adapter = service.stripe if provider == STRIPE_PROVIDER else service.posthog
+            return await adapter.call(
+                operation,
+                args,
+                connection=connection,
+                run_id=run.id,
+                execution_key=key,
+                max_response_bytes=max_response_bytes,
+            )
         if operation == "sites.list":
             return {
                 "sites": [asdict(x) for x in await service.google_sites(project_id=run.project_id)]
@@ -287,6 +375,7 @@ class CodeServices:
                 run_id=run.id,
                 execution_key=key,
                 expected_site_url=connection.configuration.get("selected_site_url"),
+                max_response_bytes=max_response_bytes,
                 **args,
             )
         common = {

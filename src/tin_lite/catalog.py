@@ -14,6 +14,9 @@ from tin_lite import (
     growth_onboarding,
     growth_plan,
     organic_system,
+    paid_ads,
+    paid_ads_launch,
+    paid_ads_monitor,
     style_capture,
     technical_fix,
 )
@@ -50,8 +53,10 @@ from tin_lite.domain import (
     WORKFLOW_NAME,
 )
 from tin_lite.integrations import (
+    ADS_PROVIDER,
     GITHUB_PROVIDER,
     GOOGLE_WORKSPACE_PROVIDER,
+    GSC_PROVIDER,
     IntegrationRequirement,
     parse_integration_requirements,
 )
@@ -61,13 +66,13 @@ from tin_lite.keyword_plan import (
 from tin_lite.keyword_plan import (
     ROUTE_KEY as KEYWORD_ROUTE_KEY,
 )
-from tin_lite.keyword_plan_v4 import (
+from tin_lite.keyword_plan_v5 import (
     INSTRUCTIONS as KEYWORD_INSTRUCTIONS,
 )
-from tin_lite.keyword_plan_v4 import (
+from tin_lite.keyword_plan_v5 import (
     POLICY as KEYWORD_POLICY,
 )
-from tin_lite.keyword_plan_v4 import (
+from tin_lite.keyword_plan_v5 import (
     SCHEMAS as KEYWORD_SCHEMAS,
 )
 from tin_lite.model_providers import ModelCapability, ModelRoute, ProviderName
@@ -85,7 +90,7 @@ from tin_lite.procedures import (
     PRODUCT_AUDIT_VALIDATOR,
     SIGNUP_WALKTHROUGH_VALIDATOR,
     STUDIO_SANDBOX_PROFILE,
-    TIN_DIAGRAM_REVIEWED_VALIDATOR,
+    TIN_DIAGRAM_BRANDED_VALIDATOR,
     CodexProcedureSource,
     GitHubPullRequestProcedure,
     GitHubRepositoryWorkspace,
@@ -117,6 +122,7 @@ ORGANIC_TRAFFIC_SYSTEM = "organic-traffic"
 COLD_OUTREACH_SYSTEM = "cold-outreach"
 PRODUCT_QA_SYSTEM = "product-qa"
 CREATIVE_STUDIO_SYSTEM = "creative-studio"
+PAID_ADS_SYSTEM = "paid-ads"
 DESIGN_MD_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000001")
 PROJECT_MEMORY_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000002")
 SCAN_REPORT_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000003")
@@ -139,6 +145,23 @@ GROWTH_ONBOARDING_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000035")
 ORGANIC_AUDIT_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000020")
 CREATIVE_CHARACTER_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000029")
 CREATIVE_PRODUCT_DEMO_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000022")
+PAID_ADS_ASSESSMENT_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000040")
+PAID_ADS_LAUNCH_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000041")
+PAID_ADS_MONITOR_WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000042")
+# Numbers below were used by built-ins that later left the catalog. Their rows still exist in
+# deployed databases, and the boot-time sync refuses to bind a number to a different key, so a
+# new built-in must take a fresh number above the highest ever used, never fill a gap.
+RETIRED_BUILTIN_WORKFLOW_IDS = {
+    UUID("00000000-0000-4000-8000-000000000018"): "strategy.prescribe",
+    UUID("00000000-0000-4000-8000-000000000019"): "strategy.wildcards",
+    UUID("00000000-0000-4000-8000-000000000021"): "creative.character_agent",
+    UUID("00000000-0000-4000-8000-000000000026"): "creative.character_direct",
+    # The paid ads keys moved from growth.paid_ads_* to ads.* on 2026-09-22; the published
+    # rows keep their numbers, so the ads.* built-ins took fresh ones.
+    UUID("00000000-0000-4000-8000-000000000037"): "growth.paid_ads_assessment",
+    UUID("00000000-0000-4000-8000-000000000038"): "growth.paid_ads_launch",
+    UUID("00000000-0000-4000-8000-000000000039"): "growth.paid_ads_monitor",
+}
 
 
 @dataclass(frozen=True)
@@ -173,6 +196,11 @@ WORKFLOW_SYSTEMS = (
         id=CREATIVE_STUDIO_SYSTEM,
         name="Creative studio",
         display_order=4,
+    ),
+    WorkflowSystem(
+        id=PAID_ADS_SYSTEM,
+        name="Paid ads system",
+        display_order=5,
     ),
 )
 WORKFLOW_SYSTEM_IDS = frozenset(item.id for item in WORKFLOW_SYSTEMS)
@@ -230,6 +258,16 @@ GROWTH_ONBOARDING_REVIEW_POLICY = HumanReviewPolicy(
         "The plan is ready. Say what Tin should take on, connect what it needs, then continue."
     ),
     queue_clause="Growth plan waiting for your pick",
+)
+PAID_ADS_LAUNCH_REVIEW_POLICY = HumanReviewPolicy(
+    reason="Creates or changes things in the founder's Google Ads account.",
+    review_label="Approve",
+    defer_label="Not now",
+    summary=(
+        "The Google Ads step is ready: the exact campaign or the tracking setup Tin will "
+        "carry out. Nothing happens in Google Ads until you approve it."
+    ),
+    queue_clause="Google Ads step ready for your approval",
 )
 EMAIL_CAMPAIGN_REVIEW_POLICY = HumanReviewPolicy(
     reason="Sends email to external recipients.",
@@ -366,6 +404,18 @@ class BuiltinWorkflow:
             definition["plan_routes"] = growth_plan.route_definitions()
             definition["plan_contract_sha256"] = growth_plan.contract_digest()
             definition["output_path"] = GROWTH_ONBOARDING_PLAN_PATH
+        if self.key == paid_ads.KEY:
+            definition["paid_ads_policy"] = dict(paid_ads.POLICY)
+            definition["paid_ads_routes"] = paid_ads.route_definitions()
+            definition["paid_ads_contract_sha256"] = paid_ads.contract_digest()
+        if self.key == paid_ads_launch.KEY:
+            definition["paid_ads_launch_policy"] = dict(paid_ads_launch.POLICY)
+            definition["paid_ads_launch_routes"] = paid_ads_launch.route_definitions()
+            definition["paid_ads_launch_contract_sha256"] = paid_ads_launch.contract_digest()
+        if self.key == paid_ads_monitor.KEY:
+            definition["paid_ads_monitor_policy"] = dict(paid_ads_monitor.POLICY)
+            definition["paid_ads_monitor_routes"] = paid_ads_monitor.route_definitions()
+            definition["paid_ads_monitor_contract_sha256"] = paid_ads_monitor.contract_digest()
         if self.key == content_plan.KEY:
             definition["content_policy"] = dict(content_plan_editorial.POLICY)
             definition["content_instructions"] = content_plan_editorial.INSTRUCTIONS
@@ -389,6 +439,13 @@ class BuiltinWorkflow:
                 raise ValueError(
                     "procedures that use a test identity require the Google Workspace mailbox"
                 )
+        if self.key == "content.public_article":
+            definition["public_discovery"] = False
+        from tin_lite.native_skill_pins import suite_for_workflow
+
+        suite = suite_for_workflow(self.key)
+        if suite is not None:
+            definition["native_skill_suite"] = suite
         return definition, resources
 
     def definition_with_wiki(self, system_wiki: SystemWikiRef) -> dict[str, Any]:
@@ -692,7 +749,7 @@ BUILTIN_WORKFLOWS = (
             "Save to My system to prepare weekly batches. Does not write articles or publish."
         ),
         executor=content_plan.KEY,
-        version_label="0.5.0",
+        version_label="0.6.0",
         prerequisites=(
             WorkflowPrerequisite(
                 kind="run",
@@ -729,7 +786,7 @@ BUILTIN_WORKFLOWS = (
             "No audit or GitHub required; does not create a calendar, write articles, or publish."
         ),
         executor=KEYWORD_KEY,
-        version_label="0.4.0",
+        version_label="0.5.0",
         system=ORGANIC_TRAFFIC_SYSTEM,
         schedule_modes=("on_demand",),
         model_route=ModelRoute(
@@ -802,7 +859,7 @@ BUILTIN_WORKFLOWS = (
                 },
                 "use_search_console": {
                     "type": "boolean",
-                    "default": False,
+                    "default": True,
                     "title": "Use matching Search Console data",
                     "description": (
                         "Optional enrichment from this project's connected property, "
@@ -836,7 +893,7 @@ BUILTIN_WORKFLOWS = (
             "Get a report, actionable findings, and supporting evidence. No GitHub required."
         ),
         executor=AUDIT_KEY,
-        version_label="0.4.3",
+        version_label="0.5.0",
         model_route=ModelRoute(
             key="organic.audit.visibility.v1",
             provider=ProviderName.OPENAI,
@@ -891,7 +948,7 @@ BUILTIN_WORKFLOWS = (
         title="Garden project memory",
         description="Consolidate durable project outputs into the project wiki.",
         executor=PROJECT_MEMORY_WORKFLOW_NAME,
-        version_label="1.0.0",
+        version_label="1.1.0",
     ),
     BuiltinWorkflow(
         id=SCAN_REPORT_WORKFLOW_ID,
@@ -902,7 +959,7 @@ BUILTIN_WORKFLOWS = (
             "SCAN.md."
         ),
         executor=SCAN_REPORT_WORKFLOW_NAME,
-        version_label="1.1.0",
+        version_label="1.2.0",
         prerequisites=(
             WorkflowPrerequisite(
                 kind="artifact",
@@ -1017,7 +1074,7 @@ BUILTIN_WORKFLOWS = (
             "buyer questions, then publish AI_VISIBILITY.md."
         ),
         executor=VISIBILITY_AUDIT_WORKFLOW_NAME,
-        version_label="1.1.0",
+        version_label="1.2.0",
         system=ORGANIC_TRAFFIC_SYSTEM,
         input_schema={
             "type": "object",
@@ -1049,7 +1106,7 @@ BUILTIN_WORKFLOWS = (
             "findings; not for general advice or internal business questions."
         ),
         executor=ANSWER_PAGE_WORKFLOW_NAME,
-        version_label="1.1.0",
+        version_label="1.2.0",
         prerequisites=(
             WorkflowPrerequisite(
                 kind="run",
@@ -1070,7 +1127,7 @@ BUILTIN_WORKFLOWS = (
             "from this project's durable week of activity."
         ),
         executor=WEEKLY_BRIEF_WORKFLOW_NAME,
-        version_label="1.0.0",
+        version_label="1.1.0",
         presentation=WorkflowDiagram(
             nodes=(
                 DiagramNode("collect", "step", "collect the week", "runs · files · activity"),
@@ -1155,7 +1212,7 @@ BUILTIN_WORKFLOWS = (
             "source-backed evidence."
         ),
         executor=CODEX_PROCEDURE_EXECUTOR,
-        version_label="1.0.0",
+        version_label="1.1.0",
         input_schema={
             "type": "object",
             "additionalProperties": False,
@@ -1218,7 +1275,7 @@ BUILTIN_WORKFLOWS = (
             "public article."
         ),
         executor=CODEX_PROCEDURE_EXECUTOR,
-        version_label="1.4.0",
+        version_label="1.4.1",
         system=ORGANIC_TRAFFIC_SYSTEM,
         prerequisites=(
             WorkflowPrerequisite(
@@ -1305,11 +1362,11 @@ BUILTIN_WORKFLOWS = (
         key=CONTENT_DIAGRAM_WORKFLOW_NAME,
         title="Create a diagram",
         description=(
-            "Turn a process or system into one clear Tin-styled diagram whose Mermaid source "
-            "stays editable in project Files."
+            "Turn a process or system into one clear diagram using approved brand guidance. "
+            "Its source stays editable in project Files."
         ),
         executor=CODEX_PROCEDURE_EXECUTOR,
-        version_label="2.1.0",
+        version_label="2.2.0",
         review_policy=CONTENT_DIAGRAM_REVIEW_POLICY,
         schedule_modes=("on_demand",),
         input_schema={
@@ -1358,7 +1415,7 @@ BUILTIN_WORKFLOWS = (
             entry_skill="content-diagram",
             output_path_template="diagrams/{slug}.mmd",
             output_media_type="text/vnd.mermaid",
-            output_validator=TIN_DIAGRAM_REVIEWED_VALIDATOR,
+            output_validator=TIN_DIAGRAM_BRANDED_VALIDATOR,
             output_max_bytes=64_000,
         ),
     ),
@@ -1903,14 +1960,15 @@ BUILTIN_WORKFLOWS = (
         key=CREATIVE_CHARACTER_WORKFLOW_NAME,
         title="Design a brand character",
         description=(
-            "Design a cute, on-brand vector mascot for the product as an animatable SVG "
+            "Use when the founder has an explicit brand-design need. "
+            "Design a vector mascot as an animatable SVG "
             "character in project Files (three mouth shapes, a blink, and a payoff "
             "expression), ready to narrate demo videos and appear in marketing. Tin reads the "
             "product page and project memory itself and asks one model for the drawing; about "
             "two minutes, no sandbox."
         ),
         executor=CREATIVE_CHARACTER_WORKFLOW_NAME,
-        version_label="1.1.0",
+        version_label="1.2.0",
         prerequisites=(
             WorkflowPrerequisite(
                 kind="artifact",
@@ -2130,11 +2188,117 @@ BUILTIN_WORKFLOWS = (
         # An LLM flow: code owns the sequence, scoring, availability and rendering; models supply
         # judgment. It replaced a Codex procedure that spent most of four minutes typing the file.
         executor=growth_plan.KEY,
-        version_label="3.0.0",
+        version_label="3.1.0",
         system=START_HERE_SYSTEM,
         agent_only=True,
         schedule_modes=("on_demand",),
         input_schema=growth_onboarding.INPUT_SCHEMA,
+    ),
+    BuiltinWorkflow(
+        id=PAID_ADS_ASSESSMENT_WORKFLOW_ID,
+        key=paid_ads.KEY,
+        title="Assess paid ads for this business",
+        description=(
+            "Decide whether Google Search ads fit: a verdict, the constraint that binds it, a "
+            "scorecard and a rough campaign shape from Keyword Planner, DataForSEO, Search "
+            "Console when connected and the site. Advisory only; nothing is created or spent "
+            "on ads."
+        ),
+        # An LLM flow: code owns economics, scoring, the verdict and rendering; five bounded
+        # model steps read evidence, label keywords, diagnose history and shape the campaign.
+        executor=paid_ads.KEY,
+        version_label="0.2.0",
+        system=PAID_ADS_SYSTEM,
+        schedule_modes=("on_demand",),
+        input_schema=paid_ads.INPUT_SCHEMA,
+        prerequisites=(
+            WorkflowPrerequisite(
+                kind="run",
+                level="recommended",
+                workflow=GROWTH_ONBOARDING_PLAN_WORKFLOW_NAME,
+                via_input="onboarding_run_id",
+                reason="The Start here plan's answers prefill the business profile.",
+            ),
+            WorkflowPrerequisite(
+                kind="run",
+                level="recommended",
+                workflow=KEYWORD_KEY,
+                via_input="keyword_run_id",
+                reason="A keyword plan supplies seeds and competitors the assessment reuses.",
+            ),
+            WorkflowPrerequisite(
+                kind="run",
+                level="recommended",
+                workflow=AUDIT_KEY,
+                via_input="audit_run_id",
+                reason="An audit supplies landing-page facts the readiness score uses.",
+            ),
+        ),
+        integration_requirements=(
+            IntegrationRequirement(GSC_PROVIDER, ("search_analytics.read",), required=False),
+            IntegrationRequirement(GITHUB_PROVIDER, ("contents.read",), required=False),
+        ),
+    ),
+    BuiltinWorkflow(
+        id=PAID_ADS_LAUNCH_WORKFLOW_ID,
+        key=paid_ads_launch.KEY,
+        title="Launch a Google Ads campaign",
+        description=(
+            "Turn an assessment's campaign shape into one live Google Search campaign in your "
+            "own Ads account. Creates nothing until you approve the exact plan."
+        ),
+        # An LLM flow with one approval: code decides the structure, budget and bids; model
+        # steps write the ads and the founder brief; the founder approves before any write.
+        executor=paid_ads_launch.KEY,
+        version_label="0.1.0",
+        system=PAID_ADS_SYSTEM,
+        review_policy=PAID_ADS_LAUNCH_REVIEW_POLICY,
+        schedule_modes=("on_demand",),
+        input_schema=paid_ads_launch.INPUT_SCHEMA,
+        prerequisites=(
+            WorkflowPrerequisite(
+                kind="run",
+                level="required",
+                workflow=paid_ads.KEY,
+                via_input="assessment_run_id",
+                reason="The assessment's campaign shape and keywords are what gets launched.",
+            ),
+        ),
+        integration_requirements=(
+            IntegrationRequirement(ADS_PROVIDER, ("campaigns.write",), required=True),
+            IntegrationRequirement(
+                GITHUB_PROVIDER,
+                ("contents.read", "contents.write", "pull_requests.write"),
+                required=False,
+            ),
+        ),
+    ),
+    BuiltinWorkflow(
+        id=PAID_ADS_MONITOR_WORKFLOW_ID,
+        key=paid_ads_monitor.KEY,
+        title="Check the Google Ads campaign",
+        description=(
+            "Read the launched campaign, add negatives from wasted search terms, pause "
+            "disapproved ads and wasteful keywords on its own, and propose budget or bidding "
+            "changes for your approval."
+        ),
+        executor=paid_ads_monitor.KEY,
+        version_label="0.1.0",
+        system=PAID_ADS_SYSTEM,
+        schedule_modes=("on_demand", "daily", "weekly"),
+        input_schema=paid_ads_monitor.INPUT_SCHEMA,
+        prerequisites=(
+            WorkflowPrerequisite(
+                kind="run",
+                level="required",
+                workflow=paid_ads_launch.KEY,
+                via_input="launch_run_id",
+                reason="The monitor looks after the campaign a launch created.",
+            ),
+        ),
+        integration_requirements=(
+            IntegrationRequirement(ADS_PROVIDER, ("campaigns.write",), required=True),
+        ),
     ),
 )
 

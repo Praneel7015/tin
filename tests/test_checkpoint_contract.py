@@ -60,6 +60,9 @@ from tin_lite.workflows import (
     KeywordPlanWorkflow,
     OrganicAuditWorkflow,
     OrganicTrafficSystemWorkflow,
+    PaidAdsAssessmentWorkflow,
+    PaidAdsLaunchWorkflow,
+    PaidAdsMonitorWorkflow,
     ProjectMemoryWorkflow,
     ProjectTaskWorkflow,
     ScanReportWorkflow,
@@ -505,6 +508,9 @@ def test_workflow_registry_is_explicit_and_narrow() -> None:
         VisibilityAuditWorkflow,
         OrganicAuditWorkflow,
         KeywordPlanWorkflow,
+        PaidAdsAssessmentWorkflow,
+        PaidAdsLaunchWorkflow,
+        PaidAdsMonitorWorkflow,
         AnswerPageWorkflow,
         CharacterDesignWorkflow,
         CodexProcedureWorkflow,
@@ -526,6 +532,9 @@ def test_workflow_registry_is_explicit_and_narrow() -> None:
         "visibility.audit": VisibilityAuditWorkflow,
         "organic.audit": OrganicAuditWorkflow,
         "organic.keyword_plan": KeywordPlanWorkflow,
+        "ads.assessment": PaidAdsAssessmentWorkflow,
+        "ads.launch": PaidAdsLaunchWorkflow,
+        "ads.monitor": PaidAdsMonitorWorkflow,
         "content.answer_page": AnswerPageWorkflow,
         "creative.character": CharacterDesignWorkflow,
         CODEX_PROCEDURE_EXECUTOR: CodexProcedureWorkflow,
@@ -618,6 +627,16 @@ async def test_builtin_sync_keeps_the_immutable_definition_commit(monkeypatch) -
     assert "not for general advice" in answer_page["description"]
 
 
+def test_builtin_ids_never_reuse_a_retired_number() -> None:
+    from tin_lite.catalog import RETIRED_BUILTIN_WORKFLOW_IDS
+
+    used = {item.id: item.key for item in BUILTIN_WORKFLOWS}
+    assert not set(used) & set(RETIRED_BUILTIN_WORKFLOW_IDS), (
+        "a deployed database still holds the retired row; pick a fresh number"
+    )
+    assert len(used) == len(BUILTIN_WORKFLOWS)
+
+
 def test_registry_system_assignments_are_manifest_metadata_only() -> None:
     definitions = {item.key: item.definition for item in BUILTIN_WORKFLOWS}
 
@@ -635,6 +654,8 @@ def test_registry_system_assignments_are_manifest_metadata_only() -> None:
     assert "system" not in definitions["research.deep_dive"]
     assert definitions["content.public_article"]["system"] == ORGANIC_TRAFFIC_SYSTEM
     assert definitions["style.capture"]["system"] == ORGANIC_TRAFFIC_SYSTEM
+    assert definitions["ads.assessment"]["system"] == "paid-ads"
+    assert "agent_only" not in definitions["ads.assessment"]
 
     migration = (Path(__file__).parents[1] / "migrations" / "017_workflow_systems.sql").read_text()
     assert "CREATE TABLE workflow_systems" in migration

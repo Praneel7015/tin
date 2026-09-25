@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -70,6 +71,7 @@ async def test_build_runtime_wires_services_without_unknown_activity_arguments(
         temporal_namespace="tin-lite-dev",
         temporal_api_key=secret,
         task_queue="tin-lite-checkpoint-a",
+        worker_graceful_shutdown_seconds=300,
         switchboard_public_url="https://lite.tin.computer",
     )
 
@@ -83,6 +85,9 @@ async def test_build_runtime_wires_services_without_unknown_activity_arguments(
     assert original["interceptors"]
     assert trusted["task_queue"] == settings.task_queue + "-trusted"
     assert trusted["max_concurrent_activities"] == 4
+    # A deploy lets in-flight activities finish instead of cancelling them at once.
+    assert original["graceful_shutdown_timeout"] == timedelta(minutes=5)
+    assert trusted["graceful_shutdown_timeout"] == timedelta(minutes=5)
     assert not trusted.get("workflows")
     original_names = {
         activity._Definition.must_from_callable(fn).name for fn in original["activities"]

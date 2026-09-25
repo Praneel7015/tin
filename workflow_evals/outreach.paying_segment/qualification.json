@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "assumptions": [
+    "Cases run against a Stripe test-mode account seeded with the synthetic customers described in each case, or against tests/test_outreach_paying_segment.py fixtures offline. No real customer data.",
+    "One Stripe account per run, connected as payments.stripe. At most eight subscriptions.list reads, each fitted by Tin to 64000 bytes of projected records and continued from next_cursor; a one-price subscription with its customer is about 730 bytes, so about 85 fit per read and about 690 per run.",
+    "A customer stayed when they kept paying retention_days after their first paid day. Trial days do not count; younger customers are not judged.",
+    "A new subscription within 14 days of the customer's previous one ending is the same customer staying on; unpaid or paused subscriptions with no end date are left out."
+  ],
+  "cost_drivers": [
+    "Deterministic Python with no model routes: zero LLM cost and no Tin credits under the bounded-code policy.",
+    "Eight Stripe reads at most through Tin's gateway. Stripe does not charge for API reads; connected-provider cost is outside Tin's estimate.",
+    "Runtime is bounded by the 60-second code window; each request is capped by the gateway's own timeout."
+  ],
+  "effects": [
+    "Read-only payments.stripe subscriptions.list (status all, created window, customer expanded by Tin) through the founder's restricted key, which needs Read on Subscriptions and Customers. Projected records carry full customer email and name; the report keeps only domains.",
+    "Writes reports/outreach/PAYING_SEGMENT.md in project state. Emails, names and Stripe IDs are never written; company domains of retained customers are.",
+    "No Stripe writes, emails, publication or model calls. It starts no other workflow: the hand-off section lists exact inputs for outreach.email_shortlist, organic.keyword_plan and ads.assessment that the calling agent may start after checking the onboarding plan's hard no's."
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "The ordinary() fixture: 25 work-email customers (20 stay, 12 annual) and 25 personal-email customers (6 stay, 4 cancel in trial, 3 failed payments). Must name work email as the target, personal email as the segment to stop acquiring, annual billing as the offer lever, and write exact start inputs for the shortlist, keyword plan and ads assessment.",
+      "inputs": {
+        "retention_days": 60,
+        "lookback_days": 365,
+        "min_segment_size": 5,
+        "exclude_domains": [],
+        "product_summary": "An API for podcast clipping."
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "Aim at: people who sign up with a work email. 80% of them stayed",
+          "Stop paying to acquire: people who sign up with a personal email",
+          "Offer lever: customers who pick annual billing kept paying at 100%",
+          "\"objective\": \"From the founder's contacts, shortlist people who look like the customers who paid and stayed",
+          "\"buyer_context\": \"An API for podcast clipping.",
+          "\"market\": \"US\"",
+          "\"price_point\": 29.0",
+          "This run starts nothing.",
+          "too expensive 12"
+        ],
+        "excludes": [
+          "Status: provisional",
+          "Status: insufficient evidence",
+          "gmail.com",
+          "Entry price:"
+        ]
+      }
+    },
+    {
+      "id": "too_few_customers",
+      "description": "Sixteen judged customers, under the floor of twenty. The report must say how many more are needed and must not name a segment or hand anything off.",
+      "inputs": {
+        "retention_days": 60,
+        "lookback_days": 365,
+        "min_segment_size": 5,
+        "exclude_domains": [],
+        "product_summary": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: insufficient evidence",
+          "Not enough customers to judge yet: 16 of the 20 needed."
+        ],
+        "excludes": [
+          "Aim at:",
+          "## Hand-off",
+          "\"objective\""
+        ]
+      }
+    },
+    {
+      "id": "no_real_difference",
+      "description": "Forty customers where every segment keeps half its customers. A plausible-looking segment would be a false finding; the report must stay provisional.",
+      "inputs": {
+        "retention_days": 60,
+        "lookback_days": 365,
+        "min_segment_size": 5,
+        "exclude_domains": [],
+        "product_summary": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: provisional"
+        ],
+        "excludes": [
+          "Aim at:",
+          "Stop paying to acquire:",
+          "Status: complete"
+        ]
+      }
+    },
+    {
+      "id": "refused_key",
+      "description": "Stripe refuses the first read because the key lost Subscriptions read after it was checked (permission_denied). One read, then a setup diagnostic instead of figures.",
+      "inputs": {
+        "retention_days": 60,
+        "lookback_days": 365,
+        "min_segment_size": 5,
+        "exclude_domains": [],
+        "product_summary": ""
+      },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: connection needs attention",
+          "restricted key with Read access to Subscriptions and Customers"
+        ],
+        "excludes": [
+          "Aim at:",
+          "Keep rate by segment"
+        ]
+      }
+    }
+  ],
+  "rubric": [
+    {
+      "id": "targetable",
+      "question": "Is the named target a group the founder can find before they become customers (not a billing choice they make afterwards)?"
+    },
+    {
+      "id": "honest",
+      "question": "Does every figure follow from the evidence block, and does the report stay provisional when the comparison is not significant after Holm?"
+    },
+    {
+      "id": "actionable",
+      "question": "Could the calling agent start the outreach shortlist, keyword plan and ads assessment with the hand-off inputs, adding only project_id and what the section says to add?"
+    }
+  ]
+}

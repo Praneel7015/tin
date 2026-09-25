@@ -9,6 +9,8 @@ MCP tools and the HTTP approve route go through here.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any, Literal
 from uuid import UUID
 
@@ -28,6 +30,7 @@ from tin_lite.project_files import StaleProjectRevisionError
 SystemPick = str  # a system id from the plan, or "suggested" for the set Tin marked
 ControlChoice = Literal["pull_request", "review_in_tin"]
 ConnectionDecision = Literal["connected", "not_now"]
+logger = logging.getLogger(__name__)
 
 
 class OnboardingPickError(ValueError):
@@ -292,6 +295,7 @@ async def ensure_onboarding_approvable(*, runtime: Any, run: Any) -> None:
                 text=text,
                 systems=readiness["systems"],
                 timezone=(run.input or {}).get("timezone") or "UTC",
+                run_input=run.input or {},
             )
             if issues:
                 summary = "; ".join(
@@ -306,3 +310,84 @@ async def ensure_onboarding_approvable(*, runtime: Any, run: Any) -> None:
             await runtime.database.complete_effect(
                 conn, execution_key=key, result={"text": text, "revision": head}
             )
+
+
+SUPERSEDED_SUMMARY = "A newer onboarding run replaced this one before its plan was approved."
+
+
+async def supersede_earlier_onboarding(*, runtime: Any, run: Any) -> list[UUID]:
+    """Close older, never-approved onboarding runs of this project once a newer one starts.
+
+    Agents restart onboarding after a correction; the earlier run would otherwise wait for
+    picks forever. Only pending/running/needs_input runs without an approval receipt qualify,
+    decided under the control lock approval takes, so approval and supersede cannot both win.
+    The Postgres status is the fence (every onboarding activity re-checks it); the Temporal
+    cancel reuses the stop tools' delivery and is best effort.
+    """
+    from tin_lite.organic_system_control import deliver_control
+
+    db = runtime.database
+    older = await db.pool.fetch(
+        """SELECT id FROM workflow_runs
+           WHERE project_id=$1 AND executor=$2 AND id<>$3
+             AND status IN ('pending', 'running', 'needs_input')
+             AND created_at <= (SELECT created_at FROM workflow_runs WHERE id=$3)
+           ORDER BY created_at, id""",
+        run.project_id,
+        KEY,
+        run.id,
+    )
+    superseded: list[UUID] = []
+    handles: list[str] = []
+    for row in older:
+        old_id = row["id"]
+        async with db.effect_lock(f"onboarding:{old_id}:control", KEY) as (conn, _):
+            async with conn.transaction():
+                if await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM effect_receipts WHERE execution_key=$1)",
+                    f"onboarding:{old_id}:approved_plan",
+                ):
+                    continue  # Approved (or being sealed): setup owns this run now.
+                closed = await conn.fetch(
+                    """UPDATE workflow_runs SET status='superseded',
+                           finished_at=COALESCE(finished_at, now()), progress_summary=$4
+                       WHERE project_id=$2 AND status IN ('pending', 'running', 'needs_input')
+                         AND (id=$1 OR start_idempotency_key=$3)
+                       RETURNING id, temporal_workflow_id""",
+                    old_id,
+                    run.project_id,
+                    f"onboarding:{old_id}:plan",
+                    SUPERSEDED_SUMMARY,
+                )
+                if not any(item["id"] == old_id for item in closed):
+                    continue
+                await conn.execute(
+                    """UPDATE run_decisions SET status='dismissed', applied_at=now(),
+                           applied_by_clerk_user_id=$2, response=$3::jsonb
+                       WHERE run_id=ANY($1::uuid[]) AND status='pending'""",
+                    [item["id"] for item in closed],
+                    run.started_by_clerk_user_id,
+                    json.dumps({"action": "superseded", "successor_run_id": str(run.id)}),
+                )
+                await db.add_activity(
+                    conn=conn,
+                    run_id=old_id,
+                    event_type="onboarding_superseded",
+                    details={
+                        "kind": "runs",
+                        "status": "superseded",
+                        "successor_run_id": str(run.id),
+                    },
+                    summary="A newer onboarding run replaced this one.",
+                    audience="product",
+                    dedupe_key=f"onboarding:{old_id}:superseded",
+                )
+        superseded.append(old_id)
+        handles.extend(item["temporal_workflow_id"] for item in closed)
+    for workflow_id in handles:
+        try:
+            await deliver_control(runtime.temporal.get_workflow_handle(workflow_id))
+        except Exception:
+            # The superseded status already fences every later activity of that run.
+            logger.warning("Could not cancel superseded onboarding workflow %s", workflow_id)
+    return superseded

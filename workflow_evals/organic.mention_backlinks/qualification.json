@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "assumptions": [
+    "The fixture project is Shipyard (shipyard.dev), a preview-deploy tool. Project state holds reports/GROWTH_ONBOARDING_PLAN.md, one organic.audit evidence.json whose panel names Shipyard with site_hosts shipyard.dev and docs.shipyard.dev, and .agents/skills/writing-style/SKILL.md, unless a case says otherwise.",
+    "Brand name, domain and aliases come from the inputs first and from project context when the inputs are empty. A run that can resolve neither writes a diagnostic and searches nothing.",
+    "History lives only in the tin-backlink-state fence of the newest earlier reports/backlink-asks/ report. The LEDGER.md functions decide what may be investigated, rechecked or asked; a page asked once is never asked again.",
+    "Search results and fetched pages are public and change weekly, so page contents are observations with a date, not fixtures. Run success establishes artifact delivery only."
+  ],
+  "cost_drivers": [
+    "One bounded Codex session under the existing procedure ceiling, with no managed-model routes and no connected-provider calls.",
+    "Web actions: at most 60 searches and fetches per run, of which at most 10 recheck earlier asks. max_mentions (3 to 30) bounds new qualified pages.",
+    "Later weekly runs skip settled pages from the ledger, so they cost less than the first. No measured live cost yet."
+  ],
+  "effects": [
+    "Writes one run-owned reports/backlink-asks/<run_id>.md in project state.",
+    "Reads the onboarding plan, organic audit and visibility audit evidence, project memory, the keyword plan, the writing-style guide, the email shortlist and earlier backlink-ask reports, plus public web pages through fenced web search.",
+    "No email, form submission, post, pull request, contact, memory edit or workflow start. Drafts are text for the founder to send."
+  ],
+  "rubric": [
+    { "id": "own_and_collision", "question": "Is every page on the brand's own hosts, and every page where the name means something else, kept out of Ready to send?" },
+    { "id": "evidence", "question": "Does every drafted ask quote the exact mention phrase from the page, name one specific link target on the domain, and name a contact channel actually shown on the site?" },
+    { "id": "no_repeat", "question": "Are pages asked in an earlier run rechecked only, never redrafted, and reported under Since last run?" },
+    { "id": "voice", "question": "When a writing-style guide exists, do the drafts follow it, and do they stay under 120 words without claims the page and project files do not support?" }
+  ],
+  "cases": [
+    {
+      "id": "ordinary",
+      "description": "Second weekly run with empty brand_name and domain. The previous report asked devtoolsweekly.com and found no contact on stackradar.dev. Search results include docs.shipyard.dev and Shipyard Brewing. Expect the brand resolved from project context, new asks in the founder's voice, the earlier ask rechecked and not redrafted, and own pages and collisions only counted.",
+      "inputs": { "brand_name": "", "domain": "", "aliases": "", "max_mentions": 15, "recency_days": 180 },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": [
+          "Status: complete",
+          "## Ready to send",
+          "## No contact found",
+          "## Since last run",
+          "## Discarded",
+          "## Sources and budget",
+          "Voice: writing-style guide",
+          "Found through:",
+          "not redrafted",
+          "```tin-backlink-state"
+        ],
+        "excludes": [
+          "Status: incomplete",
+          "Status: diagnostic",
+          "— docs.shipyard.dev",
+          "— shipyard.dev",
+          "— shipyardbrewing.com"
+        ]
+      }
+    },
+    {
+      "id": "only_own_and_collisions",
+      "description": "Plausible but unusable search results: every result naming Shipyard is either a shipyard.dev page, the brand's own GitHub organization, or Shipyard Brewing. The useful result is no ask at all, with the collisions counted, not a padded list of drafts to the brand itself or a brewery.",
+      "inputs": { "brand_name": "Shipyard", "domain": "shipyard.dev", "aliases": "", "max_mentions": 10, "recency_days": 180 },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: complete", "Nothing to ask this week", "name_collision", "own_property"],
+        "excludes": ["Send to:", "— docs.shipyard.dev", "— shipyardbrewing.com", "— github.com"]
+      }
+    },
+    {
+      "id": "no_brand_context",
+      "description": "A new project with empty brand_name and domain, and no onboarding plan, organic audit, keyword plan or project memory. The run must name what is missing and what to run, not guess a brand from the repository name.",
+      "inputs": { "brand_name": "", "domain": "", "aliases": "", "max_mentions": 15, "recency_days": 180 },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["Status: diagnostic", "brand_name", "domain", "growth.onboarding_plan"],
+        "excludes": ["## Ready to send", "Send to:"]
+      }
+    },
+    {
+      "id": "hard_no_cold_email",
+      "description": "The onboarding plan records the founder's hard no on cold email. Qualified pages and their channels are listed, and no ask is drafted.",
+      "inputs": { "brand_name": "", "domain": "", "aliases": "", "max_mentions": 10, "recency_days": 180 },
+      "expected_status": "succeeded",
+      "expect": {
+        "contains": ["withheld: the founder's hard no on cold email", "## No contact found", "```tin-backlink-state"],
+        "excludes": ["Send to:", "Status: diagnostic"]
+      }
+    }
+  ]
+}

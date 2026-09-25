@@ -1,0 +1,70 @@
+{
+  "package_format": "tin-workflow-package-v1",
+  "definition": {
+    "key": "growth.free_tool",
+    "title": "Pick the free tool your code can already power",
+    "description": "Find the one free public tool (checker, calculator, generator, validator) that buyers already search for, that a small site can still rank for, and that your connected repository makes cheap to build. Get one evidenced pick with a build spec, or an honest no. Nothing is built, published or changed.",
+    "executor": "codex.procedure",
+    "version": "1.0.0",
+    "schedule_modes": ["on_demand"],
+    "input_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "product_url"],
+      "properties": {
+        "project_id": { "type": "string", "format": "uuid" },
+        "product_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 500,
+          "title": "Product website",
+          "x-tin-ui": { "control": "text", "order": 10 }
+        },
+        "focus": {
+          "type": "string",
+          "maxLength": 500,
+          "default": "",
+          "title": "Optional buyer or area to favour",
+          "x-tin-ui": { "control": "text", "order": 20 }
+        },
+        "exclude": {
+          "type": "string",
+          "maxLength": 1000,
+          "default": "",
+          "title": "Optional ideas or code areas to rule out",
+          "x-tin-ui": { "control": "textarea", "order": 30 }
+        }
+      }
+    },
+    "integration_requirements": [
+      {
+        "provider_key": "infra.github",
+        "capabilities": ["contents.read"],
+        "required": true
+      }
+    ],
+    "procedure": {
+      "prompt_path": "PROMPT.md",
+      "skills_path": "skills",
+      "skill_files": [
+        "skills/free-tool/SKILL.md",
+        "skills/free-tool/SCORING.md",
+        "skills/free-tool/REPORT.md"
+      ],
+      "entry_skill": "free-tool",
+      "workspace": {
+        "kind": "github.repository",
+        "provider_key": "infra.github",
+        "capabilities": ["contents.read"],
+        "limits": { "max_files": 1000, "max_bytes": 100000000 }
+      },
+      "sandbox": { "profile": "isolated", "egress": "fenced", "timeout_seconds": 1800 },
+      "output": {
+        "kind": "project.artifact",
+        "path_template": "reports/free-tool/{run_id}.md",
+        "media_type": "text/markdown",
+        "max_bytes": 64000
+      }
+    }
+  }
+}

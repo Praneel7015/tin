@@ -1,7 +1,9 @@
 # Project API connections
 
 Code workflows and bounded Codex procedures use the same project-owned connections and
-trusted service gateway. Existing definitions without procedure service bindings keep their
+trusted service gateway. For Stripe and PostHog, use the first-party `payments.stripe` and
+`analytics.posthog` connections instead of a custom API: see
+[Stripe and PostHog connections](stripe-and-posthog-connections.md). Existing definitions without procedure service bindings keep their
 behavior; one-off tasks, review rules and recorded Temporal commands are unchanged.
 Private execution remains restricted to the existing explicit pilot projects.
 
@@ -95,8 +97,10 @@ public DNS addresses before attaching credentials, preserves the host resolver's
 preference, verifies TLS for the approved hostname,
 ignores proxy environment variables, refuses compressed responses and bounds returned JSON.
 Credential echoes are withheld. Non-redirect HTTP responses return `{status, data}` so code
-can validate business results. Invalid, oversized, unavailable or ambiguous results stop the
-attempt and do not silently repeat the external request.
+can validate business results. Invalid, unavailable or ambiguous results stop the attempt and
+do not silently repeat the external request. An oversized response is different: it arrived,
+so it is settled as a named `max_response_bytes` error for that step, counted against the
+allowance, and later steps can still call the service.
 
 GET requires `http.read`. POST/PUT/PATCH/DELETE require `http.write` **and** that exact method
 on the connection. Where supported, configuring `Idempotency-Key` or `X-Idempotency-Key`
@@ -107,6 +111,27 @@ Up to four service bindings and eight total calls share the existing 60-second c
 Requests are at most 16 KB; each response is bounded to 1–64 KB. Sandboxes remain networkless
 and credential-free. Only the trusted activity invokes the gateway through the existing
 protected E2B controller channel and checks the run, membership, lease and fencing tuple.
+
+### Response size and Search Console rows
+
+`max_response_bytes` is measured on the serialized JSON the step receives, and it is what
+bounds result size in practice. A Search Console row costs roughly 110–250 bytes depending on
+its dimensions, so a 64000-byte binding holds about 250–550 rows, far fewer than the provider's
+25000-row maximum. `search_analytics.read` accepts:
+
+- `start_date`, `end_date` (YYYY-MM-DD, at most 366 days apart), `dimensions` (up to three of
+  `date`, `query`, `page`, `country`, `device`, `searchAppearance`) and `row_limit` (1–25000).
+- `start_row` (0–100000) to read a later page.
+- `dimension_filters`: up to five `{"dimension", "operator", "expression"}` items, combined
+  with AND. Dimensions are the list above except `date`; operators are `equals`, `notEquals`,
+  `contains`, `notContains`, `includingRegex` and `excludingRegex`; expressions are 1–4096
+  characters.
+
+Tin gives the adapter the binding's bound. It never asks Google for more rows than could fit,
+and keeps Google's leading rows (highest clicks first) that do. When rows were left out, or may
+exist beyond the page, the response adds `"truncated": true` and `"next_start_row"`; pass that
+value as `start_row` in a new step to continue. Filters are usually the better way to get the
+rows that matter within the eight-call allowance.
 
 ## Codex procedures
 
@@ -143,26 +168,19 @@ credential store or workflow engine is added. Apply it before deploying this cod
 ### PostHog example
 
 The [PostHog funnel package](../workflow_packages/example.posthog_funnel/workflow.json) shows
-this path without a named PostHog adapter. It is an unregistered authoring example; its real
-analytics quality and provider behavior still require a separately authorized evaluation.
-Copy its folder and key together to `custom.posthog_funnel` for an operator-enabled private
-trial, then validate and activate the exact revision through the ordinary package flow.
-
-Configure `custom.api.posthog` in Integrations with the correct regional API origin, bearer
-authentication, and GET/POST. Use a PostHog **personal API key** restricted to the intended
-project and the `query:read` and `event_definition:read` scopes, not the public ingestion key.
-Enter it only in secure setup. The package declares `http.write` because queries use POST;
-that permission describes
-HTTP methods, not proof that an operation changes provider data. PostHog's key permissions
-must enforce read-only access. Generic connections restrict origin and methods, not specific
-paths or project IDs. See [PostHog authentication](https://posthog.com/docs/api/personal-api-keys)
-and [query API](https://posthog.com/docs/api/query).
+a procedure calling registered operations through `call_service`. It binds the first-party
+`analytics.posthog` connection (OAuth, one founder-selected project) and uses
+`event_definitions.list`, `property_definitions.list` and `query.hogql`; the operations,
+HogQL rules and offline fakes are in [Stripe and PostHog connections](stripe-and-posthog-connections.md).
+It is an unregistered authoring example; its real analytics quality and provider behavior
+still require a separately authorized evaluation. Copy its folder and key together to
+`custom.posthog_funnel` for an operator-enabled private trial, then validate and activate the
+exact revision through the ordinary package flow.
 
 Tin's MCP tools expose its HTTP/API gateway to Codex. They do not connect arbitrary remote
-MCP servers. A later named connector or remote MCP adapter can reuse this boundary; neither
-is required for the custom API path. No live PostHog, paid model or E2B acceptance is implied
-by mocked tests. Codex model charges use existing pricing and settlement; connected-account
-charges remain separate and may be unknown.
+MCP servers. No live PostHog, paid model or E2B acceptance is implied by mocked tests. Codex
+model charges use existing pricing and settlement; connected-account charges remain separate
+and may be unknown.
 
 ## Existing adapters and contributions
 
@@ -176,6 +194,11 @@ project connections with this explicit reviewed mapping:
 | `infra.github` | `repositories.list` | `repositories.list` |
 | `workspace.google` | `gmail.messages.search`, `gmail.thread.read` | `gmail.messages.read` |
 | `workspace.google` | `calendar.events.list` | `calendar.events.read` |
+| `payments.stripe` | `subscriptions.list`, `customers.list`, `invoices.list`, `prices.list`, `charges.list` | `subscriptions.read`, `customers.read`, `invoices.read`, `prices.read`, `charges.read` |
+| `analytics.posthog` | `query.hogql`; `event_definitions.list`, `property_definitions.list`; `insights.list` | `query.read`; `definitions.read`; `insights.read` |
+
+Stripe and PostHog arguments, projected fields, paging and errors are documented in
+[Stripe and PostHog connections](stripe-and-posthog-connections.md).
 
 Adapter arguments are those of the bounded `IntegrationService` operation; project, run,
 account, connection and execution IDs are supplied by Tin. Email sends and GitHub delivery

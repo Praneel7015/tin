@@ -46,22 +46,39 @@ from tin_lite.domain import (
 from tin_lite.growth_onboarding import KEY as GROWTH_ONBOARDING_KEY
 from tin_lite.growth_onboarding_control import OnboardingPickError, ensure_onboarding_approvable
 from tin_lite.integrations import (
+    ADS_PROVIDER,
     GITHUB_PROVIDER,
     GOOGLE_WORKSPACE_PROVIDER,
     GSC_PROVIDER,
+    POSTHOG_PROVIDER,
+    STRIPE_PROVIDER,
     GitHubInstallationChoiceError,
     GitHubInstallationRequiredError,
     IntegrationAuthorizationError,
     IntegrationDefinition,
     IntegrationError,
+    IntegrationInputError,
     IntegrationNotConfiguredError,
     IntegrationUpstreamError,
+    ServiceCallRefused,
     registered_integrations,
 )
 from tin_lite.keyword_plan_control import stop_keyword_plan as stop_keyword_plan_service
 from tin_lite.luna import LunaProtocolError, LunaSafetyError, LunaUpstreamError
 from tin_lite.organic_audit_control import stop_organic_audit as stop_organic_audit_service
 from tin_lite.output_resolution import OutputResolutionError, OutputResolutionRequest
+from tin_lite.paid_ads_control import (
+    stop_paid_ads_assessment as stop_paid_ads_assessment_service,
+)
+from tin_lite.paid_ads_control import stop_paid_ads_launch as stop_paid_ads_launch_service
+from tin_lite.paid_ads_control import stop_paid_ads_monitor as stop_paid_ads_monitor_service
+from tin_lite.paid_ads_proposals import (
+    approve_paid_ads_proposal as approve_paid_ads_proposal_service,
+)
+from tin_lite.paid_ads_proposals import (
+    discard_paid_ads_proposal as discard_paid_ads_proposal_service,
+)
+from tin_lite.paid_ads_proposals import list_paid_ads_proposals as list_paid_ads_proposals_service
 from tin_lite.private_workflow_api import router as private_workflow_router
 from tin_lite.private_workflows import private_execution_ready, workflow_source_view
 from tin_lite.product_urls import dashboard_url
@@ -220,6 +237,120 @@ async def stop_organic_audit_run(
     except (ValueError, SideEffectConflictError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"id": str(run.id), "status": run.status.value}
+
+
+@router.post("/api/workflows/runs/{run_id}/stop-paid-ads-assessment")
+async def stop_paid_ads_assessment_run(
+    run_id: UUID, request: Request, user: AuthContext = AUTHENTICATED_USER
+) -> dict:
+    try:
+        run = await stop_paid_ads_assessment_service(
+            runtime=request.app.state.runtime, run_id=run_id, clerk_user_id=user.clerk_user_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+    except (ValueError, SideEffectConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"id": str(run.id), "status": run.status.value}
+
+
+@router.post("/api/workflows/runs/{run_id}/stop-paid-ads-launch")
+async def stop_paid_ads_launch_run(
+    run_id: UUID, request: Request, user: AuthContext = AUTHENTICATED_USER
+) -> dict:
+    try:
+        run = await stop_paid_ads_launch_service(
+            runtime=request.app.state.runtime, run_id=run_id, clerk_user_id=user.clerk_user_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+    except (ValueError, SideEffectConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"id": str(run.id), "status": run.status.value}
+
+
+@router.post("/api/workflows/runs/{run_id}/stop-paid-ads-monitor")
+async def stop_paid_ads_monitor_run(
+    run_id: UUID, request: Request, user: AuthContext = AUTHENTICATED_USER
+) -> dict:
+    try:
+        run = await stop_paid_ads_monitor_service(
+            runtime=request.app.state.runtime, run_id=run_id, clerk_user_id=user.clerk_user_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+    except (ValueError, SideEffectConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"id": str(run.id), "status": run.status.value}
+
+
+@router.get("/api/projects/{project_id}/paid-ads/proposals")
+async def list_paid_ads_proposals_route(
+    project_id: UUID, request: Request, user: AuthContext = AUTHENTICATED_USER
+) -> list[dict]:
+    try:
+        rows = await list_paid_ads_proposals_service(
+            runtime=request.app.state.runtime,
+            project_id=project_id,
+            clerk_user_id=user.clerk_user_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="project not found") from exc
+    return [_proposal_view(row) for row in rows]
+
+
+@router.post("/api/paid-ads/proposals/{proposal_id}/approve")
+async def approve_paid_ads_proposal_route(
+    proposal_id: UUID, request: Request, user: AuthContext = AUTHENTICATED_USER
+) -> dict:
+    try:
+        row = await approve_paid_ads_proposal_service(
+            runtime=request.app.state.runtime,
+            proposal_id=proposal_id,
+            clerk_user_id=user.clerk_user_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="proposal not found") from exc
+    except (RuntimeError, ValueError, SideEffectConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _proposal_view(row)
+
+
+@router.post("/api/paid-ads/proposals/{proposal_id}/discard")
+async def discard_paid_ads_proposal_route(
+    proposal_id: UUID, request: Request, user: AuthContext = AUTHENTICATED_USER
+) -> dict:
+    try:
+        row = await discard_paid_ads_proposal_service(
+            runtime=request.app.state.runtime,
+            proposal_id=proposal_id,
+            clerk_user_id=user.clerk_user_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="proposal not found") from exc
+    except (RuntimeError, ValueError, SideEffectConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _proposal_view(row)
+
+
+def _proposal_view(row: dict) -> dict:
+    return {
+        "id": str(row["id"]),
+        "project_id": str(row["project_id"]),
+        "campaign_run_id": str(row["campaign_run_id"]),
+        "monitor_run_id": str(row["monitor_run_id"]),
+        "number": row["proposal_number"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "previous": row["previous"],
+        "proposed": row["proposed"],
+        "rationale": row["rationale"],
+        "review_path": row["review_path"],
+        "review_commit_sha": row.get("review_commit_sha"),
+        "requested_at": row["requested_at"].isoformat() if row.get("requested_at") else None,
+        "reviewed_at": row["reviewed_at"].isoformat() if row.get("reviewed_at") else None,
+        "error_code": row.get("error_code"),
+    }
 
 
 @router.post("/api/workflows/runs/{run_id}/stop-keyword-plan")
@@ -1030,6 +1161,7 @@ class IntegrationView(BaseModel):
     access_label: str
     capabilities: list[str]
     unlocks: list[str]
+    setup_url: str | None = None
     configured: bool
     connection_id: UUID | None = None
     project_id: UUID | None = None
@@ -1090,6 +1222,12 @@ class IntegrationSelection(BaseModel):
     option_id: str = Field(min_length=1, max_length=500)
 
 
+class GoogleAdsLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    customer_id: str = Field(min_length=10, max_length=14)
+
+
 @router.api_route(
     "/", methods=["GET", "HEAD"], response_class=HTMLResponse, include_in_schema=False
 )
@@ -1122,8 +1260,24 @@ async def authentication_ui(request: Request) -> HTMLResponse:
 
 @router.get("/integrations/callback/google", response_class=HTMLResponse, include_in_schema=False)
 @router.get("/integrations/callback/github", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/integrations/callback/posthog", response_class=HTMLResponse, include_in_schema=False)
 async def integration_callback_ui(request: Request) -> HTMLResponse:
     return _static_page("index.html", request)
+
+
+@router.get("/integrations/posthog/client.json", include_in_schema=False)
+async def posthog_client_metadata(request: Request) -> JSONResponse:
+    """Tin's OAuth client identity for PostHog: its URL is the client_id PostHog fetches."""
+    from tin_lite.posthog_connection import client_metadata
+
+    runtime = request.app.state.runtime
+    if not runtime.integrations.is_configured(POSTHOG_PROVIDER):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    # PostHog caches the document for max-age (clamped to 5 minutes..24 hours).
+    return JSONResponse(
+        client_metadata(request.app.state.settings),
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.post("/webhooks/github", include_in_schema=False)
@@ -1449,6 +1603,30 @@ async def complete_google_integration(
 
 
 @router.post(
+    "/api/integrations/posthog/complete",
+    response_model=IntegrationView,
+)
+async def complete_posthog_integration(
+    payload: GoogleIntegrationComplete,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    """Finish PostHog OAuth; a repeated callback returns the connection it already made."""
+    service = request.app.state.runtime.integrations
+    try:
+        project_id = await service.posthog.pending_project(
+            state=payload.state, clerk_user_id=user.clerk_user_id
+        )
+        await _require_project_access(project_id, request, user)
+        connection = await service.posthog.complete(
+            state=payload.state, code=payload.code, clerk_user_id=user.clerk_user_id
+        )
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from None
+    return _integration_view(service._definition(POSTHOG_PROVIDER), connection, configured=True)
+
+
+@router.post(
     "/api/integrations/github/authorize",
     response_model=IntegrationConnectView,
 )
@@ -1558,15 +1736,128 @@ async def list_integration_options(
             options = await service.google_sites(project_id=project_id)
         elif provider_key == GITHUB_PROVIDER:
             options = await service.github_repositories(project_id=project_id)
+        elif provider_key == POSTHOG_PROVIDER:
+            options = await service.posthog.projects(project_id=project_id)
         elif provider_key == GOOGLE_WORKSPACE_PROVIDER:
             raise IntegrationAuthorizationError(
                 "Google Workspace connects an account and has no selectable property"
+            )
+        elif provider_key == ADS_PROVIDER:
+            raise IntegrationAuthorizationError(
+                "Google Ads links one account by customer id and has no selectable property"
+            )
+        elif provider_key == STRIPE_PROVIDER:
+            raise IntegrationAuthorizationError(
+                "Stripe connects one account by restricted key and has no selectable property"
             )
         else:
             raise IntegrationAuthorizationError("unknown integration provider")
     except IntegrationError as exc:
         raise _integration_http_error(exc) from exc
     return [IntegrationOptionView.model_validate(item, from_attributes=True) for item in options]
+
+
+@router.post(
+    "/api/projects/{project_id}/integrations/ads.google/link",
+    response_model=IntegrationView,
+)
+async def link_google_ads_account(
+    project_id: UUID,
+    payload: GoogleAdsLinkRequest,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    """Record the founder's Google Ads customer id and send Tin's manager invitation."""
+    await _require_project_access(project_id, request, user)
+    service = request.app.state.runtime.integrations
+    try:
+        connection = await service.connect_google_ads(
+            project_id=project_id,
+            customer_id=payload.customer_id,
+            clerk_user_id=user.clerk_user_id,
+        )
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from exc
+    definition = next(item for item in registered_integrations() if item.key == ADS_PROVIDER)
+    return _integration_view(definition, connection, configured=True)
+
+
+@router.post(
+    "/api/projects/{project_id}/integrations/ads.google/refresh",
+    response_model=IntegrationView,
+)
+async def refresh_google_ads_account(
+    project_id: UUID,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    """Re-read the manager link, then billing and conversion health once it is active."""
+    await _require_project_access(project_id, request, user)
+    service = request.app.state.runtime.integrations
+    try:
+        connection = await service.refresh_google_ads(project_id=project_id)
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from exc
+    definition = next(item for item in registered_integrations() if item.key == ADS_PROVIDER)
+    return _integration_view(definition, connection, configured=True)
+
+
+@router.post(
+    "/api/projects/{project_id}/integrations/payments.stripe/key",
+    response_model=IntegrationView,
+)
+async def save_stripe_key(
+    project_id: UUID,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    """Validate and store a pasted Stripe restricted key; replacing one names its revision."""
+    await _require_project_access(project_id, request, user)
+    # Parsed by hand: FastAPI's validation details would echo a malformed key back.
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or set(payload) - {"restricted_key", "expected_revision"}:
+            raise ValueError
+        key, revision = payload.get("restricted_key"), payload.get("expected_revision")
+        if not isinstance(key, str) or not 1 <= len(key) <= 300:
+            raise ValueError
+        if revision is not None and (not isinstance(revision, str) or len(revision) > 64):
+            raise ValueError
+    except (ValueError, UnicodeError, RecursionError):
+        raise HTTPException(
+            status_code=422,
+            detail="Send restricted_key and expected_revision; nothing was saved.",
+        ) from None
+    service = request.app.state.runtime.integrations
+    try:
+        connection = await service.stripe.connect(
+            project_id=project_id,
+            clerk_user_id=user.clerk_user_id,
+            restricted_key=key,
+            expected_revision=revision,
+        )
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from None
+    return _integration_view(service._definition(STRIPE_PROVIDER), connection, configured=True)
+
+
+@router.post(
+    "/api/projects/{project_id}/integrations/payments.stripe/refresh",
+    response_model=IntegrationView,
+)
+async def refresh_stripe_key(
+    project_id: UUID,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    """Re-check which reads the stored key allows, after it was edited in Stripe."""
+    await _require_project_access(project_id, request, user)
+    service = request.app.state.runtime.integrations
+    try:
+        connection = await service.stripe.refresh(project_id=project_id)
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from exc
+    return _integration_view(service._definition(STRIPE_PROVIDER), connection, configured=True)
 
 
 @router.put(
@@ -1749,6 +2040,7 @@ async def list_workflows(
         for item in workflows
         # Agent-only workflows (start here) run through the MCP; the catalog does not list them.
         if not (item.definition or {}).get("agent_only")
+        and (item.definition or {}).get("public_discovery", True)
         and (
             item.project_id is None
             or private_execution_ready(request.app.state.settings, item.project_id)
@@ -3491,7 +3783,14 @@ async def approve_run(
     if payload is not None and payload.delivery is not None:
         # Record the pick before the approval so a refused pick never approves blindly.
         await _choose_content_delivery(run, payload, request, user)
-    if run.workflow_id in SUPPORTED_IDS:
+    from tin_lite.reviewed_documents import document_spec
+
+    if run.workflow_id in SUPPORTED_IDS or (
+        run.executor == "codex.procedure"
+        and await document_spec(
+            request.app.state.runtime.database, request.app.state.runtime.storage, run
+        )
+    ):
         try:
             updated = await WorkflowReviews(
                 runtime=request.app.state.runtime, settings=request.app.state.settings
@@ -3582,6 +3881,27 @@ async def stop_email_campaign(
             extra={"run_id": str(run_id)},
         )
     return RunView.model_validate(stopped)
+
+
+@router.get("/api/projects/{project_id}/brand")
+async def get_project_brand(
+    project_id: UUID,
+    request: Request,
+    revision: str | None = None,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> dict:
+    from tin_lite.brand_capture import resolve_brand
+
+    await _require_project_access(project_id, request, user)
+    runtime = request.app.state.runtime
+    project = await runtime.database.get_project(project_id)
+    if revision is None:
+        repo = await runtime.storage.get_repo(project.state_repo_id)
+        revision = await runtime.storage.head_sha(repo, project.canonical_branch)
+    try:
+        return await resolve_brand(runtime.storage, project, revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/api/projects/{project_id}/memory", response_model=ProjectMemoryView)
@@ -3767,6 +4087,7 @@ def _integration_view(
         access_label=definition.access_label,
         capabilities=list(definition.capabilities),
         unlocks=list(definition.unlocks),
+        setup_url=getattr(definition, "setup_url", None),
         configured=configured,
         connection_id=getattr(connection, "id", None),
         project_id=getattr(connection, "project_id", None),
@@ -3785,6 +4106,12 @@ def _integration_http_error(exc: IntegrationError) -> HTTPException:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         )
+    if isinstance(exc, IntegrationInputError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, ServiceCallRefused):
+        # The provider answered and refused; the message is Tin's own.
+        code = 429 if exc.code == "rate_limited" else status.HTTP_409_CONFLICT
+        return HTTPException(status_code=code, detail=str(exc))
     if isinstance(exc, IntegrationAuthorizationError):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if isinstance(exc, IntegrationUpstreamError):

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from tin_lite.growth_plan_assets import score as scorer
 from tin_lite.model_providers import ModelCapability, ModelRoute, ProviderName
+from tin_lite.workflow_inputs import coerce_schema_inputs
 
 KEY = "growth.onboarding_plan"
 ASSETS = Path(__file__).parent / "growth_plan_assets"
@@ -23,12 +24,28 @@ PROGRAMS = json.loads((ASSETS / "programs.json").read_text(encoding="utf-8"))
 RUBRIC = json.loads((ASSETS / "rubric.json").read_text(encoding="utf-8"))
 DESCRIBE = scorer.describe()
 SYSTEM_IDS = [p["id"] for p in PROGRAMS["programs"]]
-HOUSEKEEPING = {"project.memory", "scan.report", "project.weekly_brief", "content.design_md"}
+HOUSEKEEPING = {
+    "project.memory",
+    "scan.report",
+    "project.weekly_brief",
+    "content.design_md",
+    # The paid ads assessment is a founder decision aid, never a scheduled system; the
+    # launch is a one-off gated by approval. The monitor may be scheduled once a campaign is live.
+    "ads.assessment",
+    "ads.launch",
+}
 HARD_NO_SYSTEMS = {
     "no_paid_ads": ["paid-search", "paid-social"],
     "no_cold_email": ["cold-outbound"],
 }
-HARD_NO_WORKFLOWS = {"no_cold_email": ["outreach.email_shortlist", "outreach.email_campaign"]}
+HARD_NO_WORKFLOWS = {
+    "no_cold_email": ["outreach.email_shortlist", "outreach.email_campaign"],
+    "no_paid_ads": [
+        "ads.assessment",
+        "ads.launch",
+        "ads.monitor",
+    ],
+}
 HARD_NO_WORDS = {
     "no_paid_ads": "no paid ads",
     "no_cold_email": "no cold email",
@@ -40,6 +57,9 @@ PROVIDERS = {
     "infra.github": "GitHub",
     "analytics.gsc": "Google Search Console",
     "workspace.google": "Google Workspace",
+    "ads.google": "Google Ads",
+    "payments.stripe": "Stripe",
+    "analytics.posthog": "PostHog",
 }
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
@@ -51,13 +71,13 @@ _CAPABILITIES = frozenset(
 JUDGMENT_ROUTE = ModelRoute(
     key="growth-plan-judgment-v1",
     provider=ProviderName.OPENAI,
-    model="gpt-6-astra",
+    model="gpt-6-sol",
     capabilities=_CAPABILITIES,
 )
 DRAFTING_ROUTE = ModelRoute(
     key="growth-plan-drafting-v1",
     provider=ProviderName.OPENAI,
-    model="gpt-5.6-luna",
+    model="gpt-6-luna",
     capabilities=_CAPABILITIES,
 )
 ROUTES = (JUDGMENT_ROUTE, DRAFTING_ROUTE)
@@ -460,9 +480,12 @@ def validate_system(item, avail, inputs):
         values = {
             i["name"]: i["value"] for i in w["inputs"] if i["name"] in known and i["value"].strip()
         }
+        # The model writes every value as text; type numbers, booleans and lists by the schema.
+        values, typed = coerce_schema_inputs(spec.get("input_schema", {}), values)
+        notes.extend(f"{w['key']}: {note}" for note in typed)
         for name, prop in (spec.get("input_schema", {}).get("properties") or {}).items():
             value = values.get(name)
-            if value is None or not isinstance(prop, dict):
+            if not isinstance(value, str) or not isinstance(prop, dict):
                 continue
             limit = prop.get("maxLength")
             if prop.get("enum") and value not in prop["enum"]:
@@ -994,7 +1017,7 @@ def render(
         "",
         "## What Tin would run",
         *([" ".join(view["first_deliverable"]), ""] if view.get("first_deliverable") else []),
-        "Tell your agent, in your words, what Tin should take on. It records your answer with record_onboarding_picks, which ticks these lines.",
+        "Your agent asks what Tin should take on as a quick multiple choice; your own words work too. It records your answer with record_onboarding_picks, which ticks these lines.",
     ]
     block = []
     for s in systems:
@@ -1065,6 +1088,9 @@ def render(
         "workspace.google": "signup and product checks with a test account"
         if no_outreach
         else "outreach sends from your mailbox",
+        "payments.stripe": "read-only subscriptions and customers show who pays and who stays",
+        "analytics.posthog": "read-only events and insights from one PostHog project show "
+        "where signups activate or drop",
     }
     if has or live_site:
         out += [
@@ -1077,7 +1103,8 @@ def render(
             for p in has
         ]
         out.append(
-            "Tell your agent which product analytics records signups and activation. Tin does not connect to it yet."
+            "Tell your agent which product analytics records signups and activation. Tin reads "
+            "PostHog directly; for other tools it uses what you share."
         )
     out += [
         "",

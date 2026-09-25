@@ -108,6 +108,9 @@ subscription, key, or webhook was changed.
   rechecks project membership and current spending limits. A scheduled occurrence also needs
   a current saved-workflow creator and explicit `schedule_max_nanos` standing authority.
   The current UI limit editor does not expose that additional scheduling allowance.
+- A start blocked by project limits keeps the `project_limit` code (HTTP 402) and names the one
+  limit that applies: no spending policy, the per-run limit against the estimate, this month's
+  limit with the amount already committed, or the concurrent-run limit with the active count.
 - Direct plan-file edits remain ordinary project-file operations. Paid **AI amendments** through
   the content-program revision API are not enrolled yet: that alternate start cannot supply an
   accepted quote, so it is rejected in billed workspaces. Audit, keyword planning, the organic

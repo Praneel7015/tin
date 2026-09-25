@@ -17,7 +17,8 @@ operators still pay suppliers. Live Stripe payments stay off. See the current
 default. It selects the API path for procedures whose pinned sandbox profile is
 `default`, `isolated`, `browser` or `studio`, and for `content.design_md` and `project.task`.
 `TIN_LITE_BILLING_HOSTED_DEFAULTS_ENABLED` also enables that API path without project-by-project
-API enrollment. It does not remove the separate private-workflow project allowlist.
+API enrollment. It does not open private execution, which keeps its own gate: the project
+allowlist or `TIN_LITE_PRIVATE_WORKFLOWS_OPEN`.
 Default procedures and tasks use the isolated runtime image, without changing
 their declared workspace, result, verification, or review contract. It requires
 `TIN_LITE_LUNA_API_KEY` and an API-capable isolated image. No workflow
@@ -69,14 +70,14 @@ Stopping a run or replacing its sandbox/fencing tuple prevents new relay admissi
 
 ## Transport and usage
 
-The protected isolated controller selects a custom Responses provider in Codex 0.153.4:
+The protected isolated controller selects a custom Responses provider in Codex 0.156.1:
 `requires_openai_auth=false`, WebSockets disabled, both request and stream retries zero.
 An environment-backed `X-Tin-Codex-Grant` reaches only the controller; user tools run under
 the existing separate credential-free UID. No `auth.json` is fetched and no broker grant
 is issued for an API attempt. The provider key remains on the switchboard.
 
 The relay fixes the upstream to OpenAI and permits only POST `responses` and
-`responses/compact`. The original v1 pilot pins `gpt-6-astra`, default service tier, at most eight
+`responses/compact`. The original v1 pilot pins `gpt-6-sol`, default service tier, at most eight
 requests, 256 KiB request bodies, 4,096 output tokens per ordinary response, one hosted
 tool call per response, and stops further requests after 100,000 observed cumulative
 tokens. These are request/observed-token bounds, **not a guaranteed dollar ceiling**.
@@ -84,26 +85,47 @@ Missing usage remains unknown. Compaction has request/body bounds, not an output
 parameter unsupported by its protocol. Provider-hosted files, stored response references,
 background execution, remote tools and arbitrary upstream routing are not supported.
 
+When a stop happens, the attempt names its cause. The relay records budget, request and
+token stops. The controller's observed-token stop is recorded as `token_limit` from its
+own usage frame. The relay logs each rejection with run, operation, status and reason
+code (a 422 contract rejection names `operation_not_allowed`, `request_too_large` or
+`contract_mismatch`), and only the status of an upstream rejection. It never logs request or provider
+bodies. The controller also prints each agent narration line (not the structured result)
+as a bounded `TIN_CODEX_PROGRESS` frame. The switchboard redacts run secrets and projects
+the latest line to the run's `progress_summary` in Postgres, unless product code owns the
+run's progress steps. It never enters Temporal. Payment-card runs skip it, as they skip
+rollout capture. After a failure it shows as the last update before the stop. Images
+built before this frame existed simply report no narration.
+
 Historical default-profile procedures selected **`tin-codex-api-v3`**: 64 requests, 1 MiB request
 bodies, 8,192 output tokens per response, 128,000 configured context tokens, automatic
 compaction at 96,000, and a stop after 2,000,000 observed cumulative tokens. Both server
 and controller use the pinned contract. These are bounded operating limits, not a promise
-that every procedure can finish within them or its credit ceiling. Existing isolated v1
-quotes and receipts retain their original limits; changing flags cannot upgrade them.
+that every procedure can finish within them or its credit ceiling. Isolated procedures
+admitted without a session budget (included onboarding children, child budgets and
+qualification) also select v3 for new admissions. Existing isolated v1 quotes, pinned
+budgets and receipts retain their original limits; changing flags cannot upgrade them.
 V3 keeps v2's context/usage limits but omits `max_tool_calls`, allowing the model to
 search, open pages and follow up within one response. Already admitted v1/v2 runs
 retain their one-call ceiling. Run timeouts and credit reservations still apply;
 this is not unlimited customer liability or unlimited supplier spending protection.
 
-New, customer-funded ordinary procedures (`default` and `isolated`) pin
+New, customer-funded ordinary procedures (`default`, `isolated` and `browser`) pin
 **`tin-codex-api-v4`** and `funding=procedure_session_v1`. Their Responses requests use
-GPT-6 Astra's supported 128,000 output-token maximum and 1,050,000-token context. The
+GPT-6 Sol's supported 128,000 output-token maximum and 1,050,000-token context. The
 controller compacts at 922,000 context tokens, leaving room for one maximum response.
 An explicit smaller output limit remains valid. Output tokens include reasoning; these
 are per-response/context limits, not a cumulative session allowance. Requests remain
 bounded to 8 MiB; artifact, tool, sandbox isolation and timeout contracts still apply.
 There is no separate 64-request or lifetime-token stop for these sessions.
-[Model limits](https://developers.openai.com/api/docs/models/gpt-6-astra).
+Browser procedures joined on 2026-09-24: a signup walkthrough spends one model turn per
+page action, and the 64-request v3 ceiling stopped complete walkthroughs before they
+wrote a report. Their open-egress `browser_api` image and 1800-second timeout are
+unchanged; runs admitted earlier keep v3.
+[Model limits](https://developers.openai.com/api/docs/models/gpt-6-sol).
+
+Every contract named `gpt-6-astra` until 2026-09-23. Runs admitted before then keep
+that pin; new runs use `gpt-6-sol`.
 
 Tin authorizes the existing $5 session maximum once, internally holding those credits
 until settlement. Each request checks the run grant, project membership, current spending
@@ -124,7 +146,7 @@ requires an explicit provider/operating policy, not an invented precise token es
 
 Only newly admitted ordinary root procedures select v4. Existing budgets and valid
 quotes retain their auth, model, price and runtime pins. Included onboarding and its
-children, other parent children, browser/Studio, diagrams/video, design tasks, interactive
+children, other parent children, Studio, diagrams/video, design tasks, interactive
 tasks and managed model steps keep their existing contracts. No data migration or
 Temporal command change is required. Before deploying the switchboard, build and verify
 an isolated image with `codex_api_config.py --check-v4` and the opt-in `session_context`
@@ -132,7 +154,7 @@ isolation probe. Historical readiness checks remain supported. Roll back by stop
 new admissions and retaining a v4-capable worker for admitted v4 runs; do not rewrite
 those runs' terms or resume them with an older controller.
 
-Codex 0.153.4's custom provider performs context compaction using an ordinary Responses
+Codex 0.156.1's custom provider performs context compaction using an ordinary Responses
 model call. That call therefore has the same reservation, actual supplier model/tier/usage,
 and settlement as its other model steps. No second summarizer is added. The separate remote
 `/responses/compact` endpoint remains excluded from billed execution: it has no requested
@@ -221,15 +243,17 @@ OAuth tariff or bypass an existing billing account.
 
 ## Test-credit settlement
 
-The immutable `openai-codex-standard-2026-09-12-v1` card names OpenAI, `gpt-6-astra`,
+The immutable `openai-codex-standard-2026-09-23-v1` card names OpenAI, `gpt-6-sol`,
 default service tier, cache-write rates, long-context rates, and hosted search charges.
-Rates are from the [model page](https://developers.openai.com/api/docs/models/gpt-6-astra),
+Rates are from the [model page](https://developers.openai.com/api/docs/models/gpt-6-sol),
 [caching contract](https://developers.openai.com/api/docs/guides/prompt-caching), and
 [tool pricing](https://developers.openai.com/api/docs/pricing). Per million tokens: ordinary
-input $10, cached input $1, cache writes $12.50, output $50. Above 272,000 input tokens,
+input $2, cached input $0.20, cache writes $2.50, output $10. Above 272,000 input tokens,
 all input/cache rates double and output is 1.5x for that response. Search is $0.01/call,
 plus its model tokens. Ordinary input is input minus cache hits minus cache writes.
 Never modify this card in place or reinterpret old receipts when adding another rate card.
+The earlier `openai-codex-standard-2026-09-12-v1` card (`gpt-6-astra`: $10 / $1 / $12.50 /
+$50) stays in `HISTORICAL_RATE_CARDS` so runs that pinned it still settle at their rates.
 
 The original quote/run admission pinned those rates and the API auth path atomically with a
 $5 reservation. New runs instead use [per-call funding](workflow-credit-simplification.md):

@@ -21,6 +21,7 @@ from tin_lite.answer_page import (
     AnswerPageSource,
     validate_answer_page_artifacts,
 )
+from tin_lite.billing_contracts import BillingError
 from tin_lite.code_storage import CodeStorage, reviewed_task_diff
 from tin_lite.db import Database
 from tin_lite.domain import (
@@ -92,7 +93,8 @@ from tin_lite.procedures import (
     GITHUB_REPOSITORY_WORKSPACE,
     IDENTITY_REUSE_ACTIVE,
     PROJECT_ARTIFACT_RESULT,
-    TIN_DIAGRAM_REVIEWED_VALIDATOR,
+    REVIEWED_DIAGRAM_VALIDATORS,
+    TIN_DIAGRAM_BRANDED_VALIDATOR,
     PinnedCodexProcedure,
     artifact_host,
     build_procedure_pull_request_receipt,
@@ -115,7 +117,11 @@ from tin_lite.site_health import (
     validate_site_health_model_route,
 )
 from tin_lite.system_wiki import read_system_wiki_document
-from tin_lite.usage_capture import external_usage_scope, observation_key
+from tin_lite.usage_capture import (
+    ObservationAlreadyRecorded,
+    external_usage_scope,
+    observation_key,
+)
 from tin_lite.visibility import (
     ResponseCheckpoint,
     ResponseRequest,
@@ -212,10 +218,14 @@ def transient_failure(message: str | None, *, restarted: bool = False) -> bool:
 
 class TinActivities:
     async def _run_accounted_procedure(self, *, conn, run, sandbox_id, run_input):
-        if getattr(run_input, "context", {}).get("output", {}).get("validator") == (
-            TIN_DIAGRAM_REVIEWED_VALIDATOR
+        if (
+            getattr(run_input, "context", {}).get("output", {}).get("validator")
+            in REVIEWED_DIAGRAM_VALIDATORS
         ):
-            await self._sandboxes.prepare_diagram(sandbox_id=sandbox_id)
+            await self._sandboxes.prepare_diagram(
+                sandbox_id=sandbox_id,
+                branded=run_input.context["output"]["validator"] == TIN_DIAGRAM_BRANDED_VALIDATOR,
+            )
         if run_input.api_url is not None:
             from tin_lite.codex_api import run_api_attempt
 
@@ -281,6 +291,11 @@ class TinActivities:
         if configured.status == "archived":
             return {}
         if configured.status != "active" or configured.schedule is None:
+            if configured.status == "paused" and configured.last_error:
+                from tin_lite.code_schedules import pause_for_issue
+
+                await pause_for_issue(self, configured, configured.last_error)
+                return {}
             raise RuntimeError("scheduled workflow is not active")
         workflow_definition = await self._db.get_workflow(configured.workflow_id)
         if workflow_definition is None:
@@ -330,6 +345,11 @@ class TinActivities:
                     evaluation.evidence(inputs=configured.inputs) if evaluation.results else None
                 ),
             )
+        except BillingError as exc:
+            from tin_lite.code_schedules import pause_for_issue
+
+            await pause_for_issue(self, configured, str(exc))
+            return {}
         except ScheduledWorkflowSkip:
             await self._db.advance_project_workflow_schedule(
                 project_workflow_id=configured.id,
@@ -665,6 +685,14 @@ class TinActivities:
                 )
                 raise
 
+    def _progress_sink(self, run_id: UUID) -> Callable[[str], Awaitable[None]]:
+        """Project redacted controller narration to Postgres, never to Temporal."""
+
+        async def sink(text: str) -> None:
+            await self._db.project_run_narration(run_id=run_id, summary=text)
+
+        return sink
+
     def _rollout_sink(
         self,
         *,
@@ -850,7 +878,6 @@ class TinActivities:
         run_id: UUID,
         sandbox_id: str,
         expected_binding=None,
-        workspace_limits=None,
     ):
         if self._integrations is None:
             raise RuntimeError("GitHub procedure workspace is unavailable")
@@ -860,7 +887,6 @@ class TinActivities:
                 execution_key=f"{run_id}:procedure_repository_workspace",
                 run_id=run_id,
                 **({"expected_binding": expected_binding} if expected_binding else {}),
-                **(workspace_limits or {}),
             ),
             details={
                 "sandbox_id": sandbox_id,
@@ -875,7 +901,6 @@ class TinActivities:
         run_id: UUID,
         sandbox_id: str,
         expected_binding=None,
-        workspace_limits=None,
     ):
         if self._integrations is None:
             raise RuntimeError("GitHub procedure workspace is unavailable")
@@ -884,7 +909,6 @@ class TinActivities:
             run_id=run_id,
             sandbox_id=sandbox_id,
             **({"expected_binding": expected_binding} if expected_binding else {}),
-            **({"workspace_limits": workspace_limits} if workspace_limits else {}),
         )
         evidence = await self._await_with_heartbeats(
             self._integrations.github_open_pull_requests(
@@ -1069,6 +1093,9 @@ class TinActivities:
                 if self._memory_gardener is None:
                     raise RuntimeError("project.memory requires a configured memory gardener")
                 run = await self._require_run(run_id)
+                reporter = await self._pinned_native_reporter(
+                    run, self._memory_gardener, "project.memory"
+                )
                 project = await self._require_project(run.project_id)
                 await self._db.mark_run_running(run_id)
                 async with self._db.project_state_lock(conn, project.id):
@@ -1106,9 +1133,12 @@ class TinActivities:
                         )
                         if current_index is not None:
                             owned_section = extract_owned_section(current_index.decode("utf-8"))
+                    await _refuse_repeated_model_request(
+                        self._db, conn, run_id=run_id, step="memory", label="project memory"
+                    )
                     with external_usage_scope(self._db, conn, run_id, "memory"):
                         memory_index = await self._await_with_heartbeats(
-                            self._memory_gardener.garden(
+                            reporter.garden(
                                 project_name=project.name,
                                 sources=sources,
                                 owned_section=owned_section,
@@ -1140,12 +1170,10 @@ class TinActivities:
                         "source_run_ids": [str(source.run_id) for source in sources],
                     },
                 )
-            except Exception as exc:
-                await self._db.fail_effect(
-                    conn,
-                    execution_key=execution_key,
-                    error_message=_safe_failure(exc),
-                )
+            except BaseException as exc:
+                await _record_effect_failure(self._db, conn, execution_key=execution_key, exc=exc)
+                if isinstance(exc, ObservationAlreadyRecorded):
+                    raise _interrupted_model_request("project memory") from exc
                 raise
 
     @activity.defn(name="project_memory_result")
@@ -1217,6 +1245,9 @@ class TinActivities:
                 if self._scan_reporter is None:
                     raise RuntimeError("scan.report requires a configured scan reporter")
                 run = await self._require_run(run_id)
+                reporter = await self._pinned_native_reporter(
+                    run, self._scan_reporter, "scan.report"
+                )
                 project = await self._require_project(run.project_id)
                 if run.system_wiki_commit_sha is None:
                     raise RuntimeError("scan.report run has no pinned system wiki version")
@@ -1278,9 +1309,19 @@ class TinActivities:
                                     content=source_content.decode("utf-8"),
                                 )
                             )
+                    sources.append(
+                        ScanSource(
+                            label="current integration availability",
+                            artifact_ref=f"tin.project://{project.id}/integrations",
+                            content=await self._integration_evidence(project),
+                        )
+                    )
+                    await _refuse_repeated_model_request(
+                        self._db, conn, run_id=run_id, step="scan", label="project scan"
+                    )
                     with external_usage_scope(self._db, conn, run_id, "scan"):
                         report = await self._await_with_heartbeats(
-                            self._scan_reporter.report(
+                            reporter.report(
                                 project_name=project.name,
                                 sources=sources,
                             ),
@@ -1311,12 +1352,10 @@ class TinActivities:
                         "source_refs": [source.artifact_ref for source in sources],
                     },
                 )
-            except Exception as exc:
-                await self._db.fail_effect(
-                    conn,
-                    execution_key=execution_key,
-                    error_message=_safe_failure(exc),
-                )
+            except BaseException as exc:
+                await _record_effect_failure(self._db, conn, execution_key=execution_key, exc=exc)
+                if isinstance(exc, ObservationAlreadyRecorded):
+                    raise _interrupted_model_request("project scan") from exc
                 raise
 
     @activity.defn(name="project_scan_result")
@@ -1648,6 +1687,9 @@ class TinActivities:
         if committed is not None and committed.status == "completed":
             return
         run = await self._require_run(run_id)
+        reporter = await self._pinned_native_reporter(
+            run, self._visibility_auditor, "visibility.audit"
+        )
         project = await self._require_project(run.project_id)
         raw_target_request = (run.input or {}).get("target", "this project")
         if not isinstance(raw_target_request, str):
@@ -1663,7 +1705,7 @@ class TinActivities:
                 run_id=run_id,
                 step_id="panel",
                 operation="visibility_panel",
-                execute=lambda checkpoint: self._visibility_auditor.prepare_panel(
+                execute=lambda checkpoint: reporter.prepare_panel(
                     project_name=project.name,
                     target_request=target_request,
                     sources=sources,
@@ -1683,7 +1725,7 @@ class TinActivities:
                     run_id=run_id,
                     step_id=f"answer:{question_id}:{mode}",
                     operation="visibility_answer",
-                    execute=lambda checkpoint: self._visibility_auditor.answer(
+                    execute=lambda checkpoint: reporter.answer(
                         question=question_text,
                         searched=searched,
                         checkpoint=checkpoint,
@@ -1726,7 +1768,7 @@ class TinActivities:
                 run_id=run_id,
                 step_id="adjudication",
                 operation="visibility_adjudication",
-                execute=lambda checkpoint: self._visibility_auditor.adjudicate(
+                execute=lambda checkpoint: reporter.adjudicate(
                     panel=panel,
                     measurements=measurements,
                     checkpoint=checkpoint,
@@ -1736,7 +1778,7 @@ class TinActivities:
         )
 
         evidence_path = visibility_evidence_path(run_id)
-        report, evidence = self._visibility_auditor.build_artifacts(
+        report, evidence = reporter.build_artifacts(
             run_id=str(run_id),
             project_name=project.name,
             target_request=target_request,
@@ -1884,13 +1926,16 @@ class TinActivities:
             raise RuntimeError("content.answer_page requires a configured answer-page drafter")
         run_id = UUID(run_id_text)
         run = await self._require_run(run_id)
+        reporter = await self._pinned_native_reporter(
+            run, self._answer_page_drafter, "content.answer_page"
+        )
         project = await self._require_project(run.project_id)
         await self._db.mark_run_running(run_id)
         sources = await self._answer_page_sources(run_id=run_id, project=project)
         draft = await self._await_with_heartbeats(
             self._answer_page_effect(
                 run_id=run_id,
-                execute=lambda: self._answer_page_drafter.draft(
+                execute=lambda: reporter.draft(
                     project_name=project.name,
                     sources=sources,
                 ),
@@ -1898,7 +1943,7 @@ class TinActivities:
             details={"stage": "answer_page_draft"},
         )
         evidence_path = answer_page_evidence_path(run_id)
-        page, evidence = self._answer_page_drafter.build_artifacts(
+        page, evidence = reporter.build_artifacts(
             run_id=str(run_id),
             source_refs=[source.artifact_ref for source in sources],
             draft=draft,
@@ -2060,6 +2105,9 @@ class TinActivities:
             raise RuntimeError("project.weekly_brief requires a configured weekly brief reporter")
         run_id = UUID(run_id_text)
         run = await self._require_run(run_id)
+        reporter = await self._pinned_native_reporter(
+            run, self._weekly_brief_reporter, "project.weekly_brief"
+        )
         project = await self._require_project(run.project_id)
         await self._db.mark_run_running(run_id)
         period_end = run.scheduled_for or run.created_at or datetime.now(UTC)
@@ -2073,7 +2121,7 @@ class TinActivities:
         result = await self._await_with_heartbeats(
             self._weekly_brief_effect(
                 run_id=run_id,
-                execute=lambda: self._weekly_brief_reporter.report(
+                execute=lambda: reporter.report(
                     project_name=project.name,
                     period_start=period_start,
                     period_end=period_end,
@@ -2085,7 +2133,7 @@ class TinActivities:
         )
         artifact_path = weekly_brief_path(period_end)
         evidence_path = weekly_brief_evidence_path(run_id)
-        report, evidence = self._weekly_brief_reporter.build_artifacts(
+        report, evidence = reporter.build_artifacts(
             run_id=str(run_id),
             artifact_path=artifact_path,
             evidence_path=evidence_path,
@@ -2550,6 +2598,20 @@ class TinActivities:
 
         run_id = UUID(run_id_text)
         _definition, procedure = await self._pinned_codex_procedure(run_id)
+        if procedure.optional_repository:
+            from tin_lite.procedure_repository import select_repository
+
+            await select_repository(self._db, await self._require_run(run_id), procedure)
+        if procedure.output_validator == "brand-design-capture.v1":
+            from tin_lite.brand_capture import BrandCaptureSources
+
+            await self._await_with_heartbeats(
+                BrandCaptureSources(
+                    database=self._db, storage=self._storage, integrations=self._integrations
+                ).prepare(await self._require_run(run_id), procedure),
+                details={"stage": "brand_capture_preparation"},
+            )
+            return False
         from tin_lite import content_repository_delivery
 
         if _definition.id == content_repository_delivery.WORKFLOW_ID:
@@ -2605,14 +2667,7 @@ class TinActivities:
             database=self._db, storage=self._storage, integrations=self._integrations
         )
         handled = await self._await_with_heartbeats(
-            execution.prepare(
-                run,
-                policy=procedure.repair_policy,
-                workspace_limits={
-                    "max_files": procedure.workspace_max_files,
-                    "max_bytes": procedure.workspace_max_bytes,
-                },
-            ),
+            execution.prepare(run, policy=procedure.repair_policy),
             details={"stage": "technical_verification"},
         )
         if not handled:
@@ -2674,6 +2729,10 @@ class TinActivities:
                 expected_head_sha = await self._storage.head_sha(repo, project.canonical_branch)
                 if procedure.content_draft_context is not None:
                     expected_head_sha = procedure.content_draft_context["project_revision"]
+                if procedure.brand_capture_context is not None:
+                    expected_head_sha = procedure.brand_capture_context["project_revision"]
+                elif procedure.output_validator == "brand-design-capture.v1":
+                    raise ValueError("Brand capture must pin its sources before compute")
                 # New revision packets pin current reference files separately from
                 # the original article's brief/style/evidence. Legacy packets keep
                 # their existing checkout semantics.
@@ -2683,6 +2742,25 @@ class TinActivities:
                     expected_head_sha = revision_sha
                 if expected_head_sha is None:
                     raise RuntimeError("project state repository has no canonical head")
+                if procedure.output_validator == TIN_DIAGRAM_BRANDED_VALIDATOR:
+                    from tin_lite.brand_diagrams import prepare
+
+                    await prepare(self._storage, project, expected_head_sha)
+                if procedure.documents:
+                    from tin_lite.procedure_documents import validate_document
+
+                    for path, maximum in zip(
+                        procedure.documents.destinations,
+                        (procedure.output_max_bytes, procedure.documents.companion_max_bytes),
+                        strict=True,
+                    ):
+                        entry = await self._storage.read_output_destination(
+                            repo_id=project.state_repo_id,
+                            revision=expected_head_sha,
+                            path=path,
+                        )
+                        if entry is not None:
+                            validate_document(entry[1], maximum)
                 ephemeral_branch = f"procedures/{run.id}/{run.generation}"
                 identity_id: str | None = None
                 identity_mode: str | None = None
@@ -2819,7 +2897,7 @@ class TinActivities:
                         spec=procedure,
                         base=await self._procedure_artifact_base(run=run, procedure=procedure),
                     )
-                    if procedure.output_validator == TIN_DIAGRAM_REVIEWED_VALIDATOR:
+                    if procedure.output_validator in REVIEWED_DIAGRAM_VALIDATORS:
                         diagram_validation = {
                             "diagram_validation": await self._await_with_heartbeats(
                                 self._sandboxes.validate_diagram(
@@ -3057,17 +3135,6 @@ class TinActivities:
                         f"{self._settings.switchboard_public_url.rstrip('/')}"
                         "/internal/run-tools/mcp"
                     )
-                workspace_limits = (
-                    {
-                        "workspace_limits": {
-                            "max_files": procedure.workspace_max_files,
-                            "max_bytes": procedure.workspace_max_bytes,
-                        }
-                    }
-                    if (procedure.workspace_max_files, procedure.workspace_max_bytes)
-                    != (500, 10_000_000)
-                    else {}
-                )
                 if procedure.result_kind == GITHUB_PULL_REQUEST_RESULT:
                     technical = None
                     expected_binding = None
@@ -3089,7 +3156,6 @@ class TinActivities:
                         run_id=run_id,
                         sandbox_id=sandbox_id,
                         **({"expected_binding": expected_binding} if expected_binding else {}),
-                        **workspace_limits,
                     )
                     workspace_archive = bundle.archive
                     workspace_evidence = open_pull_requests.document
@@ -3108,22 +3174,34 @@ class TinActivities:
                     if content_source is not None:
                         workspace_context["content_delivery"] = content_source
                 elif procedure.workspace_kind == GITHUB_REPOSITORY_WORKSPACE:
-                    # A read-only repository snapshot: Codex reads it and writes only the
-                    # declared project artifact into the separate project-state checkout.
-                    bundle = await self._github_procedure_bundle(
-                        project_id=run.project_id,
-                        run_id=run_id,
-                        sandbox_id=sandbox_id,
-                        **workspace_limits,
-                    )
-                    workspace_archive = bundle.archive
-                    workspace_context = {
-                        "provider_key": "infra.github",
-                        "repository": bundle.repository,
-                        "default_branch": bundle.default_branch,
-                        "head_sha": bundle.head_sha,
-                        "file_count": bundle.file_count,
-                    }
+                    from tin_lite.procedure_repository import select_repository
+
+                    use_repository = await select_repository(self._db, run, procedure)
+                    if use_repository:
+                        # A read-only repository snapshot: Codex reads it and writes only the
+                        # declared project artifact into the separate project-state checkout.
+                        bundle = await self._github_procedure_bundle(
+                            project_id=run.project_id,
+                            run_id=run_id,
+                            sandbox_id=sandbox_id,
+                        )
+                        if procedure.optional_repository:
+                            selected = await self._db.get_effect(
+                                f"{run.id}:procedure_repository_selection"
+                            )
+                            if bundle.repository != selected.result["repository"]:
+                                raise ValueError("The selected source repository changed.")
+                        workspace_archive = bundle.archive
+                        workspace_context = {
+                            "provider_key": "infra.github",
+                            "repository": bundle.repository,
+                            "default_branch": bundle.default_branch,
+                            "head_sha": bundle.head_sha,
+                            "file_count": bundle.file_count,
+                        }
+                        workspace_context["complete"] = bundle.complete
+                    else:
+                        workspace_context = {"kind": "project.state", "repository_available": False}
                 procedure_inputs: dict[str, object] = dict(run.input or {})
                 from tin_lite import content_draft
 
@@ -3164,10 +3242,12 @@ class TinActivities:
                                 if interrupted_procedure.eligible(procedure)
                                 else None
                             ),
+                            # Card runs keep no agent narration, as they keep no rollouts.
+                            progress_sink=None if payment_card else self._progress_sink(run_id),
                             project_revision=(
                                 run.expected_head_sha
                                 if (
-                                    procedure.output_validator == TIN_DIAGRAM_REVIEWED_VALIDATOR
+                                    procedure.output_validator in REVIEWED_DIAGRAM_VALIDATORS
                                     or (procedure.review_revision_context or {}).get(
                                         "project_revision"
                                     )
@@ -3225,7 +3305,7 @@ class TinActivities:
                         spec=procedure,
                         base=await self._procedure_artifact_base(run=run, procedure=procedure),
                     )
-                    if procedure.output_validator == TIN_DIAGRAM_REVIEWED_VALIDATOR:
+                    if procedure.output_validator in REVIEWED_DIAGRAM_VALIDATORS:
                         diagram_validation = {
                             "diagram_validation": await self._await_with_heartbeats(
                                 self._sandboxes.validate_diagram(
@@ -3630,7 +3710,26 @@ class TinActivities:
         )
         from tin_lite import article_review
 
-        if procedure.output_validator == article_review.VALIDATOR:
+        if procedure.documents:
+            from tin_lite.procedure_documents import validate_document
+
+            validate_document(raw, procedure.documents.companion_max_bytes)
+            if procedure.output_validator == "brand-design-capture.v1":
+                from tin_lite.brand_capture import validate_pair
+
+                primary = await self._storage.read_procedure_checkpoint(
+                    repo_id=project.state_repo_id, revision=revision, path=procedure.output_path
+                )
+                try:
+                    await validate_pair(self._storage, project, run, primary, raw)
+                except ValueError as exc:
+                    # The saved pair cannot change on retry; say so once instead of thrice.
+                    raise ApplicationError(
+                        f"Brand capture output is invalid: {exc}",
+                        type="BrandCaptureInvalid",
+                        non_retryable=True,
+                    ) from exc
+        elif procedure.output_validator == article_review.VALIDATOR:
             article_review.validate_notes(
                 raw, revision=procedure.review_revision_context is not None
             )
@@ -3721,7 +3820,7 @@ class TinActivities:
                 repo_id=project.state_repo_id, revision=revision, path=procedure.companion_path
             )
             editorial = validate_pair(content, notes, procedure.content_draft_context)
-        if procedure.output_validator == TIN_DIAGRAM_REVIEWED_VALIDATOR:
+        if procedure.output_validator in REVIEWED_DIAGRAM_VALIDATORS:
             proof = persisted.result.get("diagram_validation") or {}
             if (
                 proof.get("checker") != "tin-diagram-check.v1"
@@ -3864,6 +3963,10 @@ class TinActivities:
     async def record_codex_procedure_approval(self, run_id_text: str) -> None:
         run_id = UUID(run_id_text)
         run = await self._require_run(run_id)
+        from tin_lite.reviewed_documents import ReviewedDocuments, document_spec
+
+        if await document_spec(self._db, self._storage, run):
+            await ReviewedDocuments(database=self._db, storage=self._storage).apply(run_id)
         workflow_definition = await self._db.get_workflow(run.workflow_id)
         if workflow_definition is None:
             raise RuntimeError("procedure workflow definition is unavailable")
@@ -3922,6 +4025,12 @@ class TinActivities:
                 path = str(canonical.result["artifact_path"])
                 run = await self._require_run(run_id)
                 project = await self._require_project(run.project_id)
+                from tin_lite.reviewed_documents import document_spec
+
+                if await document_spec(self._db, self._storage, run):
+                    applied = await self._db.get_effect(f"{run.id}:procedure_document_apply")
+                    if not applied or applied.status != "completed":
+                        raise RuntimeError("The approved project documents have not been applied")
                 artifact_ref = f"code.storage://{project.state_repo_id}@{sha}/{path}"
                 if path == MEMORY_INDEX_PATH:
                     # A section-owning procedure rewrote project memory; Luna and the memory
@@ -4372,15 +4481,51 @@ class TinActivities:
                 return existing.result
             await self._db.start_effect(conn, execution_key=execution_key, operation=operation)
             try:
+                await _refuse_repeated_model_request(
+                    self._db, conn, run_id=run_id, step="weekly_brief", label="weekly brief"
+                )
                 with external_usage_scope(self._db, conn, run_id, "weekly_brief"):
                     result = await execute()
                 await self._db.complete_effect(conn, execution_key=execution_key, result=result)
                 return result
-            except Exception as exc:
-                await self._db.fail_effect(
-                    conn, execution_key=execution_key, error_message=_safe_failure(exc)
-                )
+            except BaseException as exc:
+                await _record_effect_failure(self._db, conn, execution_key=execution_key, exc=exc)
+                if isinstance(exc, ObservationAlreadyRecorded):
+                    raise _interrupted_model_request("weekly brief") from exc
                 raise
+
+    async def _pinned_native_reporter(self, run, reporter, key):
+        # Test doubles and separately supplied implementations retain their own contracts.
+        if not isinstance(
+            reporter,
+            (
+                AnswerPageDrafter,
+                VisibilityAuditor,
+                WeeklyBriefReporter,
+                MemoryGardener,
+                ScanReporter,
+            ),
+        ):
+            return reporter
+        from tin_lite.native_skill_pins import pinned_suite, suite_for_workflow
+
+        if run.definition_commit_sha:
+            definition = json.loads(
+                await self._storage.read_canonical_artifact(
+                    repo_id="registry/workflows",
+                    commit_sha=run.definition_commit_sha,
+                    path=f"workflows/{key}.json",
+                )
+            )
+            suite = pinned_suite(definition, key)
+        else:
+            suite = suite_for_workflow(key, legacy=True)
+        return type(reporter)(responses=reporter._responses, skill_suite=suite)
+
+    async def _integration_evidence(self, project):
+        from tin_lite.workflow_evidence import integration_inventory
+
+        return json.dumps(await integration_inventory(self._db, project.id), sort_keys=True)
 
     async def _weekly_brief_sources(
         self,
@@ -4397,13 +4542,37 @@ class TinActivities:
             nonlocal remaining
             if remaining <= 0:
                 return
-            bounded = content[: min(40_000, remaining)]
+            bounded = content.encode()[: min(16_000, remaining)].decode("utf-8", errors="ignore")
             if not bounded.strip():
                 return
             sources.append(
                 WeeklyBriefSource(label=label, artifact_ref=artifact_ref, content=bounded)
             )
             remaining -= len(bounded.encode())
+
+        append(
+            "current integration availability",
+            f"tin.project://{project.id}/integrations",
+            await self._integration_evidence(project),
+        )
+
+        list_files = getattr(self._storage, "list_canonical_files", None)
+        if list_files is not None and getattr(project, "canonical_branch", None):
+            paths, revision = await list_files(
+                repo_id=project.state_repo_id, branch=project.canonical_branch
+            )
+            context_paths = [
+                path for path in paths if path.startswith("context/") and path.endswith(".md")
+            ][:3]
+            for path in context_paths:
+                content = await self._storage.read_canonical_artifact(
+                    repo_id=project.state_repo_id, commit_sha=revision, path=path
+                )
+                append(
+                    "founder and project context",
+                    f"code.storage://{project.state_repo_id}@{revision}/{path}",
+                    content[:8000].decode("utf-8", errors="ignore"),
+                )
 
         if project.memory_commit_sha is not None and project.memory_index_path is not None:
             content = await self._storage.read_canonical_artifact(
@@ -4425,6 +4594,10 @@ class TinActivities:
             period_start=period_start,
             period_end=period_end,
             exclude_run_id=run_id,
+        )
+        # Read decision evidence before general activity can exhaust the context budget.
+        runs = sorted(
+            runs, key=lambda r: 0 if (r.artifact_path or "").startswith("reports/analytics/") else 1
         )
         for source_run in runs:
             ref = source_run.artifact_ref or f"tin.run://{source_run.id}"
@@ -4486,6 +4659,9 @@ class TinActivities:
                 return existing.result
             await self._db.start_effect(conn, execution_key=execution_key, operation=operation)
             try:
+                await _refuse_repeated_model_request(
+                    self._db, conn, run_id=run_id, step="answer_page", label="answer page"
+                )
                 with external_usage_scope(self._db, conn, run_id, "answer_page"):
                     result = await execute()
                 await self._db.complete_effect(
@@ -4494,12 +4670,10 @@ class TinActivities:
                     result=result,
                 )
                 return result
-            except Exception as exc:
-                await self._db.fail_effect(
-                    conn,
-                    execution_key=execution_key,
-                    error_message=_safe_failure(exc),
-                )
+            except BaseException as exc:
+                await _record_effect_failure(self._db, conn, execution_key=execution_key, exc=exc)
+                if isinstance(exc, ObservationAlreadyRecorded):
+                    raise _interrupted_model_request("answer page") from exc
                 raise
 
     async def _answer_page_sources(self, *, run_id: UUID, project) -> list[AnswerPageSource]:
@@ -4532,6 +4706,15 @@ class TinActivities:
         ]
         selected_runs = (
             visibility_runs[-1:] if visibility_runs else ([] if sources else source_runs[-5:])
+        )
+        # Availability is useful context, but cannot replace durable project evidence.
+        sources.insert(
+            0,
+            AnswerPageSource(
+                label="current integration availability",
+                artifact_ref=f"tin.project://{project.id}/integrations",
+                content=await self._integration_evidence(project),
+            ),
         )
         for source_run in selected_runs:
             if (
@@ -4637,15 +4820,26 @@ class TinActivities:
             )
             return [
                 VisibilitySource(
+                    label="current integration availability",
+                    artifact_ref=f"tin.project://{project.id}/integrations",
+                    content=await self._integration_evidence(project),
+                ),
+                VisibilitySource(
                     label="project memory",
                     artifact_ref=(
                         f"code.storage://{project.state_repo_id}"
                         f"@{project.memory_commit_sha}/{project.memory_index_path}"
                     ),
                     content=content.decode("utf-8"),
-                )
+                ),
             ]
-        sources: list[VisibilitySource] = []
+        sources: list[VisibilitySource] = [
+            VisibilitySource(
+                label="current integration availability",
+                artifact_ref=f"tin.project://{project.id}/integrations",
+                content=await self._integration_evidence(project),
+            )
+        ]
         for source_run in await self._db.list_memory_source_runs(
             project_id=project.id,
             exclude_run_id=run_id,
@@ -4880,6 +5074,20 @@ class TinActivities:
                 run.id
             )
             procedure = replace(procedure, content_draft_context=prepared)
+        if procedure.output_validator == "brand-design-capture.v1":
+            from tin_lite.brand_capture import BrandCaptureSources
+
+            prepared = await BrandCaptureSources(database=self._db, storage=self._storage).saved(
+                run.id
+            )
+            procedure = replace(procedure, brand_capture_context=prepared)
+        if procedure.output_validator == TIN_DIAGRAM_BRANDED_VALIDATOR and run.expected_head_sha:
+            from tin_lite.brand_diagrams import prepare
+
+            context = await prepare(
+                self._storage, await self._require_project(run.project_id), run.expected_head_sha
+            )
+            procedure = replace(procedure, diagram_brand_context=context)
         if run.review_source_run_id is not None:
             from tin_lite.workflow_reviews import saved_revision_context
 
@@ -4951,3 +5159,45 @@ def _safe_failure(exc: BaseException) -> str:
     """Name the exception with its text, so a failed receipt says what actually went wrong."""
     text = scrub_secrets(" ".join(str(exc).split()))
     return f"{type(exc).__name__}: {text or 'operation failed'}"[:FAILURE_MESSAGE_LIMIT]
+
+
+INTERRUPTED_MODEL_REQUEST = (
+    "the model request was interrupted and was not repeated; start the run again"
+)
+
+
+def _interrupted_model_request(label: str) -> ApplicationError:
+    """A metered request whose outcome is unknown is never bought again on retry."""
+    return ApplicationError(
+        f"{label}: {INTERRUPTED_MODEL_REQUEST}",
+        type="ModelRequestInterrupted",
+        non_retryable=True,
+    )
+
+
+async def _refuse_repeated_model_request(db, conn, *, run_id: UUID, step: str, label: str) -> None:
+    if await db.get_effect(observation_key(run_id, step, "responses"), conn=conn) is not None:
+        raise _interrupted_model_request(label)
+
+
+async def _record_effect_failure(db, conn, *, execution_key: str, exc: BaseException) -> None:
+    """Mark the owning receipt failed even while the activity is being cancelled.
+
+    A deploy cancels in-flight activities; a receipt left 'started' would hide the
+    interruption from the next attempt. The write finishes before the effect lock
+    (and its connection) is released, then the cancellation continues.
+    """
+    write = asyncio.ensure_future(
+        db.fail_effect(conn, execution_key=execution_key, error_message=_safe_failure(exc))
+    )
+    interrupted = False
+    while True:
+        try:
+            await asyncio.shield(write)
+            break
+        except asyncio.CancelledError:
+            if write.done():
+                raise
+            interrupted = True
+    if interrupted and not isinstance(exc, asyncio.CancelledError):
+        raise asyncio.CancelledError

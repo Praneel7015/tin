@@ -1,12 +1,18 @@
-"""Render docs/workflows.md from the built-in catalog; --check fails when the file is stale."""
+"""Render docs/workflows.md from the built-in catalog and the selected Registry packages.
+
+--check fails when the file is stale.
+"""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from tin_lite.catalog import BUILTIN_WORKFLOWS, WORKFLOW_SYSTEMS, BuiltinWorkflow
+from tin_lite.public_workflows import PUBLIC_WORKFLOWS
 
-DOC_PATH = Path(__file__).resolve().parents[1] / "docs" / "workflows.md"
+ROOT = Path(__file__).resolve().parents[1]
+DOC_PATH = ROOT / "docs" / "workflows.md"
 OTHER_SYSTEM = "General"
 
 
@@ -53,6 +59,25 @@ def row(workflow: BuiltinWorkflow) -> str:
     )
 
 
+def package_row(definition: dict) -> str:
+    notes = ["human review"] if definition.get("human_review") else []
+    title = cell(definition["title"]) + (f" ({', '.join(notes)})" if notes else "")
+    return (
+        f"| {title}<br>`{definition['key']}` | {cell(definition['description'])} "
+        f"| {inputs(definition)} | {output(definition)} |"
+    )
+
+
+def packages() -> list[dict]:
+    """Manifests of the maintainer-selected Registry packages, read without executing them."""
+    return [
+        json.loads((ROOT / "workflow_packages" / item.key / "workflow.json").read_text())[
+            "definition"
+        ]
+        for item in PUBLIC_WORKFLOWS
+    ]
+
+
 def render() -> str:
     lines = [
         "# Built-in workflows",
@@ -75,6 +100,28 @@ def render() -> str:
             "| Workflow | What it does | Inputs | Output |",
             "|---|---|---|---|",
             *(row(item) for item in workflows),
+        ]
+    selected = packages()
+    lines += [
+        "",
+        "# Registry packages",
+        "",
+        f"{len(selected)} contributed packages from `workflow_packages/` are selected in "
+        "`src/tin_lite/public_workflows.py` and published with the next catalog sync. "
+        "[The package guide](../workflow_packages/README.md#how-the-packages-fit-together) "
+        "shows how they build on the built-ins.",
+    ]
+    for system_id, name in systems:
+        rows = [item for item in selected if item.get("system") == system_id]
+        if not rows:
+            continue
+        lines += [
+            "",
+            f"## {name}",
+            "",
+            "| Workflow | What it does | Inputs | Output |",
+            "|---|---|---|---|",
+            *(package_row(item) for item in rows),
         ]
     return "\n".join(lines) + "\n"
 

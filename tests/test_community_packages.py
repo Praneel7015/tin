@@ -2,6 +2,7 @@
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,11 @@ from tin_lite.catalog import BUILTIN_WORKFLOWS
 from tin_lite.community import (
     CODE_SUFFIXES,
     CONTRIBUTED_SUFFIXES,
+    REPOSITORY_ROOT,
     ContributedPackage,
+    PrivateCopyError,
     discover,
+    private_key,
     validate,
     validate_all,
 )
@@ -86,12 +90,12 @@ async def test_a_broken_contribution_is_refused(tmp_path, break_it, expected):
         await validate(ContributedPackage(key=KEY, path=package_path), root=tmp_path)
 
 
-async def test_a_symlinked_resource_is_refused(tmp_path):
+async def test_a_symlinked_resource_is_refused(tmp_path, make_symlink):
     package_path = stage(tmp_path)
     outside = tmp_path / "outside.md"
     outside.write_text("Content the package does not own.\n")
     (package_path / "PROMPT.md").unlink()
-    (package_path / "PROMPT.md").symlink_to(outside)
+    make_symlink(package_path / "PROMPT.md", outside)
     with pytest.raises(ValueError, match="symlink"):
         await validate(ContributedPackage(key=KEY, path=package_path), root=tmp_path)
 
@@ -121,12 +125,12 @@ async def test_missing_manifests_do_not_disappear(tmp_path, missing):
 
 
 @pytest.mark.parametrize("broken", [False, True])
-async def test_symlinked_packages_do_not_disappear(tmp_path, broken):
+async def test_symlinked_packages_do_not_disappear(tmp_path, broken, make_symlink):
     stage(tmp_path)
     target = tmp_path / "workflow_packages" / KEY
     if broken:
         target = tmp_path / "does-not-exist"
-    (tmp_path / "workflow_packages" / "growth.link").symlink_to(target)
+    make_symlink(tmp_path / "workflow_packages" / "growth.link", target)
     results = {package.key: error for package, error in await validate_all(tmp_path)}
     assert results[KEY] is None
     assert "symlink" in str(results["growth.link"])
@@ -203,7 +207,7 @@ async def test_community_check_does_not_apply_private_only_policies(tmp_path):
 
 
 @pytest.mark.parametrize("shape", ["missing_root", "missing_folder", "file", "symlink"])
-async def test_bad_roots_fail_with_a_cli_diagnostic(tmp_path, capsys, shape):
+async def test_bad_roots_fail_with_a_cli_diagnostic(tmp_path, capsys, shape, make_symlink):
     from tin_lite.cli import _validate_community
 
     root = tmp_path
@@ -212,7 +216,7 @@ async def test_bad_roots_fail_with_a_cli_diagnostic(tmp_path, capsys, shape):
     elif shape == "file":
         (root / "workflow_packages").write_text("not a folder")
     elif shape == "symlink":
-        (root / "workflow_packages").symlink_to(tmp_path)
+        make_symlink(root / "workflow_packages", tmp_path)
     with pytest.raises(SystemExit) as error:
         await _validate_community(root)
     assert error.value.code == 1
@@ -311,3 +315,86 @@ async def test_oversized_manifest_is_rejected_before_reading_it(tmp_path, monkey
     monkeypatch.setattr(Path, "read_bytes", unexpected_read)
     results = await validate_all(tmp_path)
     assert "byte limit" in str(results[0][1])
+
+
+def copy_package(root: Path, key: str) -> Path:
+    """Copy one of this repository's packages into a scratch checkout."""
+    target = root / "workflow_packages" / key
+    shutil.copytree(REPOSITORY_ROOT / "workflow_packages" / key, target)
+    return target
+
+
+def edit_definition(package: Path, change) -> None:
+    path = package / "workflow.json"
+    manifest = json.loads(path.read_bytes())
+    change(manifest["definition"])
+    path.write_text(json.dumps(manifest))
+
+
+def browser_profile(definition) -> None:
+    definition["procedure"].pop("services")
+    definition.pop("integration_requirements")
+    definition["procedure"]["sandbox"].update(profile="browser", egress="open")
+
+
+def test_private_copies_use_a_custom_key():
+    assert private_key("growth.sunset_rescue") == "custom.sunset_rescue"
+    assert private_key("reports.trust-gate") == "custom.trust_gate"
+
+
+async def test_code_and_on_demand_procedures_pass_as_private_copies(tmp_path):
+    copy_package(tmp_path, "example.csv_summary")
+    copy_package(tmp_path, "example.posthog_funnel")
+    results = await validate_all(tmp_path, private=True)
+    assert [(package.key, error) for package, error in results] == [
+        ("example.csv_summary", None),
+        ("example.posthog_funnel", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        (lambda d: d.update(schedule_modes=["on_demand", "weekly"]), "schedule_modes"),
+        (
+            lambda d: d["procedure"]["output"].update(
+                path_template=d["procedure"]["output"].pop("path").replace(".md", "/{run_id}.md")
+            ),
+            "unsupported private output fields",
+        ),
+        (browser_profile, "isolated, fenced sandbox"),
+    ],
+)
+async def test_private_only_rules_are_reported_for_the_copy(tmp_path, change, expected):
+    package = copy_package(tmp_path, "example.posthog_funnel")
+    edit_definition(package, change)
+    assert [error for _, error in await validate_all(tmp_path)] == [None]
+    [(_, error)] = await validate_all(tmp_path, private=True)
+    assert isinstance(error, PrivateCopyError)
+    assert "custom.posthog_funnel" in str(error) and expected in str(error)
+
+
+async def test_cli_separates_private_failures_from_package_failures(tmp_path, capsys):
+    from tin_lite.cli import _validate_community
+
+    package = copy_package(tmp_path, "example.posthog_funnel")
+    edit_definition(package, lambda d: d.update(schedule_modes=["on_demand", "weekly"]))
+    await _validate_community(tmp_path)
+    with pytest.raises(SystemExit):
+        await _validate_community(tmp_path, private=True)
+    output = capsys.readouterr().out
+    assert "The public package is valid" in output
+    assert "your custom.posthog_funnel copy only" in output
+
+
+async def test_one_package_can_be_checked_alone(tmp_path, capsys):
+    from tin_lite.cli import _validate_community
+
+    copy_package(tmp_path, "example.csv_summary")
+    broken = copy_package(tmp_path, "example.posthog_funnel")
+    edit_definition(broken, lambda d: d.update(schedule_modes=["on_demand", "weekly"]))
+    await _validate_community(tmp_path, private=True, package="example.csv_summary")
+    assert "1 of 1 packages are valid" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        await _validate_community(tmp_path, private=True, package="growth.missing")
+    assert "no contributed package named growth.missing" in capsys.readouterr().out

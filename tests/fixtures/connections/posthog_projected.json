@@ -1,0 +1,174 @@
+{
+ "_comment": "Tin's projected responses for posthog_objects.json with the arguments in `_arguments` and a 64000-byte bound. Regenerate deliberately when a projection changes.",
+ "_arguments": {
+  "event_definitions.list": {},
+  "property_definitions.list": {
+   "event_names": [
+    "signed_up"
+   ]
+  },
+  "insights.list": {},
+  "query.hogql": {
+   "name": "signups_by_day",
+   "query": "SELECT toDate(timestamp) AS day, count() AS signups FROM events WHERE event = 'signed_up' AND timestamp >= now() - INTERVAL 7 DAY GROUP BY day ORDER BY day LIMIT 30"
+  }
+ },
+ "event_definitions.list": {
+  "records": [
+   {
+    "name": "$pageview",
+    "volume_30_day": 48210,
+    "query_usage_30_day": 312,
+    "last_seen_at": "2026-09-23T22:10:04Z"
+   },
+   {
+    "name": "signed_up",
+    "volume_30_day": 1204,
+    "query_usage_30_day": 88,
+    "last_seen_at": "2026-09-23T21:58:40Z"
+   },
+   {
+    "name": "onboarding_completed",
+    "volume_30_day": 611,
+    "query_usage_30_day": 41,
+    "last_seen_at": "2026-09-23T20:01:12Z"
+   },
+   {
+    "name": "project_created",
+    "volume_30_day": 540,
+    "query_usage_30_day": 37,
+    "last_seen_at": "2026-09-23T19:44:03Z"
+   },
+   {
+    "name": "workflow_started",
+    "volume_30_day": 2890,
+    "query_usage_30_day": 120,
+    "last_seen_at": "2026-09-23T22:02:51Z"
+   },
+   {
+    "name": "subscription_started",
+    "volume_30_day": 97,
+    "query_usage_30_day": 25,
+    "last_seen_at": "2026-09-22T17:30:00Z"
+   },
+   {
+    "name": "$autocapture",
+    "volume_30_day": 90133,
+    "query_usage_30_day": 4,
+    "last_seen_at": "2026-09-23T22:11:59Z"
+   },
+   {
+    "name": "invite_sent",
+    "volume_30_day": 143,
+    "query_usage_30_day": 6,
+    "last_seen_at": "2026-09-21T09:12:44Z"
+   }
+  ],
+  "has_more": false,
+  "truncated": false,
+  "next_cursor": null
+ },
+ "property_definitions.list": {
+  "records": [
+   {
+    "name": "$browser",
+    "property_type": "String",
+    "is_numerical": false
+   },
+   {
+    "name": "plan",
+    "property_type": "String",
+    "is_numerical": false
+   },
+   {
+    "name": "signup_source",
+    "property_type": "String",
+    "is_numerical": false
+   }
+  ],
+  "has_more": false,
+  "truncated": false,
+  "next_cursor": null
+ },
+ "insights.list": {
+  "records": [
+   {
+    "id": 5001,
+    "short_id": "AbC12xYz",
+    "name": "Signup to activation funnel",
+    "kind": "InsightVizNode",
+    "query_kind": "FunnelsQuery",
+    "last_refresh": "2026-09-23T06:00:00Z"
+   },
+   {
+    "id": 5002,
+    "short_id": "DeF34uVw",
+    "name": "Pageview count",
+    "kind": "InsightVizNode",
+    "query_kind": "TrendsQuery",
+    "last_refresh": "2026-09-23T05:00:00Z"
+   },
+   {
+    "id": 5003,
+    "short_id": "GhI56sTu",
+    "name": "Weekly retention",
+    "kind": "InsightVizNode",
+    "query_kind": "RetentionQuery",
+    "last_refresh": null
+   },
+   {
+    "id": 5004,
+    "short_id": "JkL78qRs",
+    "name": "Top referrers (SQL)",
+    "kind": "DataVisualizationNode",
+    "query_kind": "HogQLQuery",
+    "last_refresh": "2026-09-20T12:00:00Z"
+   }
+  ],
+  "has_more": false,
+  "truncated": false,
+  "next_cursor": null
+ },
+ "query.hogql": {
+  "columns": [
+   "day",
+   "signups"
+  ],
+  "types": [
+   "Date",
+   "UInt64"
+  ],
+  "rows": [
+   [
+    "2026-09-17",
+    151
+   ],
+   [
+    "2026-09-18",
+    162
+   ],
+   [
+    "2026-09-19",
+    149
+   ],
+   [
+    "2026-09-20",
+    98
+   ],
+   [
+    "2026-09-21",
+    104
+   ],
+   [
+    "2026-09-22",
+    177
+   ],
+   [
+    "2026-09-23",
+    181
+   ]
+  ],
+  "has_more": false,
+  "truncated": false
+ }
+}

@@ -1,6 +1,6 @@
 # Feature status and release readiness
 
-Current as of September 21, 2026. This is the current capability overview;
+Current as of September 24, 2026. This is the current capability overview;
 internal implementation plans and production acceptance records are not part of this source release.
 “Implemented” does not mean enabled for every deployment, independently security-audited,
 or verified in a fresh self-hosted installation. The live Registry supplies each workflow's
@@ -11,27 +11,30 @@ inputs, prerequisites and supported schedule modes.
 | Area | Available behavior | Boundary |
 | --- | --- | --- |
 | Dashboard and MCP | Project files, workflow discovery, saved configurations, runs, Activity and review share the same services. | Exact project membership is required; workspace administration does not grant sibling-project access. |
-| Built-in workflows | Context, research, visibility/site audits, keyword and content planning, style capture, drafting, diagrams, product QA, video and email outreach. | Provider configuration, connected resources and workflow-specific execution limits still apply. |
+| Built-in workflows | Context, research, visibility/site audits, keyword and content planning, a paid ads assessment (Google Search, advisory), an approval-gated Google Ads launch and a daily Google Ads monitor, style capture, drafting, diagrams, product QA, video and email outreach. | Provider configuration, connected resources and workflow-specific execution limits still apply. |
 | Public workflow packages | Source validation and explicit maintainer registration for deterministic Python, multi-step managed-model Python, and Codex procedures. Catalog sync publishes pinned packages through the existing Registry. | Source support is not a production rollout. Unselected packages and shipped examples do not become customer workflows. Package runtime limits and normal billing still apply. |
 | Product analytics brief | Explicit public PostHog procedure package: ordered activation, trends, traffic, error signals and a screened breakdown. Manual, daily and weekly definitions reuse saved workflows. | One connected provider project; no identity joins, recommendations or external delivery. See [qualification limits](product-analytics-brief.md). Source registration is not deployment. |
+| Brand and design capture | Public first-capture package inspects a website and optional repository or source packet, then proposes BRAND.md and DESIGN.md for one atomic approval. Existing compatible documents stay unchanged. | Fixture-tested source support; updated browser image and catalog sync required. No site edits or refresh. Diagrams consume pinned active guidance; other marketing consumers and custom-font rendering remain deferred. See [capture scope](brand-capture.md). |
+| Stripe and PostHog connections | First-party read-only `payments.stripe` (founder-pasted restricted key, validated per resource) and `analytics.posthog` (OAuth with PKCE, one selected project, US/EU Cloud) connections. Registered operations return server-side projected records with cursor paging for code and procedure bindings; offline fakes support package tests. See [the guide](stripe-and-posthog-connections.md). | Reads only; HogQL limited to one bounded SELECT without OFFSET. PostHog needs `TIN_LITE_POSTHOG_OAUTH_ENABLED` and a public https origin. Fixture-tested; no live Stripe or PostHog acceptance yet. Self-hosted PostHog is not supported. |
 | Workflow creation and qualification | A repo-owned creator proposes packages and cases. Shared HTTP/MCP checks validate pinned files and assess existing run outputs and model costs; a CLI can start explicitly budgeted cases. | Creator installation uses private activation. No automatic publication, dashboard qualification editor or live analytics acceptance. Fixture checks do not establish model quality or measured cost. |
 | Organic traffic system | The current parent can plan, optionally prepare technical fixes, draft the next eligible planned item, wait for review/revisions and deliver the approved article as an unmerged GitHub PR. | GitHub delivery requires the selected connection. Without GitHub, or in draft-only mode, the approved Markdown remains in project Files. Plan dates are not an automatic six-month publishing schedule. |
 | Content review | Read the draft, request changes in text, review a new revision and approve through dashboard or MCP. Generation notes stay separate from publishable copy. | Approval applies to the reviewed revision. PR delivery neither merges the PR nor publishes the website. |
 | Saved schedules | Eligible definitions support daily or selected-weekday execution at a local time in an IANA timezone, with skip-overlap and bounded catch-up. | Not every workflow is schedulable. Paid scheduled occurrences need standing spending authority, not just a positive balance. |
-| Locked dashboard for browser sign-ups | A project with no workflow yet shows a locked dashboard: rail dimmed, one page that sends the person to their coding agent with the install line. Agent connection links and callbacks can finish the requested account and resource setup while the dashboard stays locked. Unlocks on the next reload once a workflow exists. `TIN_LITE_BROWSER_LOCK_ENABLED=false` turns it off. | Browser onboarding does not exist yet; the lock stands in for it. |
+| Locked dashboard for browser sign-ups | A project with no workflow or run yet shows a locked dashboard: rail dimmed, one page that sends the person to their coding agent with the install line. Agent connection links and callbacks can finish the requested account and resource setup while the dashboard stays locked. Unlocks on the next reload once a workflow or run exists. `TIN_LITE_BROWSER_LOCK_ENABLED=false` turns it off. | Browser onboarding does not exist yet; the lock stands in for it. |
 | One-off tasks | `project.task` has its own conversation, questions, pause/resume and exact-diff review. | It is not a reusable private code workflow or a replacement for the shared workflow engine. |
 
 See [architecture](architecture.md), [content delivery](repository-aware-content-delivery.md), and the
 [README](../README.md) for the product and execution contracts.
 
-## Operator-enabled private-workflow pilot
+## Private workflows
 
 Private packages live in project Files. A coding agent commits, validates and explicitly
 activates an exact package revision through MCP. New saved configurations select the latest
 active definition automatically; existing configurations and runs keep their selected version.
-Editing files alone does not activate a workflow. The
-`TIN_LITE_PRIVATE_WORKFLOW_PROJECTS` allowlist remains required; hosted billing enablement
-does not remove this separate private-execution gate.
+Editing files alone does not activate a workflow. Execution needs the isolated template plus
+either the `TIN_LITE_PRIVATE_WORKFLOW_PROJECTS` allowlist or
+`TIN_LITE_PRIVATE_WORKFLOWS_OPEN=true`, which admits every project and requires billing so each
+run spends credits. Hosted billing enablement alone does not open private execution.
 
 | Executor | Implemented | Not included |
 | --- | --- | --- |
@@ -39,7 +42,8 @@ does not remove this separate private-execution gate.
 | Private `codex.procedure` | On-demand isolated procedures with declared project API connections, producing a bounded project artifact or an unmerged PR through the connected GitHub gateway. | Private procedure schedules, browser/Studio profiles, or a general one-command skill import. |
 
 Code-only bounded execution uses no Tin credits. Managed model steps use hosted credits;
-custom API requests use the connected provider account, which may charge separately. The
+custom API, Stripe and PostHog requests use the connected provider account, which may charge
+separately. The
 trusted gateway inserts credentials; author code never receives the reusable key. Model access
 uses Tin's server keys on hosted Tin and the operator's keys when self-hosted. The code
 model contract currently admits only the explicitly registered OpenAI Luna and Astra routes;
@@ -48,7 +52,8 @@ or prices.
 
 Contributor contracts:
 [activation](private-workflow-activation.md), [code execution](code-workflows.md),
-[model steps](code-model-workflows.md), [API connections](project-api-connections.md), and
+[model steps](code-model-workflows.md), [API connections](project-api-connections.md),
+[Stripe and PostHog connections](stripe-and-posthog-connections.md), and
 [code schedules](code-workflow-schedules.md). Code-only calendar execution has been verified;
 paid-model scheduling has fixture coverage, not production acceptance.
 
@@ -82,6 +87,10 @@ Four provider adapters exist, but a billed route needs explicit registration and
 See [billing coverage](workflow-billing-coverage.md),
 [Studio API and hosted defaults](studio-api-and-hosted-credits.md), and
 [self-hosted billing](self-hosted-billing.md).
+
+Public procedures have source support for [reviewed document pairs](reviewed-project-documents.md)
+and optional read-only repository evidence. `brand.capture` is registered in source;
+hosted acceptance still requires an updated sandbox image and catalog sync.
 
 ## Deferred product work
 

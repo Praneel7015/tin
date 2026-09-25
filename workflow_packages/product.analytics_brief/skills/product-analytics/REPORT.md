@@ -2,7 +2,7 @@
 
 Write a dated brief to context.output.path. Header: title, Status (complete/incomplete/invalid
 configuration/unsupported exclusions/schema changed), generated UTC, context.workflow_key,
-builder reusable-v1, provider project, current/prior UTC half-open windows, 90-day lookback,
+builder reusable-v1, provider (the PostHog project selected in Integrations), current/prior UTC half-open windows, 90-day lookback,
 actor/attempt and separate traffic identity, applied exclusions and uncertain inclusion.
 State inferred semantics and reliable-date limitations. Never invent a run or source revision.
 
@@ -41,10 +41,10 @@ saved configuration changed, and disclose mapping changes.
 Append compact JSON (json.dumps with separators=(",", ":"), no indentation or duplicate
 derived copies) in a fenced evidence block preceded by `<!-- tin-analytics-evidence-v1 -->`:
 
-- `binding`: settings hash; `generated_at`: UTC timestamp; `provider_project`: selected ID;
+- `binding`: settings hash; `generated_at`: UTC timestamp; `provider`: "analytics.posthog";
 - `state`: plan_state result, including validated plan, schema signature and any differences;
-- `inventory_scope`: inventory_scope() result; `windows`: exact boundaries; `requests`: executed step, HTTP/completion/cache metadata,
-  safe generated SQL and original aggregate columns/results; `derived`: validated tables,
+- `inventory_scope`: inventory_scope() result; `windows`: exact boundaries; `requests`: executed step, operation,
+  has_more/truncated or Tin's refusal message, safe generated SQL and aggregate columns/rows; `derived`: validated tables,
   comparisons, screening family/test results and error signals;
 - `limitations`: failed/skipped steps, uncertain mappings/exclusions, coverage and size limits.
 

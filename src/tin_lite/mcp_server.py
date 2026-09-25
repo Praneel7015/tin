@@ -23,6 +23,7 @@ from tin_lite import analytics, project_task_control, welcome_email
 from tin_lite.analytics import clip
 from tin_lite.auth import ClerkAuth
 from tin_lite.billing_contracts import BillingError
+from tin_lite.brand_capture import preparation as brand_capture_preparation
 from tin_lite.campaign_revisions import request_email_campaign_revision
 from tin_lite.content_delivery import DeliverySettings
 from tin_lite.content_delivery_api import SaveDelivery, delivery_service, retry_delivery
@@ -62,6 +63,18 @@ from tin_lite.onboarding_experience import (
 )
 from tin_lite.organic_audit_control import stop_organic_audit as stop_organic_audit_service
 from tin_lite.output_resolution import OutputResolutionError, OutputResolutionRequest
+from tin_lite.paid_ads_control import (
+    stop_paid_ads_assessment as stop_paid_ads_assessment_service,
+)
+from tin_lite.paid_ads_control import stop_paid_ads_launch as stop_paid_ads_launch_service
+from tin_lite.paid_ads_control import stop_paid_ads_monitor as stop_paid_ads_monitor_service
+from tin_lite.paid_ads_proposals import (
+    approve_paid_ads_proposal as approve_paid_ads_proposal_service,
+)
+from tin_lite.paid_ads_proposals import (
+    discard_paid_ads_proposal as discard_paid_ads_proposal_service,
+)
+from tin_lite.paid_ads_proposals import list_paid_ads_proposals as list_paid_ads_proposals_service
 from tin_lite.private_workflows import (
     PackageActivation,
     PackageSelection,
@@ -69,6 +82,7 @@ from tin_lite.private_workflows import (
     PrivateWorkflowError,
     PrivateWorkflows,
     authoring_guide,
+    package_manifest_path,
     private_execution_ready,
     workflow_source_view,
 )
@@ -143,18 +157,53 @@ def _mcp_input_schema(definition: dict[str, Any]) -> dict[str, Any]:
     return client_input_schema(definition)
 
 
-def _mcp_workflow(workflows: list[Any], identifier: str) -> Any:
+def _mcp_workflow(workflows: list[Any], identifier: str, *, parameter: str = "workflow_id") -> Any:
     matches = [item for item in workflows if str(item.id) == identifier or item.key == identifier]
     if len(matches) > 1:
         raise ToolError("workflow key is ambiguous; use the UUID returned by list_workflows")
     if not matches:
-        raise ToolError("workflow_id must be a workflow UUID or key returned by list_workflows")
+        raise ToolError(
+            f"{parameter} {identifier!r} is not a workflow UUID or key returned by list_workflows"
+        )
     return matches[0]
+
+
+def _same_uuid(left: Any, right: Any) -> bool:
+    try:
+        return UUID(str(left).strip()) == UUID(str(right).strip())
+    except ValueError:
+        return str(left) == str(right)
+
+
+def _mcp_bound_inputs(inputs: dict[str, Any] | None, project_id: Any) -> dict[str, Any]:
+    """Drop a redundant inputs.project_id; Tin binds the project from the tool call."""
+
+    supplied = dict(inputs or {})
+    supplied_project_id = supplied.pop("project_id", None)
+    if supplied_project_id is not None and not _same_uuid(supplied_project_id, project_id):
+        raise ToolError("inputs.project_id conflicts with the project_id bound to this tool call")
+    return supplied
 
 
 def _validate_revision(value: str) -> None:
     if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
         raise ValueError("revision must be a lowercase 40-character commit SHA")
+
+
+def _mcp_proposal_view(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "campaign_run_id": str(row["campaign_run_id"]),
+        "monitor_run_id": str(row["monitor_run_id"]),
+        "number": row["proposal_number"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "previous": row["previous"],
+        "proposed": row["proposed"],
+        "rationale": row["rationale"],
+        "review_path": row["review_path"],
+        "error_code": row.get("error_code"),
+    }
 
 
 def _run_allowed_actions(run: Any) -> list[str]:
@@ -171,11 +220,19 @@ def _run_allowed_actions(run: Any) -> list[str]:
         "organic.keyword_plan",
         "content.plan",
         "organic.traffic_system",
+        "ads.assessment",
+        "ads.monitor",
     } and run.status in {
         RunStatus.PENDING,
         RunStatus.RUNNING,
     }:
         return ["cancel"]
+    if run.workflow_name == "ads.launch" and run.status in {
+        RunStatus.PENDING,
+        RunStatus.RUNNING,
+        RunStatus.NEEDS_INPUT,
+    }:
+        return ["approve", "cancel"] if run.status is RunStatus.NEEDS_INPUT else ["cancel"]
     if run.status is RunStatus.NEEDS_INPUT and run.review_required:
         if run.executor == GROWTH_ONBOARDING_KEY:
             return ["record_picks", "approve"]
@@ -225,6 +282,7 @@ def _mcp_integration_view(
         "access_label": definition.access_label,
         "capabilities": list(definition.capabilities),
         "unlocks": list(definition.unlocks),
+        "setup_url": getattr(definition, "setup_url", None),
         "configured": configured,
         "connection_id": str(connection.id) if connection is not None else None,
         "status": connection.status if connection is not None else "available",
@@ -415,15 +473,20 @@ run's relay). Open with the run's quote, Tin's view, under a heading of its own 
 read on <business>" (the same text as the plan's "Tin's view" section). Lead with the suggested
 systems and their first useful deliverables: what arrives, when, and which decision it enables.
 Give one line per suggested system with cadence and access; keep the full ranked alternatives
-in the linked plan and expand them when asked. Then ask ONE open question, in chat, not
-blocking: "What do you want Tin to take on? Say it in your words; Tin's suggestion is a fine
-answer." Map their answer to the plan's system ids and set up whole systems: when they name one
-workflow that belongs to a system, pick that system, so every workflow in it gets built together
-(the plan groups them because they feed each other). Say the mapping back in one line ("So:
-AI visibility, the whole system: the audit Mondays and answer pages Wednesdays."). Then ask how
-much control they keep, from the
-plan's Control list, suggesting a review in Tin, since public pages and anything visual read best
-rendered there. Use access_needs to recommend connections with their benefits and permissions.
+in the linked plan and expand them when asked. Then ask the picks as ONE round of multiple
+choice, with your question tool when you have one (AskUserQuestion in Claude Code,
+request_user_input in Codex), otherwise as numbered options in chat that they answer by number:
+"What do you want Tin to take on?", multi-select, one option per system in the plan's rank
+order with its first deliverable and cadence, Tin's suggestion first and marked recommended;
+"How much control do you keep?", single choice from the plan's Control list, review in Tin
+recommended, since public pages and anything visual read best rendered there; and "Which
+connections should Tin set up now?", multi-select from access_needs, each with its benefit.
+Their own words are a fine answer too. Map the answer to the plan's system ids and
+set up whole systems: when they name one workflow that belongs to a system, pick that system,
+so every workflow in it gets built together (the plan groups them because they feed each
+other). Say the mapping back in one line ("So: AI visibility, the whole system: the audit
+Mondays and answer pages Wednesdays."). Use access_needs to recommend connections with their
+benefits and permissions.
 Unknown repository details are a reason to ask which repository serves the site, not to omit
 useful access. Ask for mailbox access only for selected work that needs it. Explain
 delivery_destination: reports, review queue, and whether notifications are enabled. Offer only
@@ -816,6 +879,43 @@ def create_mcp_app(
         register_billing_tools(server, runtime=runtime, settings=settings, caller=caller)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def get_brand_guide(project_id: str) -> dict[str, Any]:
+        """Prepare one brand/design capture without starting a run or model call.
+
+        Use supplied sources and permissions. Ask only for missing evidence or protected
+        choices. Local material reaches Tin only through an explicitly curated project packet.
+        """
+        from tin_lite.brand_capture import BrandCaptureSources
+
+        project = _mcp_uuid(project_id, field="project_id")
+        await require_project(project, await caller(), tool_name="get_brand_guide")
+        result = brand_capture_preparation(project, include_guide=True)
+        try:
+            result["current"] = await BrandCaptureSources(
+                database=runtime().database, storage=runtime().storage
+            ).inspect(project, {}, require_source=False)
+        except ValueError as exc:
+            result["limitation"] = str(exc)
+        return result
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def get_brand(project_id: str, revision: str | None = None) -> dict[str, Any]:
+        """Read the active brand guide, tokens and advisory assessment at one project revision.
+
+        Proposals are never active. Reuse this revision for DESIGN.md. Missing guidance keeps
+        ordinary no-brand behavior; invalid core data requires correction before brand use.
+        """
+        from tin_lite.brand_capture import resolve_brand
+
+        project_id_ = _mcp_uuid(project_id, field="project_id")
+        await require_project(project_id_, await caller(), tool_name="get_brand")
+        project = await runtime().database.get_project(project_id_)
+        if revision is None:
+            repo = await runtime().storage.get_repo(project.state_repo_id)
+            revision = await runtime().storage.head_sha(repo, project.canonical_branch)
+        return await resolve_brand(runtime().storage, project, revision)
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_writing_style_guide(project_id: str) -> dict[str, Any]:
         """Begin style capture by leading a source-discovery conversation with the user.
 
@@ -1205,16 +1305,46 @@ def create_mcp_app(
         parsed, _token, _service = await private_service(project_id, "get_workflow_authoring_guide")
         return authoring_guide(settings=settings, project_id=parsed)
 
+    def package_selection(model, **values):
+        """Name the malformed package field instead of returning a raw pydantic error."""
+        supplied = values["path"]
+        values["path"] = package_manifest_path(supplied)
+        try:
+            return model(**values)
+        except ValidationError as exc:
+            problems = []
+            for error in exc.errors():
+                field = ".".join(str(part) for part in error["loc"]) or "selection"
+                if field == "path":
+                    problems.append(
+                        f"path {supplied!r} must be workflow_packages/custom.<key>/workflow.json"
+                    )
+                elif field in {"revision", "expected_revision"}:
+                    problems.append(f"{field} must be a lowercase 40-character commit SHA")
+                else:
+                    problems.append(f"{field}: {error['msg']}")
+            raise ToolError("invalid: " + "; ".join(problems)) from exc
+
     @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     async def validate_workflow_package(
-        project_id: str, path: str, revision: str
+        project_id: str,
+        path: Annotated[
+            str,
+            Field(
+                description="Package manifest path, workflow_packages/custom.<key>/workflow.json. "
+                "The package directory is also accepted."
+            ),
+        ],
+        revision: Annotated[
+            str, Field(description="40-character commit SHA that contains the package files.")
+        ],
     ) -> dict[str, Any]:
         """Validate exact project package files without activating or executing them.
 
         Start with get_workflow_authoring_guide.
         """
         parsed, token, service = await private_service(project_id, "validate_workflow_package")
-        selection = PackageSelection(path=path, revision=revision)
+        selection = package_selection(PackageSelection, path=path, revision=revision)
         return await private_result(
             service.validate(project_id=parsed, actor=token.subject, selection=selection)
         )
@@ -1339,7 +1469,8 @@ def create_mcp_app(
         Refresh list_workflows afterward; saved configurations do not upgrade.
         """
         parsed, token, service = await private_service(project_id, "activate_workflow_package")
-        selection = PackageActivation(
+        selection = package_selection(
+            PackageActivation,
             path=path,
             revision=revision,
             request_id=_mcp_uuid(request_id, field="request_id"),
@@ -1395,6 +1526,7 @@ def create_mcp_app(
             workflow
             for workflow in await services.database.list_workflows(project_id=parsed_project_id)
             if workflow.status.value == "active"
+            and (workflow.definition or {}).get("public_discovery", True)
             and (
                 workflow.project_id is None
                 or private_execution_ready(settings, workflow.project_id)
@@ -1416,6 +1548,8 @@ def create_mcp_app(
                 **(
                     {"preparation": style_capture_preparation(parsed_project_id)}
                     if workflow.key == "style.capture" and workflow.project_id is None
+                    else {"preparation": brand_capture_preparation(parsed_project_id)}
+                    if workflow.key == "brand.capture" and workflow.project_id is None
                     else {}
                 ),
                 **workflow_source_view(workflow, settings),
@@ -1458,12 +1592,19 @@ def create_mcp_app(
         await require_project(parsed_project_id, token, tool_name="get_started")
         project = await runtime().database.get_project(parsed_project_id)
         onboarding = await runtime().database.get_registry_workflow(growth_onboarding.KEY)
+        # An onboarding already in flight is the one to continue, not a reason to restart.
+        active = await runtime().database.latest_active_run(
+            project_id=parsed_project_id, executor=growth_onboarding.KEY
+        )
         experience = await onboarding_experience(
             database=runtime().database,
             storage=runtime().storage,
             settings=settings,
             project_id=parsed_project_id,
+            run=active,
         )
+        if active is not None:
+            experience["active_run_id"] = str(active.id)
         from tin_lite.onboarding import billing_restrictions
 
         blocked = await billing_restrictions(
@@ -1562,8 +1703,9 @@ def create_mcp_app(
                     "what it will produce, which access makes it useful, and what we will learn."
                 ),
                 "picks": (
-                    "The next few minutes are yours: what Tin takes on, in your words, then "
-                    "control and any connections. Nothing runs until you have said."
+                    "The next few minutes are yours: a few quick choices on what Tin takes on, "
+                    "how much control you keep and which connections to set up. Nothing runs "
+                    "until you have said."
                 ),
                 "connections": (
                     "Let's give Tin the evidence and access that make the first result useful. "
@@ -1617,14 +1759,16 @@ def create_mcp_app(
                 "plan's Tin's view section); its relay says the plan is ready and what the "
                 "next minutes hold, in your words",
                 "show suggested systems first, with first_deliverables, cadence and access; "
-                "link the full ranked alternatives in the plan and expand on request. Ask one "
-                "open question in chat: what do you want Tin to take on? their words; Tin's "
-                "suggestion is a fine answer",
+                "link the full ranked alternatives in the plan and expand on request. Ask the "
+                "picks as one round of multiple choice with your question tool (AskUserQuestion "
+                "in Claude Code, request_user_input in Codex), otherwise as numbered options in "
+                "chat: what Tin takes on (multi-select, one option per system, Tin's suggestion "
+                "first and recommended), control (the plan's Control list, review in Tin "
+                "recommended) and connections (multi-select from access_needs); their own words "
+                "are a fine answer too",
                 "map the answer to the plan's system ids and set up whole systems: a named "
                 "workflow means its system, every workflow in it; say the mapping back in one "
                 "line",
-                "ask how much control they keep, from the plan's Control list, suggesting a "
-                "review in Tin",
                 "recommend access_needs with their benefits, permissions and resource selection. "
                 "Unknown repository or analytics details are discovery questions; ask which "
                 "connections to set up now, and respect explicit declines",
@@ -2126,6 +2270,104 @@ def create_mcp_app(
         return {"id": str(stopped.id), "status": stopped.status.value}
 
     @server.tool()
+    async def stop_paid_ads_assessment(run_id: str) -> dict[str, Any]:
+        """Stop future paid-ads research. Accepted provider requests may still incur costs."""
+        token = await caller()
+        parsed = _mcp_uuid(run_id, field="run_id")
+        run = await runtime().database.get_run(parsed)
+        if run is None:
+            raise ToolError("run not found")
+        await require_project(run.project_id, token, tool_name="stop_paid_ads_assessment")
+        try:
+            stopped = await stop_paid_ads_assessment_service(
+                runtime=runtime(), run_id=parsed, clerk_user_id=token.subject
+            )
+        except (LookupError, ValueError, SideEffectConflictError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {"id": str(stopped.id), "status": stopped.status.value}
+
+    @server.tool()
+    async def stop_paid_ads_launch(run_id: str) -> dict[str, Any]:
+        """Stop a Google Ads launch before the campaign is switched on. Anything already
+        created stays paused in Google Ads."""
+        token = await caller()
+        parsed = _mcp_uuid(run_id, field="run_id")
+        run = await runtime().database.get_run(parsed)
+        if run is None:
+            raise ToolError("run not found")
+        await require_project(run.project_id, token, tool_name="stop_paid_ads_launch")
+        try:
+            stopped = await stop_paid_ads_launch_service(
+                runtime=runtime(), run_id=parsed, clerk_user_id=token.subject
+            )
+        except (LookupError, ValueError, SideEffectConflictError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {"id": str(stopped.id), "status": stopped.status.value}
+
+    @server.tool()
+    async def stop_paid_ads_monitor(run_id: str) -> dict[str, Any]:
+        """Stop today's Google Ads check. Changes already applied stand."""
+        token = await caller()
+        parsed = _mcp_uuid(run_id, field="run_id")
+        run = await runtime().database.get_run(parsed)
+        if run is None:
+            raise ToolError("run not found")
+        await require_project(run.project_id, token, tool_name="stop_paid_ads_monitor")
+        try:
+            stopped = await stop_paid_ads_monitor_service(
+                runtime=runtime(), run_id=parsed, clerk_user_id=token.subject
+            )
+        except (LookupError, ValueError, SideEffectConflictError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {"id": str(stopped.id), "status": stopped.status.value}
+
+    @server.tool()
+    async def list_paid_ads_proposals(project_id: str) -> list[dict[str, Any]]:
+        """Budget and bidding changes the Google Ads monitor proposed; pending ones await
+        the founder. Read the proposal file in Files before relaying it."""
+        token = await caller()
+        parsed = _mcp_uuid(project_id, field="project_id")
+        await require_project(parsed, token, tool_name="list_paid_ads_proposals")
+        rows = await list_paid_ads_proposals_service(
+            runtime=runtime(), project_id=parsed, clerk_user_id=token.subject
+        )
+        return [_mcp_proposal_view(row) for row in rows]
+
+    @server.tool()
+    async def approve_paid_ads_proposal(proposal_id: str) -> dict[str, Any]:
+        """Apply one proposed Google Ads change exactly as written, once the founder said yes."""
+        token = await caller()
+        parsed = _mcp_uuid(proposal_id, field="proposal_id")
+        proposal = await runtime().database.get_paid_ads_proposal(parsed)
+        if proposal is None:
+            raise ToolError("proposal not found")
+        await require_project(proposal["project_id"], token, tool_name="approve_paid_ads_proposal")
+        try:
+            row = await approve_paid_ads_proposal_service(
+                runtime=runtime(), proposal_id=parsed, clerk_user_id=token.subject
+            )
+        except (LookupError, RuntimeError, ValueError, SideEffectConflictError) as exc:
+            raise ToolError(str(exc)) from exc
+        return _mcp_proposal_view(row)
+
+    @server.tool()
+    async def discard_paid_ads_proposal(proposal_id: str) -> dict[str, Any]:
+        """Set one proposed Google Ads change aside. Nothing changes in Google Ads."""
+        token = await caller()
+        parsed = _mcp_uuid(proposal_id, field="proposal_id")
+        proposal = await runtime().database.get_paid_ads_proposal(parsed)
+        if proposal is None:
+            raise ToolError("proposal not found")
+        await require_project(proposal["project_id"], token, tool_name="discard_paid_ads_proposal")
+        try:
+            row = await discard_paid_ads_proposal_service(
+                runtime=runtime(), proposal_id=parsed, clerk_user_id=token.subject
+            )
+        except (LookupError, RuntimeError, ValueError, SideEffectConflictError) as exc:
+            raise ToolError(str(exc)) from exc
+        return _mcp_proposal_view(row)
+
+    @server.tool()
     async def stop_keyword_plan(run_id: str) -> dict[str, Any]:
         """Stop future keyword research. Accepted provider requests may still incur costs."""
         token = await caller()
@@ -2508,12 +2750,7 @@ def create_mcp_app(
         )
         workflows = await runtime().database.list_workflows(project_id=parsed_project_id)
         workflow = _mcp_workflow(workflows, workflow_id.strip())
-        supplied_inputs = dict(inputs or {})
-        supplied_project_id = supplied_inputs.pop("project_id", None)
-        if supplied_project_id is not None and str(supplied_project_id) != str(parsed_project_id):
-            raise ToolError(
-                "inputs.project_id conflicts with the project_id bound to this tool call"
-            )
+        supplied_inputs = _mcp_bound_inputs(inputs, parsed_project_id)
         task_fields = {"instruction": instruction, "title": title}
         if workflow.executor != PROJECT_TASK_WORKFLOW_NAME and any(
             value is not None for value in task_fields.values()
@@ -2547,13 +2784,23 @@ def create_mcp_app(
         except PrerequisiteError as exc:
             # The JSON diagnostic names the upstream workflow and a replayable suggested call.
             raise ToolError(json.dumps(exc.diagnostic())) from exc
+        except WorkflowInputError as exc:
+            if workflow.key == "brand.capture" and workflow.project_id is None:
+                raise ToolError(
+                    json.dumps(
+                        {
+                            "error": str(exc),
+                            "preparation": brand_capture_preparation(parsed_project_id),
+                        }
+                    )
+                ) from exc
+            raise ToolError(str(exc)) from exc
         except (
             SideEffectConflictError,
             BillingError,
             IntegrationError,
             TemporalStartError,
             WorkflowExecutorUnavailableError,
-            WorkflowInputError,
         ) as exc:
             raise ToolError(str(exc)) from exc
         meanwhile: dict[str, Any] = {}
@@ -2776,7 +3023,7 @@ def create_mcp_app(
 
     @server.tool()
     async def get_workflow_review(run_id: str) -> dict[str, Any]:
-        """Read the current article review and exact-version token. Read opens clean copy.
+        """Read the current review and exact-version token, including proposed document pairs.
 
         Collect feedback in one pass; do not ask again if the user already stated changes.
         Attach only relevant, authorized project files. Requesting changes does not approve,
@@ -2858,6 +3105,10 @@ def create_mcp_app(
         default branch now, none keeps it in Tin; `remember` makes it the program's default.
         Without `delivery` the program's setting applies. Tell the founder the result's
         `relay` in your words.
+
+        For reviewed project documents, first get_workflow_review, read both proposed files,
+        and supply its review_token. Approval applies both declared destinations atomically;
+        delivery and writing-style feedback do not apply to these pairs.
         """
         token = await caller()
         clerk_user_id = token.subject
@@ -2887,7 +3138,12 @@ def create_mcp_app(
                 "none": "Approved. The draft stays in Tin under Files.",
             }[delivery]
 
-        if run.workflow_id in SUPPORTED_IDS:
+        from tin_lite.reviewed_documents import document_spec
+
+        if run.workflow_id in SUPPORTED_IDS or (
+            run.executor == "codex.procedure"
+            and await document_spec(runtime().database, runtime().storage, run)
+        ):
             approved = await WorkflowReviews(runtime=runtime(), settings=settings).approve(
                 run_id=run.id,
                 actor=clerk_user_id,
@@ -2989,13 +3245,13 @@ def create_mcp_app(
 
         Use it once the growth.onboarding run is waiting for you (get_run shows record_picks):
         systems are the plan's system ids the founder wants Tin to take on, mapped from their
-        answer to "what do you want Tin to take on?", or ["suggested"] for the set the plan marks
-        as Tin's suggestion. Pick whole systems: a workflow they name means its system, and Tin
-        builds every workflow in it. control: how much they keep. connections: one entry per
-        provider the plan lists that they decided on: connected once get_integration confirms, or
-        not_now with their reason in their words. Providers left out stay open. Reuse request_id
-        when retrying. Then call approve_workflow_run; it refuses until systems and a control
-        are recorded.
+        multiple-choice answer to "what do you want Tin to take on?", or ["suggested"] for the set
+        the plan marks as Tin's suggestion. Pick whole systems: a workflow they name means its
+        system, and Tin builds every workflow in it. control: how much they keep. connections: one
+        entry per provider the plan lists that they decided on: connected once get_integration
+        confirms, or not_now with their reason in their words. Providers left out stay open. Reuse
+        request_id when retrying. Then call approve_workflow_run; it refuses until systems and a
+        control are recorded.
         """
         token = await caller()
         clerk_user_id = token.subject
@@ -3115,8 +3371,11 @@ def create_mcp_app(
             ),
         ] = None,
         workflow_id: Annotated[
-            UUID | None,
-            Field(description="Workflow UUID returned by get_started or list_workflows."),
+            str | None,
+            Field(
+                description="Workflow UUID returned by get_started or list_workflows. "
+                "A workflow key is also accepted."
+            ),
         ] = None,
     ) -> dict[str, Any]:
         """Inspect a workflow by workflow_id or unambiguous workflow_key.
@@ -3135,12 +3394,13 @@ def create_mcp_app(
         parsed_project_id = project_id
         if parsed_project_id is not None:
             await require_project(parsed_project_id, token, tool_name="get_workflow")
-        workflow_uuid = workflow_id
-        if workflow_key is not None:
-            try:
-                workflow_uuid = UUID(workflow_key)
-            except ValueError:
-                pass
+        parameter = "workflow_key" if workflow_key is not None else "workflow_id"
+        identifier = str(workflow_key if workflow_key is not None else workflow_id).strip()
+        workflow_uuid: UUID | None = None
+        try:
+            workflow_uuid = UUID(identifier)
+        except ValueError:
+            pass
         if workflow_uuid is not None:
             workflow = await runtime().database.get_workflow(workflow_uuid)
             if workflow is None:
@@ -3154,14 +3414,15 @@ def create_mcp_app(
             elif workflow.project_id not in (None, parsed_project_id):
                 raise ToolError("workflow not found")
         elif parsed_project_id is None:
-            workflow = await runtime().database.get_registry_workflow(workflow_key)
+            workflow = await runtime().database.get_registry_workflow(identifier)
             if workflow is None:
                 raise ToolError(
-                    "workflow not found; supply project_id to inspect project-specific keys"
+                    f"workflow not found for {parameter} {identifier!r}; "
+                    "supply project_id to inspect project-specific keys"
                 )
         else:
             workflows = await runtime().database.list_workflows(project_id=parsed_project_id)
-            workflow = _mcp_workflow(workflows, workflow_key)
+            workflow = _mcp_workflow(workflows, identifier, parameter=parameter)
         readiness = (
             await project_readiness(
                 database=runtime().database,
@@ -3234,6 +3495,13 @@ def create_mcp_app(
             "version": workflow.version_label,
             "project_id": str(parsed_project_id) if parsed_project_id is not None else None,
             **draft_preparation,
+            **(
+                {"preparation": brand_capture_preparation(parsed_project_id, include_guide=True)}
+                if parsed_project_id is not None
+                and workflow.key == "brand.capture"
+                and workflow.project_id is None
+                else {}
+            ),
             **(
                 {"preparation": style_capture_preparation(parsed_project_id, include_guide=True)}
                 if parsed_project_id is not None
@@ -3562,7 +3830,7 @@ def create_mcp_app(
         project_id: str,
         provider_key: str,
         capabilities: list[str] | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Create a short-lived project-bound provider authorization URL for the human.
 
         Open it in their browser yourself when your shell allows it (open_command), otherwise
@@ -3574,13 +3842,45 @@ def create_mcp_app(
         assert clerk_user_id is not None
         parsed_project_id = _mcp_uuid(project_id, field="project_id")
         await require_project(parsed_project_id, token, tool_name="start_integration_connection")
-        started = await runtime().integrations.start_connect(
-            project_id=parsed_project_id,
-            provider_key=provider_key,
-            clerk_user_id=clerk_user_id,
-            capabilities=capabilities,
-        )
+        try:
+            started = await runtime().integrations.start_connect(
+                project_id=parsed_project_id,
+                provider_key=provider_key,
+                clerk_user_id=clerk_user_id,
+                capabilities=capabilities,
+            )
+        except IntegrationError as exc:
+            raise ToolError(str(exc)) from exc
         project = await runtime().database.get_project(parsed_project_id)
+        if provider_key == "payments.stripe":
+            # A restricted key is entered only in Tin's page; the result is a setup link.
+            return {
+                "setup_url": started.authorization_url,
+                "authorization_url": started.authorization_url,
+                "open_command": _open_command(started.authorization_url),
+                **_founder_words(
+                    relay=(
+                        f"I am opening Stripe setup for "
+                        f"{project.name if project else 'your project'} in your browser. Use "
+                        "its link to create a read-only restricted key in Stripe, then paste "
+                        "the key on that page, never in this chat. Tell me when it says "
+                        "connected."
+                    )
+                ),
+            }
+        if provider_key == "analytics.posthog":
+            return {
+                "authorization_url": started.authorization_url,
+                "open_command": _open_command(started.authorization_url),
+                **_founder_words(
+                    relay=(
+                        f"I am opening PostHog in your browser for "
+                        f"{project.name if project else 'your project'}. Approve Tin's read "
+                        "access and pick the one PostHog project for this business. Tell me "
+                        "when Tin says connected."
+                    )
+                ),
+            }
         return {
             "authorization_url": started.authorization_url,
             "open_command": _open_command(started.authorization_url),
@@ -3600,14 +3900,23 @@ def create_mcp_app(
         """One link for several connections: a page listing only the integrations you name,
         each with its Connect button and picker, for the founder to work through in one visit.
 
-        providers are Tin integration keys (infra.github, analytics.gsc, workspace.google).
+        providers are Tin integration keys (infra.github, analytics.gsc, workspace.google,
+        ads.google, payments.stripe, analytics.posthog). Stripe keys are pasted on that page,
+        never in chat.
         Open the link for the founder (open_command) or paste it; confirm each with
         get_integration afterwards. Tell the founder the result's `relay` in your words.
         """
         token = await caller()
         parsed_project_id = _mcp_uuid(project_id, field="project_id")
         await require_project(parsed_project_id, token, tool_name="start_integration_connections")
-        known = {"infra.github", "analytics.gsc", "workspace.google"}
+        known = {
+            "infra.github",
+            "analytics.gsc",
+            "workspace.google",
+            "ads.google",
+            "payments.stripe",
+            "analytics.posthog",
+        }
         chosen = [key.strip() for key in providers if key.strip()]
         unknown = [key for key in chosen if key not in known]
         if not chosen or unknown:
@@ -3624,6 +3933,9 @@ def create_mcp_app(
             "infra.github": "GitHub",
             "analytics.gsc": "Google Search Console",
             "workspace.google": "Google Workspace",
+            "ads.google": "Google Ads",
+            "payments.stripe": "Stripe",
+            "analytics.posthog": "PostHog",
         }
         listed = ", ".join(names[key] for key in chosen)
         return {
@@ -3635,13 +3947,80 @@ def create_mcp_app(
                     f"I am opening one page where you connect {listed} for "
                     f"{project.name if project else 'your project'}. Each takes about a minute"
                     + ("; GitHub also asks which repository" if "infra.github" in chosen else "")
+                    + ("; PostHog asks which project" if "analytics.posthog" in chosen else "")
+                    + (
+                        "; for Stripe you paste a read-only restricted key there, never in chat"
+                        if "payments.stripe" in chosen
+                        else ""
+                    )
                     + ". Tell me when it says connected."
                 )
             ),
         }
 
     @server.tool()
-    async def disconnect_integration(project_id: str, provider_key: str) -> dict[str, bool]:
+    async def connect_google_ads(project_id: str, customer_id: str) -> dict[str, Any]:
+        """Link the founder's existing Google Ads account to Tin's manager account.
+
+        Ask the founder for the ten-digit customer id shown at the top right of Google Ads
+        (like 123-456-7890). Tin sends a manager request; the founder accepts it in Google
+        Ads under Admin, Access and security, Managers. Confirm afterwards with
+        refresh_google_ads_connection. Tell the founder the result's `relay` in your words.
+        """
+        token = await caller()
+        clerk_user_id = token.subject
+        assert clerk_user_id is not None
+        parsed_project_id = _mcp_uuid(project_id, field="project_id")
+        await require_project(parsed_project_id, token, tool_name="connect_google_ads")
+        try:
+            connection = await runtime().integrations.connect_google_ads(
+                project_id=parsed_project_id,
+                customer_id=customer_id,
+                clerk_user_id=clerk_user_id,
+            )
+        except IntegrationError as exc:
+            raise ToolError(str(exc)) from exc
+        link = connection.configuration.get("link_status")
+        return {
+            "provider_key": connection.provider_key,
+            "account": connection.external_account_label,
+            "link_status": link,
+            **_founder_words(
+                relay=(
+                    "Google Ads is linked to Tin's manager account."
+                    if link == "active"
+                    else "I sent Tin's manager request to your Google Ads account. In Google "
+                    "Ads open Admin, then Access and security, then Managers, and accept the "
+                    "request from Tin Computer. Tell me when it is accepted."
+                )
+            ),
+        }
+
+    @server.tool()
+    async def refresh_google_ads_connection(project_id: str) -> dict[str, Any]:
+        """Re-check the Google Ads manager link, then billing and conversion tracking."""
+        token = await caller()
+        parsed_project_id = _mcp_uuid(project_id, field="project_id")
+        await require_project(parsed_project_id, token, tool_name="refresh_google_ads_connection")
+        try:
+            connection = await runtime().integrations.refresh_google_ads(
+                project_id=parsed_project_id
+            )
+        except IntegrationError as exc:
+            raise ToolError(str(exc)) from exc
+        health = connection.configuration.get("health") or {}
+        return {
+            "provider_key": connection.provider_key,
+            "account": connection.external_account_label,
+            "link_status": connection.configuration.get("link_status"),
+            "account_status": health.get("account_status"),
+            "billing_approved": health.get("billing_approved"),
+            "conversion_actions_with_data": health.get("conversion_actions_with_data"),
+            "checked_at": health.get("checked_at"),
+        }
+
+    @server.tool()
+    async def disconnect_integration(project_id: str, provider_key: str) -> dict[str, Any]:
         """Disconnect one project-owned integration and revoke it where supported."""
         token = await caller()
         clerk_user_id = token.subject
@@ -3653,6 +4032,16 @@ def create_mcp_app(
         )
         if not disconnected:
             raise LookupError("integration not found")
+        if provider_key == "payments.stripe":
+            return {
+                "disconnected": True,
+                **_founder_words(
+                    relay=(
+                        "Tin deleted its copy of the Stripe key. Also delete the Tin restricted "
+                        "key in Stripe under Developers, API keys, so it stops working."
+                    )
+                ),
+            }
         return {"disconnected": True}
 
     host = urlsplit(settings.switchboard_public_url).hostname or "127.0.0.1"

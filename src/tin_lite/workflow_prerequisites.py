@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from tin_lite import brand_contract
 from tin_lite.domain import (
     ANSWER_PAGE_WORKFLOW_NAME,
     CODEX_PROCEDURE_EXECUTOR,
@@ -562,7 +563,10 @@ async def project_readiness(
     parsed = {item.id: workflow_prerequisites(item) for item in workflows}
     catalog = {item.key: item for item in workflows}
     all_items = [p for items in parsed.values() for p in items]
-    if not all_items:
+    brand_captures = {
+        item.id for item in workflows if item.key == brand_contract.KEY and item.project_id is None
+    }
+    if not all_items and not brand_captures:
         return {item.id: _readiness(()) for item in workflows}
     run_keys = sorted({p.workflow for p in all_items if p.kind == "run" and p.workflow})
     succeeded: set[str] = set()
@@ -586,6 +590,8 @@ async def project_readiness(
     head: str | None = None
     section_texts: dict[str, str | None] = {}
     exact_paths = {p.path for p in all_items if p.kind == "artifact" and not p.placeholders()}
+    if brand_captures:
+        exact_paths.update((brand_contract.BRAND_PATH, brand_contract.DESIGN_PATH))
     if exact_paths and storage is not None and hasattr(storage, "list_canonical_files"):
         project = await database.get_project(project_id)
         if project is not None:
@@ -633,6 +639,15 @@ async def project_readiness(
                 )
             )
         readiness[item.id] = _readiness(tuple(results))
+        if (
+            item.id in brand_captures
+            and {
+                brand_contract.BRAND_PATH,
+                brand_contract.DESIGN_PATH,
+            }
+            <= paths
+        ):
+            readiness[item.id].update(state="blocked", note=brand_contract.CAPTURE_COMPLETE)
     return readiness
 
 

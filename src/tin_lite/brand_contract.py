@@ -8,6 +8,10 @@ from urllib.parse import urlsplit
 KEY = "brand.capture"
 VALIDATOR = "brand-design-capture.v1"
 BRAND_PATH, DESIGN_PATH = "brand/BRAND.md", "DESIGN.md"
+CAPTURE_COMPLETE = (
+    "Both brand/BRAND.md and DESIGN.md already exist. Use Files for small "
+    "changes; automatic refresh is not part of first capture."
+)
 BRAND_MAX, DESIGN_MAX = 48_000, 64_000
 # Proposals land in a dated folder; runs pinned before 1.1.0 keep their run-ID folder.
 PROPOSAL_TEMPLATES = {

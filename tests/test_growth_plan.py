@@ -45,6 +45,22 @@ def workflow(key, title, *, required=(), modes=("on_demand", "weekly"), integrat
     }
 
 
+def test_file_edit_blocker_is_not_offered_as_runnable():
+    state = tin_state()
+    row = next(w for w in state["workflows"] if w["key"] == "content.plan")
+    row.update(
+        runnable=False,
+        reason="Both guides exist. Use Files for small edits.",
+        unblock={"kind": "edit_project_files"},
+    )
+    systems, _ = plan.availability(state, True, True)
+    matches = [
+        w for system in systems.values() for w in system["workflows"] if w["key"] == row["key"]
+    ]
+    assert matches
+    assert all(w["state"] == row["reason"] and not w["includable"] for w in matches)
+
+
 def tin_state():
     return {
         "integrations": [

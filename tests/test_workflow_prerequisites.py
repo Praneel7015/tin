@@ -799,6 +799,10 @@ async def test_brand_capture_readiness_checks_active_documents(paths, expected, 
     assert readiness[workflow.id]["state"] == ("ready" if private else expected)
     if not private and expected == "blocked":
         assert "Use Files" in readiness[workflow.id]["note"]
+        assert (
+            _short_workflow_view(workflow, readiness[workflow.id])["blocked_because"]
+            == (readiness[workflow.id]["note"])
+        )
     assert storage.lists == (0 if private else 1)
     assert storage.reads == 0
     if private:

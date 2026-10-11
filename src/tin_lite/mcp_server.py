@@ -288,6 +288,8 @@ def _short_workflow_view(workflow: Any, readiness: dict[str, Any]) -> dict[str, 
             view["blocked_because"] = _one_line(
                 blocking.get("how_to_satisfy") or blocking.get("reason")
             )
+        elif readiness.get("note"):
+            view["blocked_because"] = readiness["note"]
     return view
 
 

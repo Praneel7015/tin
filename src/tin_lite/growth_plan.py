@@ -419,6 +419,8 @@ def availability(tin_state, has_site, code_on_github, hard_nos=(), market_suppor
                 state = "exists, but ruled out by the founder's hard no"
             elif kind == "tin_operator":
                 state = "not yet"
+            elif kind == "edit_project_files":
+                state = w["reason"]
             elif w.get("kind") == "task":
                 state = "one-off chat task, never a role"
             elif "market" in w.get("required_inputs", []) and not market_supported:

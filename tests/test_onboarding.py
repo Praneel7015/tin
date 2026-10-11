@@ -74,6 +74,20 @@ def _rows(state):
     return {row["key"]: row for row in state["workflows"]}
 
 
+def test_existing_files_blocker_does_not_suggest_prior_runs() -> None:
+    workflow = next(w for w in WORKFLOWS if w.key == "content.plan")
+    reason = "Both guides already exist. Use Files for small changes."
+    state = tin_state(
+        settings=_Settings(),
+        workflows=[workflow],
+        connections=[],
+        readiness={workflow.id: {"state": "blocked", "unmet": [], "note": reason}},
+    )
+    row = _rows(state)[workflow.key]
+    assert row["runnable"] is False and row["reason"] == reason
+    assert row["unblock"] == {"kind": "edit_project_files", "detail": reason}
+
+
 def test_tin_state_mirrors_the_start_gates_when_nothing_is_configured() -> None:
     state = tin_state(settings=_Settings(), workflows=WORKFLOWS, connections=[])
     rows = _rows(state)

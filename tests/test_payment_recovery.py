@@ -1333,3 +1333,39 @@ def test_only_the_newest_invoice_counts_as_already_emailed():
     old = {"to": "a@b.dev", "state": "sent", "invoice": "in_old", "at": NOW - 60 * DAY}
     assert pr.held_back(person, [old], NOW) is None
     assert pr.throwaway("x@mail.yopmail.com") and not pr.throwaway("x@yopmail.company")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"amount_remaining": 0},
+        {"collection_method": "send_invoice"},
+        {"attempt_count": 0},
+    ],
+)
+async def test_recheck_requires_still_eligible_invoice(monkeypatch, change):
+    s = setup(monkeypatch, answer=model_answer())
+    await run_to_review(s)
+    await s.activities.record_approval(s.run_id)
+    for invoice in s.integrations.stripe.fake.objects["invoices"]:
+        if invoice["id"] == "in_A":
+            invoice.update(change)
+    await s.activities.apply(s.run_id)
+    await s.activities.apply(s.run_id)
+    assert [m["recipient_email"] for m in s.integrations.sent] == ["sam@samlee.io"]
+    assert await s.activities._result(s.run_id, "applied")
+
+
+async def test_partial_payment_still_gets_one_approved_email(monkeypatch):
+    s = setup(monkeypatch, answer=model_answer())
+    await run_to_review(s)
+    await s.activities.record_approval(s.run_id)
+    for invoice in s.integrations.stripe.fake.objects["invoices"]:
+        if invoice["id"] == "in_A":
+            invoice.update(amount_remaining=100, amount_paid=2800)
+    await s.activities.apply(s.run_id)
+    await s.activities.apply(s.run_id)
+    assert [m["recipient_email"] for m in s.integrations.sent] == [
+        "alex@rivera.dev",
+        "sam@samlee.io",
+    ]

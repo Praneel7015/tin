@@ -168,7 +168,7 @@ class PaidAdsActivities:
 
                     # Raw SDK/provider errors, headers and credentials never enter evidence.
                     result = (
-                        {"status": "unavailable", "reason": "spending_limit"}
+                        {"status": "unavailable", "reason": exc.code}
                         if isinstance(exc, BillingError)
                         else {"status": "unknown", "reason": "provider_result_unavailable"}
                     )
@@ -224,9 +224,21 @@ class PaidAdsActivities:
             needs="model",
         )
         if result["status"] != "completed":
-            await self._save(run_id, "failure", {"code": "model_unavailable", "stage": step})
+            reason = result.get("reason")
+            if reason in {"spending_limit", "run_limit", "project_limit"}:
+                code = "spending_limit"
+            elif result["status"] == "unavailable":
+                code = "billing_refused"
+            else:
+                code = "model_unavailable"
+            await self._save(run_id, "failure", {"code": code, "stage": step, "reason": reason})
+            message = {
+                "spending_limit": "The spending limit stopped a model call",
+                "billing_refused": f"A billing check refused a model call ({reason})",
+                "model_unavailable": "A model result was unavailable",
+            }[code]
             raise ApplicationError(
-                "A model result was unavailable; no replacement was purchased.",
+                f"{message}; no replacement was purchased.",
                 non_retryable=True,
             )
         if result["value"].get("unusable"):
@@ -956,6 +968,15 @@ class PaidAdsActivities:
             return
         failure = await self._result(run_id, "failure") or {}
         message = {
+            "billing_refused": (
+                "The paid ads assessment stopped because a billing check refused a model call "
+                f"({failure.get('reason')}). Saved research was retained; "
+                "no replacement call was purchased."
+            ),
+            "spending_limit": (
+                "The paid ads assessment stopped because a model call reached the spending limit. "
+                "Saved research was retained; no replacement call was purchased."
+            ),
             "validation": (
                 "The paid ads assessment stopped because a model result failed validation. "
                 "Nothing was published; saved research was retained."

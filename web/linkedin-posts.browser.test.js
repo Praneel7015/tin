@@ -120,3 +120,23 @@ test("LinkedIn reader shows what a drafting run couldn't support, with or withou
     assert.equal(await page.locator('[data-x-action="preview"]').count(), 0);
   } finally {await browser.close();}
 });
+
+test("an image upload keeps the extension of its type, whatever the file is called", async () => {
+  const browser = await chromium.launch({headless: true});
+  try {
+    const page = await browser.newPage();
+    await openReader(page, {...initial, posts: [{...initial.posts[0], target: "urn:li:person:AbC123"}]});
+    await page.getByRole("button", {name: "Edit post", exact: true}).click();
+    const png = Buffer.from([137, 80, 78, 71]);
+    // A name longer than the stored name used to lose its ".png" and be refused.
+    await page.locator('[data-x-upload="0"]').setInputFiles({name: `${"launch hero image final ".repeat(5)}v3 (1).png`, mimeType: "image/png", buffer: png});
+    await page.getByText(/Media uploaded to Files/).waitFor();
+    await page.locator('[data-x-upload="0"]').setInputFiles({name: "photo.jpg", mimeType: "image/png", buffer: png});
+    await page.getByText(/Media uploaded to Files/).waitFor();
+    const paths = await page.evaluate(() => requests.filter(item => item.type).map(item => new URL(item.path, location.href).searchParams.get("path")));
+    assert.equal(paths.length, 2);
+    assert.match(paths[0], /^social\/linkedin\/media\/run-one\/[0-9a-f-]{36}-launch-hero-image-final-.{0,60}\.png$/);
+    assert.ok(paths[0].split("/").at(-1).length <= 37 + 80 + 4);
+    assert.match(paths[1], /-photo\.png$/);
+  } finally {await browser.close();}
+});

@@ -645,6 +645,7 @@ def test_reviewed_public_catalog_coverage_and_explicit_exclusions():
         "social.x_draft",
         "social.x_style",
         "social.x_publish",
+        "social.linkedin_publish",
         "project.task",
         "growth.onboarding",
         "growth.onboarding_plan",

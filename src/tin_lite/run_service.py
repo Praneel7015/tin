@@ -141,6 +141,7 @@ async def start_workflow_run(
     _system_step: bool = False,
     _approval_delivery: bool = False,
     _x_publication: bool = False,
+    _linkedin_publication: bool = False,
     _x_feedback: bool = False,
 ) -> WorkflowRun:
     implementation = registered_workflow_implementations().get(workflow.executor)
@@ -274,6 +275,28 @@ async def start_workflow_run(
             raise WorkflowInputError("Preview the X post and explicitly confirm publication first.")
         try:
             await approved_payload(
+                runtime.database, approval_id, project_id, started_by_clerk_user_id
+            )
+        except ValueError as exc:
+            raise WorkflowInputError(public_error_text(exc, INPUT_FALLBACK)) from None
+        if not await runtime.database.has_project_access(
+            project_id=project_id, clerk_user_id=started_by_clerk_user_id
+        ):
+            raise LookupError("project not found")
+    if workflow.executor == "social.linkedin_publish":
+        from tin_lite.linkedin_posts import approved_payload as linkedin_approved_payload
+
+        approval_id = normalized_inputs["approval_id"]
+        if (
+            not _linkedin_publication
+            or start_idempotency_key != f"linkedin-publish:{approval_id}"
+            or project_workflow_id
+        ):
+            raise WorkflowInputError(
+                "Preview the LinkedIn post and explicitly confirm publication first."
+            )
+        try:
+            await linkedin_approved_payload(
                 runtime.database, approval_id, project_id, started_by_clerk_user_id
             )
         except ValueError as exc:
@@ -762,7 +785,11 @@ async def start_workflow_run(
         )
     )
     temporal_options = {}
-    durable_dispatch = paid or workflow.executor in {"social.x_publish", "social.x_revise"}
+    durable_dispatch = paid or workflow.executor in {
+        "social.x_publish",
+        "social.x_revise",
+        "social.linkedin_publish",
+    }
     if durable_dispatch:
         from temporalio.common import WorkflowIDReusePolicy
 

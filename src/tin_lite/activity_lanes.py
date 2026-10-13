@@ -47,6 +47,8 @@ TRUSTED_ACTIVITIES = frozenset(
         "x_style_failure",
         "x_publish_execute",
         "x_publish_failure",
+        "linkedin_publish_execute",
+        "linkedin_publish_failure",
         "ai_answers_measure",
         "apply_project_task_changes",
         "awesome_submit_apply",

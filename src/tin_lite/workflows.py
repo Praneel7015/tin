@@ -1695,6 +1695,28 @@ class XPublishWorkflow:
             raise
 
 
+@workflow.defn(name="social.linkedin_publish")
+class LinkedInPublishWorkflow:
+    @workflow.run
+    async def run(self, run_id: str) -> None:
+        try:
+            await workflow.execute_activity(
+                "linkedin_publish_execute",
+                run_id,
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except BaseException as exc:
+            await workflow.execute_activity(
+                "linkedin_publish_failure",
+                failure_input(run_id, exc),
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            raise
+
+
 @workflow.defn(name="growth.onboarding_plan")
 class GrowthOnboardingPlanWorkflow:
     """Read, write, save. Only the run identifier enters history; activities hold every result."""
@@ -1828,6 +1850,7 @@ def registered_workflows() -> list[type]:
         XStyleWorkflow,
         XFeedbackWorkflow,
         XPublishWorkflow,
+        LinkedInPublishWorkflow,
         OrganicTrafficSystemWorkflow,
         GrowthOnboardingWorkflow,
         GrowthOnboardingPlanWorkflow,
@@ -1866,6 +1889,7 @@ def registered_workflow_implementations() -> dict[str, type]:
         "social.x_style": XStyleWorkflow,
         "social.x_revise": XFeedbackWorkflow,
         "social.x_publish": XPublishWorkflow,
+        "social.linkedin_publish": LinkedInPublishWorkflow,
         "organic.traffic_system": OrganicTrafficSystemWorkflow,
         "growth.onboarding": GrowthOnboardingWorkflow,
         "growth.onboarding_plan": GrowthOnboardingPlanWorkflow,

@@ -18,6 +18,7 @@ from tin_lite import (
     content_repository_delivery,
     growth_onboarding,
     growth_plan,
+    linkedin_posts,
     organic_system,
     paid_ads,
     paid_ads_launch,
@@ -1517,6 +1518,21 @@ BUILTIN_WORKFLOWS = (
         system=SOCIAL_SYSTEM,
         agent_only=True,
         input_schema=x_posts.INPUT_SCHEMA,
+    ),
+    BuiltinWorkflow(
+        id=linkedin_posts.WORKFLOW_ID,
+        key=linkedin_posts.KEY,
+        title="Publish an approved LinkedIn post",
+        description=(
+            "Publish the exact post and images confirmed through Tin's LinkedIn preview, "
+            "as the connected account chosen for it."
+        ),
+        executor=linkedin_posts.KEY,
+        version_label="1.0.0",
+        schedule_modes=("on_demand",),
+        system=LINKEDIN_SYSTEM,
+        agent_only=True,
+        input_schema=linkedin_posts.INPUT_SCHEMA,
     ),
     BuiltinWorkflow(
         id=UUID("00000000-0000-4000-8000-000000000028"),

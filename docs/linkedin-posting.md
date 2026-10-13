@@ -2,8 +2,8 @@
 
 Tin posts to LinkedIn through Zernio (zernio.com), on Tin's own Zernio account. Zernio
 holds LinkedIn's app approvals for member and organization posting, so Tin needs no
-LinkedIn app review. This page covers the connection. Publishing reuses X's preview and
-confirmation path and lands separately.
+LinkedIn app review. Publishing reuses X's path: an exact preview, an explicit
+confirmation and a receipt around every write.
 
 ## Connect
 
@@ -26,6 +26,68 @@ them. **Check again** reads the accounts again; a profile with no active account
 reconnecting. **Add accounts** runs the same connect, and Zernio refreshes accounts it
 already has.
 
+## Drafts
+
+A draft is an ordinary project file at `social/linkedin/drafts/<date>-<slug>.json`:
+
+```json
+{
+  "schema_version": "tin.social.linkedin_draft.v1",
+  "posts": [
+    {
+      "id": "p1",
+      "text": "The exact post",
+      "target": "urn:li:organization:108774412",
+      "readiness": "ready",
+      "support": [{"source_path": "notes/release.md", "excerpt": "What the post rests on"}],
+      "editor_notes": "Never published",
+      "attachments": [{"type": "image", "path": "social/linkedin/media/shot.png", "alt_text": ""}],
+      "missing_assets": []
+    }
+  ]
+}
+```
+
+It is X's shape with a per-post `target`, the LinkedIn URN of one connected account, and
+LinkedIn's limits: up to six posts, text within 3,000 characters counted in UTF-16 units as
+LinkedIn counts them, and up to 20 PNG or JPEG images within Tin's media checks. Video,
+documents and polls come later. An empty `target` posts as the only connected account, and
+is refused when there are several.
+
+Drafts open in the same reader as X's, which picks the platform by path: a file under
+`social/linkedin/` opens LinkedIn's. Its editor adds **Post as** with the connected
+accounts. Images uploaded there go to `social/linkedin/media/`.
+
+## Publish
+
+1. **Preview** (`POST /api/projects/{id}/linkedin/preview`, `preview_linkedin_post`) freezes
+   the exact text, each image's path, revision and SHA-256, and the connected account it
+   posts as. The token lasts 15 minutes.
+2. **Publish this exact post** (`…/linkedin/publish`, `publish_linkedin_post`) re-reads the
+   draft and refuses if anything changed. It records the approval
+   (`linkedin:approved:<approval>`), which names the member who confirmed, and starts
+   `social.linkedin_publish`. Only the run ID enters Temporal.
+3. The run uploads each approved image to Zernio's storage once (`linkedin:media:*`), reads
+   the profile's accounts again, and sends the post with `publishNow` under the receipt
+   `linkedin:post:<approval>`, written before dispatch.
+4. It waits for LinkedIn's answer, then writes `reports/linkedin/<run>.md` with the post's
+   link.
+
+The approval ID derives from the post's fingerprint, so confirming the same post twice
+starts one run. A run that ended without sending anything doesn't use the post up:
+confirming it again tries once more.
+
+**A lost answer.** Zernio returns the original post for a repeated `Idempotency-Key` within
+24 hours, and Tin's key derives from the approval. A post whose answer was lost is sent
+again with the same key for 23 hours; after that the run stops and asks the founder to check
+the page. A refusal from Zernio made nothing, so its receipt is dropped and the reason shown.
+A post LinkedIn rejected after Zernio accepted it, for example as duplicate content, fails
+the run with LinkedIn's category in Tin's words.
+
+MCP: `read_linkedin_drafts`, `save_linkedin_draft`, `preview_linkedin_post` and
+`publish_linkedin_post`. Each returns the browser editor's link for uploading images; MCP
+never takes image bytes.
+
 ## Boundaries
 
 - `TIN_LITE_ZERNIO_API_KEY` stays on the switchboard. It never reaches a sandbox, package,
@@ -39,6 +101,9 @@ already has.
   projects in `TIN_LITE_LINKEDIN_POSTING_PROJECTS`.
 - **Disconnect** removes the project's accounts and then its profile from Zernio, and so
   does deleting the project. A failure there is logged; the local disconnection stands.
+  Deleting a project also purges its `linkedin:*` receipts.
+- Zernio's upload URLs must be on its R2 storage host and the images it serves on
+  `media.zernio.com`; the key is never sent to the storage host.
 
 ## Staging
 
@@ -71,4 +136,5 @@ Before building, a connection on Tin's own company page confirmed:
 
 A member's own posts are not readable through Zernio, so reading the founder's own posts
 stays with the extension. Fixture tests use a synthetic Zernio
-(`tests/test_linkedin_posting.py`).
+(`tests/test_linkedin_posting.py`, `tests/test_linkedin_publish.py`), and
+`web/linkedin-posts.browser.test.js` covers the reader.

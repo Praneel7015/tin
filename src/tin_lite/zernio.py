@@ -20,6 +20,7 @@ import httpx
 from tin_lite.connection_records import read_bounded_json
 from tin_lite.integrations import (
     IntegrationAuthorizationError,
+    IntegrationDeliveryRefusedError,
     IntegrationDeliveryUnknownError,
     IntegrationNotConfiguredError,
     IntegrationRateLimitedError,
@@ -40,7 +41,32 @@ ID = re.compile(r"^[0-9a-f]{24}$")
 ORGANIZATION_URN = re.compile(r"^urn:li:organization:[0-9]{1,20}$")
 PERSON_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 CONNECT_HOSTS = {"www.linkedin.com", "linkedin.com", "zernio.com"}
+POST_HOSTS = {"www.linkedin.com", "linkedin.com"}
+# Presigned uploads go to Zernio's Cloudflare R2 bucket; posts name the media host's copy.
+UPLOAD_HOST_SUFFIX = ".r2.cloudflarestorage.com"
+MEDIA_HOST = "media.zernio.com"
+MEDIA_TIMEOUT_SECONDS = 60.0
+POST_STATUSES = {"draft", "scheduled", "publishing", "published", "partial", "failed", "cancelled"}
+ERROR_CATEGORIES = {
+    "auth_expired",
+    "user_content",
+    "user_abuse",
+    "account_issue",
+    "platform_rejected",
+    "platform_error",
+    "platform_rate_limit",
+    "quota_exhausted",
+    "system_error",
+    "unknown",
+}
 UNAVAILABLE = "LinkedIn posting is temporarily unavailable"
+REFUSED = (
+    "LinkedIn refused the post before publishing it, so nothing was posted. "
+    "Check its text and images, then preview it again."
+)
+DUPLICATE = (
+    "LinkedIn already has this exact post from the last 24 hours, so Tin did not send it again."
+)
 
 
 def ready(settings: Any) -> bool:
@@ -94,6 +120,45 @@ def linkedin_account(value: Any) -> dict[str, Any] | None:
         "kind": kind,
         "name": " ".join(name.split())[:100],
         "active": value.get("isActive") is True and value.get("enabled", True) is not False,
+    }
+
+
+def _https(url: Any, hosts: set[str] | None = None, *, suffix: str | None = None) -> bool:
+    if not isinstance(url, str) or len(url) > 4096:
+        return False
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    return parts.scheme == "https" and (
+        host in (hosts or set()) or (suffix is not None and host.endswith(suffix))
+    )
+
+
+def post_state(value: Any) -> dict[str, Any]:
+    """What Tin keeps of one Zernio post: its ID, status and the LinkedIn link once published."""
+
+    if not isinstance(value, dict):
+        raise IntegrationDeliveryUnknownError(UNAVAILABLE)
+    post_id = value.get("_id")
+    if not isinstance(post_id, str) or not ID.fullmatch(post_id):
+        # Zernio answered a write without naming the post; whether it exists is unknown.
+        raise IntegrationDeliveryUnknownError(UNAVAILABLE)
+    platforms = value.get("platforms")
+    entry = next(
+        (
+            item
+            for item in (platforms if isinstance(platforms, list) else [])
+            if isinstance(item, dict) and item.get("platform") == "linkedin"
+        ),
+        {},
+    )
+    status = value.get("status")
+    url = entry.get("platformPostUrl")
+    category = entry.get("errorCategory")
+    return {
+        "post_id": post_id,
+        "status": status if status in POST_STATUSES else "unknown",
+        "url": url if _https(url, POST_HOSTS) else None,
+        "error_category": category if category in ERROR_CATEGORIES else None,
     }
 
 
@@ -260,3 +325,86 @@ class Zernio:
             raise IntegrationAuthorizationError(
                 "Zernio kept the profile; disconnect its accounts first"
             )
+
+    async def upload_media(self, *, filename: str, media_type: str, content: bytes) -> str:
+        """Put approved bytes in Zernio's storage; returns the public URL a post names.
+
+        An upload publishes nothing, so repeating one after a lost answer leaves only an
+        unused file.
+        """
+
+        status, payload = await self._call(
+            "POST",
+            "/media/presign",
+            body={"filename": filename, "contentType": media_type, "size": len(content)},
+        )
+        values = payload if status == 200 and isinstance(payload, dict) else {}
+        upload, public = values.get("uploadUrl"), values.get("publicUrl")
+        if not _https(upload, suffix=UPLOAD_HOST_SUFFIX) or not _https(public, {MEDIA_HOST}):
+            raise IntegrationUpstreamError(UNAVAILABLE)
+        try:
+            response = await self._client.put(
+                upload,
+                content=content,
+                headers={"Content-Type": media_type, "User-Agent": USER_AGENT},
+                follow_redirects=False,
+                timeout=MEDIA_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            raise IntegrationUpstreamError(UNAVAILABLE) from None
+        if not 200 <= response.status_code < 300:
+            raise IntegrationUpstreamError(UNAVAILABLE)
+        return public
+
+    async def create_post(
+        self, *, account_id: str, text: str, media: list[dict[str, Any]], idempotency_key: str
+    ) -> dict[str, Any]:
+        """Publish now as one connected account.
+
+        Zernio returns the original post for a repeated `Idempotency-Key` within 24 hours, so a
+        caller holding a receipt resends the same key after a lost answer. A refusal raises
+        IntegrationDeliveryRefusedError: nothing was created.
+        """
+
+        body: dict[str, Any] = {
+            "content": text,
+            "platforms": [{"platform": "linkedin", "accountId": zernio_id(account_id)}],
+            "publishNow": True,
+        }
+        if media:
+            body["mediaItems"] = [
+                {
+                    "type": "image",
+                    "url": item["url"],
+                    **({"altText": item["alt_text"]} if item.get("alt_text") else {}),
+                }
+                for item in media
+            ]
+        status, payload = await self._call(
+            "POST", "/posts", body=body, idempotency_key=idempotency_key, write=True
+        )
+        if status in {200, 201, 207} and isinstance(payload, dict):
+            return post_state(payload.get("post"))
+        code = payload.get("code") if isinstance(payload, dict) else None
+        if status == 409 and code == "idempotency_conflict":
+            # The first request with this key is still being processed.
+            raise IntegrationDeliveryUnknownError(UNAVAILABLE)
+        if status == 404:
+            raise IntegrationAuthorizationError(
+                "The LinkedIn account is no longer connected. "
+                "Reconnect LinkedIn posting under Integrations, then preview the post again."
+            )
+        code = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,64}", code) else None
+        logger.warning("Zernio refused a LinkedIn post (status %s, code %s)", status, code)
+        raise IntegrationDeliveryRefusedError(
+            DUPLICATE if status == 409 else REFUSED, status=status
+        )
+
+    async def get_post(self, post_id: str) -> dict[str, Any]:
+        status, payload = await self._call("GET", f"/posts/{zernio_id(post_id)}")
+        if status != 200 or not isinstance(payload, dict):
+            raise IntegrationUpstreamError(UNAVAILABLE)
+        try:
+            return post_state(payload.get("post"))
+        except IntegrationDeliveryUnknownError:
+            raise IntegrationUpstreamError(UNAVAILABLE) from None

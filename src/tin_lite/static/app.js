@@ -1664,7 +1664,7 @@ function openRunArtifact(runId, returnView = state.view) {
   const run = state.runs.find((item) => item.id === runId);
   if (hasOutputConflict(run)) { openOutputComparison(runId, returnView); return; }
   const output = availableRunOutput(run);
-  if (output?.source === "canonical" && /^social\/x-drafts\/[^/]+\.json$/.test(output.path) && window.TinXPosts) {
+  if (output?.source === "canonical" && draftPlatform(output.path) && draftReader(output.path)) {
     openXComposer(output.path, runId);
     return;
   }
@@ -1675,21 +1675,34 @@ function openRunArtifact(runId, returnView = state.view) {
   openRunOutputFile(run, output, returnView);
 }
 
+// Exact-post drafts open in the post reader, which X and LinkedIn share; the path names which.
+function draftPlatform(path) {
+  if (/^social\/x-drafts\/[^/]+\.json$/.test(path || "")) return "X";
+  if (/^social\/linkedin\/drafts\/[^/]+\.json$/.test(path || "")) return "LinkedIn";
+  return null;
+}
+
+// A draft link from an agent may name any JSON path; only LinkedIn's folder opens LinkedIn's.
+function draftReader(path) {
+  return /^social\/linkedin\//.test(path || "") ? window.TinLinkedInPosts : window.TinXPosts;
+}
+
 function openXComposer(path, runId = "manual") {
-  if (!window.TinXPosts || !state.project || state.projectAccess !== "ready") return;
+  if (!draftReader(path) || !state.project || state.projectAccess !== "ready") return;
   goToRoute(`files?${new URLSearchParams({x_draft: path, x_run: runId, x_back: currentRoute()})}`);
 }
 
 function renderXComposer() {
   const path = xDraftPathFromLocation();
-  if (!path || !window.TinXPosts) return;
+  const reader = draftReader(path);
+  if (!path || !reader) return;
   const query = new URLSearchParams(window.location.search);
   const runId = query.get("x_run") || "manual";
   const candidate = query.get("x_back") || "files";
   const back = DASHBOARD_ROUTE.test(candidate) && !new URLSearchParams(candidate.split("?")[1]).has("x_draft") ? candidate : "files";
   const backView = back.split("?")[0];
   const context = currentProjectContext();
-  window.TinXPosts.open({
+  reader.open({
     host: main,
     actorId: state.signedInUserId,
     returnLabel: backView === "file" ? "files" : backView === "system" ? "my system" : backView,
@@ -1697,7 +1710,8 @@ function renderXComposer() {
     projectId: context.projectId,
     path,
     runId,
-    supportsAltText: state.integrations.find(item => item.key === "social.x")?.configuration?.supports_alt_text !== false,
+    // LinkedIn takes alt text on every image; X only where the connected app allows it.
+    supportsAltText: reader === window.TinLinkedInPosts || state.integrations.find(item => item.key === "social.x")?.configuration?.supports_alt_text !== false,
     api: async (apiPath, options) => {
       if (!isCurrentProjectContext(context)) throw new Error("Project changed. Reopen the draft in the current project.");
       const result = await api(apiPath, options);
@@ -1827,6 +1841,7 @@ function comparisonFileLabel(route) {
 }
 
 function render() {
+  // Both readers share one open reader, so either closes it.
   if (state.view !== "x-draft" || state.projectAccess !== "ready") window.TinXPosts?.close();
   state.comparePage?.destroy();
   state.comparePage = null;
@@ -6339,14 +6354,15 @@ function renderJsonProjectFile(route, file) {
       }
     },
   });
-  if (route.source === "canonical" && !route.compareRun && /^social\/x-drafts\/[^/]+\.json$/.test(route.path)) {
+  const drafts = route.source === "canonical" && !route.compareRun ? draftPlatform(route.path) : null;
+  if (drafts) {
     const actions = main.querySelector(".project-json-actions");
     if (actions) {
       const edit = document.createElement("button");
       edit.type = "button";
       edit.className = "project-file-action";
-      edit.textContent = "Edit X drafts";
-      edit.title = "Open the latest saved X draft";
+      edit.textContent = `Edit ${drafts} drafts`;
+      edit.title = `Open the latest saved ${drafts} draft`;
       edit.addEventListener("click", () => openXComposer(route.path));
       actions.prepend(edit);
     }

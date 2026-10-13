@@ -62,6 +62,8 @@ ADS_PROVIDER = "ads.google"
 STRIPE_PROVIDER = "payments.stripe"
 POSTHOG_PROVIDER = "analytics.posthog"
 X_PROVIDER = "social.x"
+# Posting to LinkedIn through Tin's own Zernio account (see linkedin_posting.py).
+LINKEDIN_POSTING_PROVIDER = "social.linkedin"
 # A founder's own GitHub account, through Tin's GitHub OAuth App (see github_account.py).
 GITHUB_USER_PROVIDER = "infra.github_user"
 PROVIDER_KEYS = frozenset(
@@ -74,6 +76,7 @@ PROVIDER_KEYS = frozenset(
         STRIPE_PROVIDER,
         POSTHOG_PROVIDER,
         X_PROVIDER,
+        LINKEDIN_POSTING_PROVIDER,
         GITHUB_USER_PROVIDER,
     }
 )
@@ -88,6 +91,7 @@ STRIPE_CAPABILITIES = (
 # Read-only PostHog capabilities for the one project the founder selects.
 POSTHOG_CAPABILITIES = ("query.read", "definitions.read", "insights.read")
 X_CAPABILITIES = ("x.posts.read", "x.posts.publish", "x.media.upload")
+LINKEDIN_POSTING_CAPABILITIES = ("linkedin.posts.publish", "linkedin.media.upload")
 ADS_CAPABILITIES = ("account.read", "campaigns.read", "campaigns.write")
 # Only what an approved list submission needs; nothing on the founder's own repositories.
 GITHUB_USER_CAPABILITIES = ("forks.write", "public_pull_requests.write", "public_issues.write")
@@ -490,6 +494,17 @@ def registered_integrations() -> tuple[IntegrationDefinition, ...]:
             unlocks=("X writing voice", "Approved X posts"),
         ),
         IntegrationDefinition(
+            key=LINKEDIN_POSTING_PROVIDER,
+            name="LinkedIn posting",
+            badge="in",
+            description=(
+                "Publish only the posts you preview and confirm, as yourself or a page you admin."
+            ),
+            access_label="Approved posts · as the accounts you pick",
+            capabilities=LINKEDIN_POSTING_CAPABILITIES,
+            unlocks=("Approved LinkedIn posts",),
+        ),
+        IntegrationDefinition(
             key=GITHUB_USER_PROVIDER,
             name="GitHub account",
             badge="GH",
@@ -695,6 +710,10 @@ class IntegrationService:
             from tin_lite.x_connection import oauth_ready
 
             return self._cipher is not None and oauth_ready(self._settings)
+        if provider_key == LINKEDIN_POSTING_PROVIDER:
+            from tin_lite.zernio import ready
+
+            return ready(self._settings)
         if provider_key == GITHUB_USER_PROVIDER:
             from tin_lite.github_account import oauth_ready as github_oauth_ready
 
@@ -747,20 +766,32 @@ class IntegrationService:
         return XConnection(self)
 
     @property
+    def linkedin_posting(self):
+        from tin_lite.linkedin_posting import LinkedInPosting
+
+        return LinkedInPosting(self)
+
+    @property
     def github_account(self):
         from tin_lite.github_account import GitHubAccounts
 
         return GitHubAccounts(self)
 
     def definitions(self, connections, *, project_id=None):
+        from tin_lite import linkedin_posting
         from tin_lite.connection_collection import enabled
         from tin_lite.project_connections import CUSTOM_KEY, custom_definition
 
+        gated = {
+            LINKEDIN_PROVIDER: enabled,
+            # Zernio bills Tin per connected account, so only listed projects see the card.
+            LINKEDIN_POSTING_PROVIDER: linkedin_posting.enabled,
+        }
         return (
             *(
                 d
                 for d in registered_integrations()
-                if d.key != LINKEDIN_PROVIDER or enabled(self._settings, project_id)
+                if d.key not in gated or gated[d.key](self._settings, project_id)
             ),
             *(
                 custom_definition(c.provider_key)
@@ -935,6 +966,10 @@ class IntegrationService:
                 raise IntegrationNotConfiguredError("Connection collection is unavailable.")
             return ConnectStart(
                 authorization_url=f"{dashboard_url(self._settings)}/connect?project={project_id}&providers={LINKEDIN_PROVIDER}"
+            )
+        if provider_key == LINKEDIN_POSTING_PROVIDER:
+            return await self.linkedin_posting.start(
+                project_id=project_id, clerk_user_id=clerk_user_id
             )
         if provider_key == STRIPE_PROVIDER:
             # A restricted key is pasted only in Tin's own page, never through chat or MCP.
@@ -4359,6 +4394,12 @@ class IntegrationService:
             )
             if connection is not None:
                 await self.x.revoke(connection)
+        if provider_key == LINKEDIN_POSTING_PROVIDER:
+            connection = await self._database.get_integration_connection(
+                project_id=project_id, provider_key=provider_key
+            )
+            if connection is not None:
+                await self.linkedin_posting.revoke(connection)
         if provider_key == GITHUB_USER_PROVIDER:
             connection = await self._database.get_integration_connection(
                 project_id=project_id, provider_key=provider_key

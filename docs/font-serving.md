@@ -25,7 +25,8 @@ alter with.md's bucket or its files. The versioned `v1/` prefix contains only:
 
 The WOFF2 assets and stylesheet carry one-year immutable cache headers; publish a
 new versioned prefix for changes. CORS allows GET/HEAD from `https://app.tin.computer`
-only, including the anonymous cross-origin stylesheet request. Never upload keys,
+and `https://app.staging.tin.computer` only, including the anonymous cross-origin
+stylesheet request; any other origin, such as a self-host, falls back to Geist. Never upload keys,
 font purchase receipts, environment files, or other private files to this bucket.
 Cloudflare documents [public bucket custom domains](https://developers.cloudflare.com/r2/buckets/public-buckets/)
 and [CORS configuration](https://developers.cloudflare.com/r2/buckets/cors/).

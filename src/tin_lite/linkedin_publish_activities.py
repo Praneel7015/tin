@@ -20,6 +20,7 @@ from temporalio.exceptions import ApplicationError
 
 from tin_lite.failures import failure_projection, payload_failure, split_failure_input
 from tin_lite.integrations import IntegrationAuthorizationError, IntegrationDeliveryRefusedError
+from tin_lite.linkedin_posting import may_post_as
 from tin_lite.linkedin_posts import KEY, approved_payload, post_key
 from tin_lite.organic_audit_publication import publish_artifacts
 
@@ -234,6 +235,12 @@ class LinkedInPublishActivities:
             ):
                 raise ApplicationError(
                     "LinkedIn posting was reconnected. Nothing was posted; preview it again.",
+                    non_retryable=True,
+                )
+            if not may_post_as(connection, payload["account"], actor):
+                raise ApplicationError(
+                    "Only the member who connected this LinkedIn profile can post as it. "
+                    "Nothing was posted.",
                     non_retryable=True,
                 )
             media = []

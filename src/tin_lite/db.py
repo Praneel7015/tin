@@ -982,6 +982,42 @@ class Database:
         )
         return _integration_auth_attempt(row) if row else None
 
+    async def other_member_integration_auth_attempt(
+        self, *, project_id: UUID, provider_key: str, clerk_user_id: str
+    ) -> bool:
+        """Whether another member has an unfinished connection attempt for this provider."""
+        return bool(
+            await self.pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM integration_auth_attempts
+                    WHERE project_id = $1 AND provider_key = $2
+                      AND clerk_user_id <> $3 AND used_at IS NULL
+                      AND expires_at > now()
+                )
+                """,
+                project_id,
+                provider_key,
+                clerk_user_id,
+            )
+        )
+
+    async def close_integration_auth_attempts(
+        self, *, project_id: UUID, provider_key: str, clerk_user_id: str
+    ) -> None:
+        """End a member's other unfinished attempts once one of them connected."""
+        await (borrowed_connection(self) or self.pool).execute(
+            """
+            UPDATE integration_auth_attempts
+            SET expires_at = LEAST(expires_at, now())
+            WHERE project_id = $1 AND provider_key = $2
+              AND clerk_user_id = $3 AND used_at IS NULL
+            """,
+            project_id,
+            provider_key,
+            clerk_user_id,
+        )
+
     @asynccontextmanager
     async def integration_refresh_lock(
         self, *, project_id: UUID, provider_key: str, conn: asyncpg.Connection | None = None

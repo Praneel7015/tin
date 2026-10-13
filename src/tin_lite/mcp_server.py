@@ -4568,8 +4568,9 @@ def create_mcp_app(
         """Read a bounded LinkedIn draft in project Files and get its browser editor link.
 
         The JSON keeps publishable text apart from facts, notes and images; each post's
-        `target` is the LinkedIn URN it posts as, one of `accounts` (the profile and pages
-        connected for this project). Reading or editing a draft never publishes.
+        `target` is the LinkedIn URN it posts as, one of `accounts`: the pages connected for
+        this project and your own LinkedIn profile if you connected it. No member posts as
+        another member's profile. Reading or editing a draft never publishes.
         """
         token = await caller()
         project = _mcp_uuid(project_id, field="project_id")

@@ -92,9 +92,33 @@ class FakeIntegrationDatabase:
             or attempt.provider_key != values["provider_key"]
             or attempt.clerk_user_id != values["clerk_user_id"]
             or (attempt.used_at is not None and not values.get("include_used"))
+            or attempt.expires_at <= datetime.now(UTC)
         ):
             return None
         return attempt
+
+    async def other_member_integration_auth_attempt(self, **values) -> bool:
+        return any(
+            attempt.project_id == values["project_id"]
+            and attempt.provider_key == values["provider_key"]
+            and attempt.clerk_user_id != values["clerk_user_id"]
+            and attempt.used_at is None
+            and attempt.expires_at > datetime.now(UTC)
+            for attempt in self.attempts.values()
+        )
+
+    async def close_integration_auth_attempts(self, **values) -> None:
+        now = datetime.now(UTC)
+        for key, attempt in list(self.attempts.items()):
+            if (
+                attempt.project_id == values["project_id"]
+                and attempt.provider_key == values["provider_key"]
+                and attempt.clerk_user_id == values["clerk_user_id"]
+                and attempt.used_at is None
+            ):
+                self.attempts[key] = IntegrationAuthAttempt(
+                    **{**attempt.__dict__, "expires_at": min(attempt.expires_at, now)}
+                )
 
     async def consume_integration_auth_attempt(self, **values) -> IntegrationAuthAttempt | None:
         attempt = await self.get_integration_auth_attempt(**values)

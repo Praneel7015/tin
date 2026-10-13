@@ -26,6 +26,22 @@ them. **Check again** reads the accounts again; a profile with no active account
 reconnecting. **Add accounts** runs the same connect, and Zernio refreshes accounts it
 already has.
 
+### Whose profile
+
+Any member may post as a connected page. A personal profile is its owner's alone: no member
+posts as another member's profile, over the dashboard or MCP.
+
+- Connect notes the accounts already in the project's profile before the sign-in. A personal
+  profile the sign-in adds belongs to the member who signed in. The connection keeps this as
+  `owners` (LinkedIn URN to Clerk user), and a later connect or **Check again** keeps it.
+- A profile that was already there and has no owner, such as one left by a cleanup that
+  didn't finish, belongs to nobody, and nobody posts as it.
+- Members connect one at a time: while one member's attempt is open, another's is refused.
+  Finishing a connect closes the member's other open attempts.
+- A connection from before `owners` was recorded gives its profiles to the member who
+  connected it.
+- A mapped staging profile has no sign-in, so the member who connects it owns its profiles.
+
 ## Drafts
 
 A draft is an ordinary project file at `social/linkedin/drafts/<date>-<slug>.json`:
@@ -52,7 +68,7 @@ It is X's shape with a per-post `target`, the LinkedIn URN of one connected acco
 LinkedIn's limits: up to six posts, text within 3,000 characters counted in UTF-16 units as
 LinkedIn counts them, and up to 20 PNG or JPEG images within Tin's media checks, in a file
 within 256 KB. Video, documents and polls come later. An empty `target` posts as the only
-connected account, and is refused when there are several.
+account the member may use, and is refused when there are several.
 
 A drafting run also keeps four optional fields with its posts; a hand-written draft needs
 none of them:
@@ -64,8 +80,8 @@ none of them:
   whatever the source file holds by then.
 
 Drafts open in the same reader as X's, which picks the platform by path: a file under
-`social/linkedin/` opens LinkedIn's. Its editor adds **Post as** with the connected
-accounts. Images uploaded there go to `social/linkedin/media/`.
+`social/linkedin/` opens LinkedIn's. Its editor adds **Post as** with the connected pages
+and the member's own profile. Images uploaded there go to `social/linkedin/media/`.
 
 ## Publish
 
@@ -77,7 +93,8 @@ accounts. Images uploaded there go to `social/linkedin/media/`.
    (`linkedin:approved:<approval>`), which names the member who confirmed, and starts
    `social.linkedin_publish`. Only the run ID enters Temporal.
 3. The run uploads each approved image to Zernio's storage once (`linkedin:media:*`), reads
-   the profile's accounts again, and sends the post with `publishNow` under the receipt
+   the profile's accounts again, checks that a personal profile still belongs to the member
+   who confirmed, and sends the post with `publishNow` under the receipt
    `linkedin:post:<approval>`, written before dispatch.
 4. It waits for LinkedIn's answer, then writes `reports/linkedin/<run>.md` with the post's
    link.

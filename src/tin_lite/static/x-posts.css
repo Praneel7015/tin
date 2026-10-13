@@ -66,6 +66,9 @@
 .x-posts-gallery figcaption { margin-top: 8px; overflow-wrap: anywhere; color: var(--ink-secondary); font: 400 12px/18px var(--sans); }
 .x-posts-notes p, .x-posts-notes li, .x-posts-support { color: var(--ink-secondary); font: 400 15px/24px var(--sans); }
 .x-posts-notes p { margin: 8px 0 16px; }
+/* Notes keep their own line breaks; a later heading opens its own section. */
+.x-posts-notes .x-posts-note-text { white-space: pre-line; }
+.x-posts-notes h2:not(:first-child) { margin-top: 24px; }
 .x-posts-notes ul { padding-left: 20px; }
 .x-posts-notes li { margin: 8px 0; }
 .x-posts-notes li button { margin-left: 8px; }

@@ -329,11 +329,12 @@
         const card = document.createElement("section");
         card.className = "x-posts-card";
         card.dataset.xCard = i;
-        card.innerHTML = `${state.notes ? `<aside class="x-posts-notes" aria-label="Draft notes"><h2>Draft notes</h2>${post.editor_notes ? `<p>${esc(post.editor_notes)}</p>` : ""}
+        card.innerHTML = `${state.notes ? `<aside class="x-posts-notes" aria-label="Draft notes"><h2>Draft notes</h2>${post.editor_notes ? `<p class="x-posts-note-text">${esc(post.editor_notes)}</p>` : ""}
               ${post.missing_assets?.length ? `<p>Resolve these before publishing:</p><ul>${post.missing_assets.map((item, j) => `<li>${esc(item)} <button class="x-posts-link" type="button" data-x-action="resolve-asset" data-post="${i}" data-asset="${j}">Mark resolved</button></li>`).join("")}</ul>` : ""}
               ${post.support?.length ? `<details class="x-posts-support"><summary>Supporting facts · ${post.support.length}</summary>${post.support.map(item => `<p><code>${esc(item.source_path)}</code><br>${esc(item.excerpt)}</p>`).join("")}</details>` : ""}
+              ${gapList(state)}
               ${post.readiness !== "ready" ? `<p>Check the evidence and media before marking this post ready.</p><button class="x-posts-button" type="button" data-x-action="ready" data-post="${i}" data-x-edge-disabled="${!!post.missing_assets?.length}" ${post.missing_assets?.length ? "disabled" : ""}>Mark ready</button>` : ""}
-              ${!post.editor_notes && !post.support?.length && !post.missing_assets?.length && post.readiness === "ready" ? "<p>No additional notes for this post.</p>" : ""}
+              ${!post.editor_notes && !post.support?.length && !post.missing_assets?.length && !state.draft.gaps?.length && post.readiness === "ready" ? "<p>No additional notes for this post.</p>" : ""}
             </aside>` : ""}
             ${editing ? `<section class="x-posts-editor" aria-label="Edit post">
               ${platform.targets ? targetField(state, post, i) : ""}
@@ -363,7 +364,11 @@
         if (!state.notes && (post.readiness !== "ready" || post.missing_assets?.length)) card.insertAdjacentHTML("beforeend", `<p class="x-posts-needs">${esc(statusLabel(post))}. <button type="button" class="x-posts-link" data-x-action="notes">Review draft notes</button></p>`);
         column.append(card);
         column.insertAdjacentHTML("beforeend", `<footer class="x-posts-footer"><button type="button" class="x-posts-link" data-x-action="reload">Reload saved draft</button><a href="/activity?project=${encodeURIComponent(state.context.projectId)}">View Activity →</a></footer>`);
-      } else article.remove();
+      } else {
+        article.remove();
+        // A drafting run with too little evidence keeps no posts, only what it needs.
+        if (state.draft) column.insertAdjacentHTML("beforeend", `<section class="x-posts-card"><aside class="x-posts-notes" aria-label="More context needed">${gapList(state)}<p>This run wrote no posts. Add what's missing, then draft again.</p></aside></section>`);
+      }
       bind(state);
       loadMedia(state);
       renderStatus(state);
@@ -470,6 +475,12 @@
             : `<img alt="${esc(node.dataset.alt || "Attachment preview")}" src="${esc(url)}" />`;
         } catch (_error) {if (node.isConnected) node.textContent = "Preview unavailable";}
       }
+    }
+
+    // What a drafting run couldn't support, for the whole batch; LinkedIn drafts carry it.
+    function gapList(state) {
+      const gaps = state.draft?.gaps || [];
+      return gaps.length ? `<h2>More context needed</h2><ul>${gaps.map(gap => `<li>${esc(gap.reason)}</li>`).join("")}</ul>` : "";
     }
 
     // LinkedIn posts name the connected account they post as; one account is chosen for you.

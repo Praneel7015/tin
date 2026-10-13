@@ -154,6 +154,39 @@ def test_drafts_keep_linkedin_limits():
         validate_draft(draft(attachments=[{"type": "image", "path": "media/a.gif"}]))
 
 
+def test_a_drafting_batch_keeps_its_gaps_author_and_sources():
+    source = {
+        "id": "s1",
+        "label": "Release note",
+        "author": "Ada",
+        "use": "publishable",
+        "excerpt": "We shipped it.",
+    }
+    batch = {
+        **draft(),
+        "author_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "gaps": [{"angle": "A customer result", "reason": "Add a publishable result."}],
+        "parent": {"path": DRAFT_PATH, "sha256": "a" * 64, "post_id": "p1"},
+        "sources": [source, {**source, "id": "t1", "use": "trend"}],
+    }
+    assert validate_draft(batch)["gaps"][0]["reason"] == "Add a publishable result."
+    # A run with too little evidence keeps no posts, only what it needs.
+    assert validate_draft({**batch, "posts": []})["posts"] == []
+    with pytest.raises(ValueError, match="note on what's missing"):
+        validate_draft({**batch, "posts": [], "gaps": []})
+    with pytest.raises(ValueError, match="own ID"):
+        validate_draft({**batch, "sources": [source, source]})
+    for field, value in (
+        ("author_id", "not-a-uuid"),
+        ("parent", {"path": DRAFT_PATH, "sha256": "short", "post_id": "p1"}),
+        ("sources", [{**source, "use": "secret"}]),
+    ):
+        with pytest.raises(ValueError):
+            validate_draft({**batch, field: value})
+    # A hand-written draft needs none of them.
+    assert validate_draft(draft())["gaps"] == []
+
+
 async def admission(db):
     f = await project_fixture(db)
     builtin = next(item for item in BUILTIN_WORKFLOWS if item.key == KEY)

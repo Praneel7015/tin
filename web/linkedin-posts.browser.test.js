@@ -104,3 +104,19 @@ test("LinkedIn reader uploads images to LinkedIn's media folder and refuses vide
     await page.getByText("Use up to 20 images per post.").waitFor();
   } finally {await browser.close();}
 });
+
+test("LinkedIn reader shows what a drafting run couldn't support, with or without posts", async () => {
+  const browser = await chromium.launch({headless: true});
+  try {
+    const page = await browser.newPage();
+    const gaps = [{angle: "A customer result", reason: "Add a publishable customer result."}];
+    await openReader(page, {...initial, gaps});
+    await page.locator('[data-x-action="notes"]').first().click();
+    await page.getByText("More context needed").waitFor();
+    assert.match(await page.locator(".x-posts-notes").innerText(), /Add a publishable customer result\./);
+    await openReader(page, {...initial, posts: [], gaps});
+    await page.getByText("This run wrote no posts.", {exact: false}).waitFor();
+    assert.match(await page.locator(".x-posts-notes").innerText(), /Add a publishable customer result\./);
+    assert.equal(await page.locator('[data-x-action="preview"]').count(), 0);
+  } finally {await browser.close();}
+});

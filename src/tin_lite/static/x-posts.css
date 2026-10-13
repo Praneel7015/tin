@@ -38,6 +38,7 @@
 .x-posts-editor > label, .x-posts-reader h2 { display: block; margin: 0 0 16px; font: 700 17px/22px var(--sans); }
 .x-posts-editor textarea { width: 100%; min-height: 116px; padding: 14px 16px; resize: vertical; border: 1px solid var(--paper-border-strong); border-radius: var(--radius-chip); background: var(--input-bg); color: var(--ink); font: 400 15px/24px var(--sans); }
 .x-posts-editor > small { display: block; margin-top: 8px; color: var(--ink-secondary); font: 400 12px/18px var(--sans); }
+.x-posts-editor > select { display: block; width: 100%; margin-bottom: 24px; }
 .x-posts-attachments { margin-top: 24px; }
 .x-posts-add { display: flex; flex-wrap: wrap; gap: 12px; }
 .x-posts-upload { position: relative; }
@@ -52,6 +53,8 @@
 .x-posts-media-preview { display: grid; place-items: center; min-width: 0; overflow: hidden; background: var(--paper-well); border-radius: var(--radius-chip); font: 400 13px/20px var(--sans); color: var(--ink-secondary); }
 .x-posts-media .x-posts-media-preview { width: 80px; height: 80px; }
 .x-posts-media-preview img, .x-posts-media-preview video { display: block; max-width: 100%; max-height: 380px; object-fit: contain; }
+/* The document reader spaces its own images; a preview fills its frame exactly. */
+.x-posts-reader .x-posts-media-preview img, .x-posts-reader .x-posts-media-preview video { margin: 0; }
 .x-posts-media-fields { overflow-wrap: anywhere; font: 400 12px/18px var(--mono); color: var(--ink-secondary); }
 .x-posts-media-fields label { display: grid; gap: 6px; margin-top: 8px; font: 400 13px/20px var(--sans); }
 .x-posts-media-fields input { width: 100%; min-width: 0; }

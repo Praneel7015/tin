@@ -26,7 +26,8 @@ from tin_lite.x_posts import save_effect as _save_effect
 KEY = "social.linkedin_publish"
 WORKFLOW_ID = UUID("a68b1bda-56bf-407e-8368-53ab1bdcb199")
 SCHEMA = "tin.social.linkedin_draft.v1"
-MAX_DRAFT_BYTES = 64_000
+# A drafting run keeps its source material with its posts, so drafts are larger than X's.
+MAX_DRAFT_BYTES = 256_000
 # LinkedIn's limits; the text is counted in UTF-16 units, as LinkedIn and browsers count it.
 MAX_TEXT = 3000
 MAX_IMAGES = 20
@@ -70,9 +71,36 @@ class Post(ClosedModel):
     missing_assets: list[str] = Field(max_length=10)
 
 
+class Gap(ClosedModel):
+    angle: str = Field(max_length=1000)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class Source(ClosedModel):
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,60}$")
+    label: str = Field(min_length=1, max_length=300)
+    author: str = Field(max_length=200)
+    use: Literal["publishable", "background", "reference", "trend"]
+    excerpt: str = Field(min_length=1, max_length=16000)
+
+
+class Parent(ClosedModel):
+    path: str = Field(min_length=1, max_length=512)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    post_id: str = Field(pattern=r"^p[1-6]$")
+
+
 class Draft(ClosedModel):
     schema_version: Literal["tin.social.linkedin_draft.v1"]
-    posts: list[Post] = Field(min_length=1, max_length=6)
+    posts: list[Post] = Field(max_length=6)
+    # What a drafting run keeps with its posts. Tin shows the gaps to the founder; the author,
+    # parent and sources let a later revision check against this batch's own material.
+    author_id: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    )
+    gaps: list[Gap] = Field(default_factory=list, max_length=12)
+    parent: Parent | None = None
+    sources: list[Source] = Field(default_factory=list, max_length=24)
 
 
 def validate_draft(value) -> dict:
@@ -81,6 +109,10 @@ def validate_draft(value) -> dict:
             raise ValueError("The LinkedIn draft is too large.")
         value = json.loads(value.decode("utf-8"))
     parsed = Draft.model_validate(value)
+    if not parsed.posts and not parsed.gaps:
+        raise ValueError("A LinkedIn draft needs a post, or a note on what's missing.")
+    if len({source.id for source in parsed.sources}) != len(parsed.sources):
+        raise ValueError("Each source in the draft needs its own ID.")
     ids = set()
     for post in parsed.posts:
         if post.id in ids or not post.text.strip() or text_length(post.text) > MAX_TEXT:

@@ -50,9 +50,18 @@ A draft is an ordinary project file at `social/linkedin/drafts/<date>-<slug>.jso
 
 It is X's shape with a per-post `target`, the LinkedIn URN of one connected account, and
 LinkedIn's limits: up to six posts, text within 3,000 characters counted in UTF-16 units as
-LinkedIn counts them, and up to 20 PNG or JPEG images within Tin's media checks. Video,
-documents and polls come later. An empty `target` posts as the only connected account, and
-is refused when there are several.
+LinkedIn counts them, and up to 20 PNG or JPEG images within Tin's media checks, in a file
+within 256 KB. Video, documents and polls come later. An empty `target` posts as the only
+connected account, and is refused when there are several.
+
+A drafting run also keeps four optional fields with its posts; a hand-written draft needs
+none of them:
+- `gaps`: what it couldn't support, each an `angle` and a `reason`. The reader shows them
+  under **Draft notes**, and on their own when a run wrote no posts.
+- `author_id`: whose voice the posts use.
+- `parent`: the batch and post a revision started from (`path`, `sha256`, `post_id`).
+- `sources`: the material the batch drew on, so a revision checks against it rather than
+  whatever the source file holds by then.
 
 Drafts open in the same reader as X's, which picks the platform by path: a file under
 `social/linkedin/` opens LinkedIn's. Its editor adds **Post as** with the connected

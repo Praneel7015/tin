@@ -115,7 +115,9 @@ jobs:
           TIN_LITE_GCP_PROJECT: ${{ vars.GCP_PROJECT }}
           TIN_LITE_STATIC_IP: ${{ vars.STAGING_STATIC_IP }}
         run: bash infra/deploy.sh 2>&1 | tee "${RUNNER_TEMP}/deploy.log"
+      # A summary never fails a deploy.
       - name: Summary
+        continue-on-error: true
         if: always()
         env:
           SHA: ${{ needs.release.outputs.sha }}
@@ -199,7 +201,9 @@ jobs:
           TIN_LITE_GCP_PROJECT: ${{ vars.GCP_PROJECT }}
           TIN_LITE_STATIC_IP: ${{ vars.PRODUCTION_STATIC_IP }}
         run: bash infra/deploy.sh 2>&1 | tee "${RUNNER_TEMP}/deploy.log"
+      # A summary never fails a deploy.
       - name: Summary
+        continue-on-error: true
         if: always() && steps.deploy.outcome != 'skipped'
         env:
           SHA: ${{ needs.release.outputs.sha }}

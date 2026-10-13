@@ -95,12 +95,14 @@ jobs:
           TIN_LITE_STATIC_IP: ${{ vars.STAGING_STATIC_IP }}
           TIN_LITE_RELEASE_SOURCE: ${{ github.workspace }}/release
         run: bash trusted/infra/deploy.sh 2>&1 | tee "${RUNNER_TEMP}/deploy.log"
+      # A summary never fails a deploy.
       - name: Summary
+        continue-on-error: true
         if: always()
         env:
           SHA: ${{ needs.resolve.outputs.sha }}
           OUTCOME: ${{ steps.deploy.outcome == 'success' && 'deployed' || 'failed' }}
-        run: bash trusted/.github/scripts/deploy-summary.sh staging "${SHA}" "${RUNNER_TEMP}/deploy.log" "${OUTCOME}"
+        run: test -f trusted/.github/scripts/deploy-summary.sh && bash trusted/.github/scripts/deploy-summary.sh staging "${SHA}" "${RUNNER_TEMP}/deploy.log" "${OUTCOME}"
 
   # The required "staging" check on main: this exact commit ran on staging. Testing it there,
   # and saying what was tested in the pull request, is up to its author. This job runs no

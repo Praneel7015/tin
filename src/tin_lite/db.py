@@ -6840,6 +6840,24 @@ class Database:
             )""",
             str(project_id),
         )
+        await conn.execute(
+            """WITH approvals AS (
+                SELECT split_part(execution_key, ':', 3) AS id FROM effect_receipts
+                WHERE operation='social.linkedin_publish'
+                  AND execution_key LIKE 'linkedin:approved:%'
+                  AND result->>'project_id'=$1::text
+            )
+            DELETE FROM effect_receipts
+            WHERE operation = 'social.linkedin_publish' AND (
+                (execution_key LIKE 'linkedin:preview:%' AND result->>'project_id'=$1::text)
+                OR execution_key LIKE 'linkedin:confirm:' || $1::text || ':%'
+                OR (split_part(execution_key, ':', 2) IN ('approved', 'media', 'post')
+                    AND split_part(execution_key, ':', 3) IN (SELECT id FROM approvals))
+                OR split_part(execution_key, ':', 1) IN (
+                    SELECT id::text FROM workflow_runs WHERE project_id=$1::uuid)
+            )""",
+            str(project_id),
+        )
         statements = (
             "DELETE FROM content_plan_revisions WHERE project_id = $1",
             "DELETE FROM content_plan_batches WHERE project_workflow_id IN "
@@ -7211,6 +7229,10 @@ class Database:
             "social.x_revise": ("x_revision_ready", "Your X revision is ready."),
             "social.x_draft": ("x_draft_ready", "Your X draft is ready."),
             "social.x_publish": ("x_post_published", "Your X post is published."),
+            "social.linkedin_publish": (
+                "linkedin_post_published",
+                "Your LinkedIn post is published.",
+            ),
             "growth.onboarding_plan": ("onboarding_plan_ready", "The growth plan is ready."),
             "content.plan": ("content_plan_ready", "Content plan is ready."),
             "organic.audit": ("organic_audit_ready", "Organic visibility audit is ready."),
@@ -7338,6 +7360,28 @@ class Database:
             artifact_ref=artifact_ref,
             summary=summary,
             workflow_key="social.x_publish",
+        )
+
+    async def complete_linkedin_publish_projection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        execution_key: str,
+        run_id: UUID,
+        canonical_commit_sha: str,
+        artifact_path: str,
+        artifact_ref: str,
+        summary: str,
+    ) -> None:
+        await self._complete_readonly_report_projection(
+            conn,
+            execution_key=execution_key,
+            run_id=run_id,
+            canonical_commit_sha=canonical_commit_sha,
+            artifact_path=artifact_path,
+            artifact_ref=artifact_ref,
+            summary=summary,
+            workflow_key="social.linkedin_publish",
         )
 
     async def retain_procedure_output(

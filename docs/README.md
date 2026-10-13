@@ -52,7 +52,7 @@ your own accounts before use; ordinary contributor tests need no production cred
 - [LinkedIn drafts](linkedin-drafts.md): private workflow grouping and ordinary draft
   documents for choosing posts before a separate publishing step.
 - [LinkedIn posting](linkedin-posting.md): the project's Zernio connection, the accounts Tin
-  may post as, and how staging reuses an existing profile.
+  may post as, exact-post drafts, preview and publishing, and how staging reuses a profile.
 - [X drafting and publishing](x-workflow.md): account connection, personal voice capture,
   project-file drafts and individually confirmed posts with images or video.
 - [Project files in code workflows](code-project-files.md): direct reads of current files,

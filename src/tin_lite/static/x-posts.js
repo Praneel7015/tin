@@ -13,6 +13,7 @@
       mediaLimit: "Up to 20 images, PNG or JPEG, 5 MB each.",
       tooMany: "Use up to 20 images per post.", fileTypes: "Choose a PNG or JPEG image."},
   };
+  const EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "video/mp4": ".mp4"};
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
   const copy = value => JSON.parse(JSON.stringify(value));
   const readUrl = (projectId, path, revision) => `/api/projects/${encodeURIComponent(projectId)}/files/raw?${new URLSearchParams({path, revision})}`;
@@ -221,7 +222,10 @@
       }
       state.busy = true; state.message = "Uploading to this project's Files…"; renderStatus(state);
       try {
-        const filename = file.name.split(/[\\/]/).at(-1).replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 100) || "attachment";
+        // The extension comes from the file's type: Tin stores a file only when the two match,
+        // and a long or mislabelled name must not lose or contradict it.
+        const base = file.name.split(/[\\/]/).at(-1).replace(/\.[^.]*$/, "").replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "attachment";
+        const filename = `${base}${EXTENSIONS[file.type]}`;
         const path = `${platform.mediaDir}/${state.context.runId}/${crypto.randomUUID()}-${filename}`;
         const query = new URLSearchParams({path, expected_revision: state.revision, request_id: crypto.randomUUID()});
         const response = await state.context.rawFetch(`/api/projects/${encodeURIComponent(state.context.projectId)}/files/upload?${query}`, {

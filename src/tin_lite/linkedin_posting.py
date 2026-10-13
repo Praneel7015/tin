@@ -6,6 +6,9 @@ is one Zernio account in the project's profile. Tin stores no LinkedIn credentia
 connection row keeps the profile and its accounts, and the server reads them from Zernio by the
 project's profile, never from the callback's query.
 
+A member's own LinkedIn profile is theirs alone: the connection records who signed in as each
+profile, and only that member may post as it. Every member may post as the connected pages.
+
 The posting card is shown only to the projects in `TIN_LITE_LINKEDIN_POSTING_PROJECTS`, because
 Zernio bills Tin for every connected account. `TIN_LITE_ZERNIO_PROFILE_MAP` points a project at
 an existing profile instead: staging uses it so it never creates profiles or accounts of its
@@ -38,6 +41,7 @@ CALLBACK = "linkedin"
 # Zernio keeps its OAuth state for 30 minutes; Tin's attempt lasts as long.
 ATTEMPT_MINUTES = 30
 EXPIRED = "LinkedIn connection attempt has expired; connect again"
+BUSY = "Another member is connecting LinkedIn for this project. Try again once they finish."
 
 
 def enabled(settings: Any, project_id: UUID | None) -> bool:
@@ -53,6 +57,25 @@ def mapped_profile(settings: Any, project_id: UUID) -> str | None:
 
 def _hash(state: str) -> str:
     return hashlib.sha256(state.encode()).hexdigest()
+
+
+def owners(connection: Any) -> dict[str, str]:
+    """The member who may post as each connected LinkedIn profile, by URN; pages have none."""
+
+    configuration = connection.configuration
+    saved = configuration.get("owners")
+    if isinstance(saved, dict):
+        return {urn: member for urn, member in saved.items() if isinstance(member, str)}
+    # A connection made before owners were recorded had one member's sign-in behind it.
+    return {
+        account["urn"]: connection.connected_by_clerk_user_id
+        for account in configuration.get("accounts") or []
+        if account.get("kind") == "personal"
+    }
+
+
+def may_post_as(connection: Any, account: dict[str, Any], member: str) -> bool:
+    return account["kind"] == "organization" or owners(connection).get(account["urn"]) == member
 
 
 def _label(accounts: list[dict[str, Any]]) -> str:
@@ -90,24 +113,37 @@ class LinkedInPosting:
     async def start(self, *, project_id: UUID, clerk_user_id: str) -> ConnectStart:
         self._require_enabled(project_id)
         profile_id, mapped = await self._profile(project_id)
+        # A profile this sign-in adds belongs to the member signing in, so note what the
+        # project's profile holds already. A mapped profile has no sign-in: the member who
+        # connects it is taken to own its profiles.
+        before = [] if mapped else [item["urn"] for item in await self.zernio.accounts(profile_id)]
         state = secrets.token_urlsafe(32)
-        await self.db.create_integration_auth_attempt(
-            token_hash=_hash(state),
-            project_id=project_id,
-            provider_key=LINKEDIN_POSTING_PROVIDER,
-            clerk_user_id=clerk_user_id,
-            pkce_verifier_ciphertext=None,
-            requested_capabilities=LINKEDIN_POSTING_CAPABILITIES,
-            expires_at=datetime.now(UTC) + timedelta(minutes=ATTEMPT_MINUTES),
-        )
         # Zernio keeps an existing query string and appends its own parameters to it.
         callback = f"{self.integrations._callback_url(CALLBACK)}?{urlencode({'state': state})}"
-        if mapped:
-            # The profile and its accounts already exist; attach them without a new sign-in.
-            return ConnectStart(authorization_url=callback)
-        return ConnectStart(
-            authorization_url=await self.zernio.connect_url(profile_id, redirect=callback)
-        )
+        # A mapped profile and its accounts already exist; attach them without a new sign-in.
+        # Otherwise ask Zernio first, so a failure leaves no attempt open to block others.
+        url = callback if mapped else await self.zernio.connect_url(profile_id, redirect=callback)
+        async with self.db.integration_refresh_lock(
+            project_id=project_id, provider_key=LINKEDIN_POSTING_PROVIDER
+        ):
+            # Two members signing in at once would leave it unclear whose profile is whose.
+            if await self.db.other_member_integration_auth_attempt(
+                project_id=project_id,
+                provider_key=LINKEDIN_POSTING_PROVIDER,
+                clerk_user_id=clerk_user_id,
+            ):
+                raise IntegrationAuthorizationError(BUSY)
+            await self.db.create_integration_auth_attempt(
+                token_hash=_hash(state),
+                project_id=project_id,
+                provider_key=LINKEDIN_POSTING_PROVIDER,
+                clerk_user_id=clerk_user_id,
+                pkce_verifier_ciphertext=None,
+                requested_capabilities=LINKEDIN_POSTING_CAPABILITIES,
+                expires_at=datetime.now(UTC) + timedelta(minutes=ATTEMPT_MINUTES),
+                context={"accounts_before": before},
+            )
+        return ConnectStart(authorization_url=url)
 
     async def _attempt(self, state: str, clerk_user_id: str, *, include_used: bool):
         if not isinstance(state, str) or not 1 <= len(state) <= 256:
@@ -152,6 +188,22 @@ class LinkedInPosting:
         async with self.db.integration_refresh_lock(
             project_id=attempt.project_id, provider_key=LINKEDIN_POSTING_PROVIDER
         ):
+            existing = await self.db.get_integration_connection(
+                project_id=attempt.project_id, provider_key=LINKEDIN_POSTING_PROVIDER
+            )
+            known = owners(existing) if existing is not None else {}
+            before = attempt.context.get("accounts_before")
+            if not isinstance(before, list):
+                # An attempt started before Tin noted the profile's accounts.
+                before = list(known)
+            owned = {}
+            for account in accounts:
+                if account["kind"] != "personal":
+                    continue
+                if account["urn"] in known:
+                    owned[account["urn"]] = known[account["urn"]]
+                elif account["urn"] not in before:
+                    owned[account["urn"]] = clerk_user_id
             connection = await self.db.upsert_integration_connection(
                 project_id=attempt.project_id,
                 provider_key=LINKEDIN_POSTING_PROVIDER,
@@ -161,12 +213,19 @@ class LinkedInPosting:
                     "zernio_profile_id": profile_id,
                     "profile_mapped": mapped,
                     "accounts": accounts,
+                    "owners": owned,
                     "granted_capabilities": list(LINKEDIN_POSTING_CAPABILITIES),
                     "auth_attempt": state_hash,
                 },
                 credential_ciphertext=None,
                 credential_key_version=None,
                 connected_by_clerk_user_id=clerk_user_id,
+            )
+            # An attempt left open in another tab would keep other members from connecting.
+            await self.db.close_integration_auth_attempts(
+                project_id=attempt.project_id,
+                provider_key=LINKEDIN_POSTING_PROVIDER,
+                clerk_user_id=clerk_user_id,
             )
         await self.integrations._record_activity(
             connection,
@@ -195,7 +254,13 @@ class LinkedInPosting:
             raise IntegrationAuthorizationError("Connect LinkedIn posting first")
         self._require_enabled(project_id)
         accounts = await self.zernio.accounts(connection.external_account_id)
-        configuration = {**connection.configuration, "accounts": accounts}
+        # A profile can join only through a sign-in, which records its owner; one that turns
+        # up otherwise has no owner, so no member posts as it.
+        configuration = {
+            **connection.configuration,
+            "accounts": accounts,
+            "owners": owners(connection),
+        }
         updated = await self.db.update_integration_configuration(
             project_id=project_id,
             provider_key=LINKEDIN_POSTING_PROVIDER,

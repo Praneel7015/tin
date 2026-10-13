@@ -2,7 +2,8 @@
 
 This mirrors X's (x_posts.py). Drafts are ordinary project files. A preview freezes the exact
 text, images and the connected account Tin posts as; confirming it records the approval and
-starts social.linkedin_publish. See docs/linkedin-posting.md.
+starts social.linkedin_publish. A member posts as a connected page or as their own profile,
+never as another member's. See docs/linkedin-posting.md.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from pydantic import Field
 
 from tin_lite.integrations import IntegrationError
+from tin_lite.linkedin_posting import may_post_as
 from tin_lite.project_files import safe_project_file_path
 from tin_lite.project_media import validate_media
 from tin_lite.x_posts import ClosedModel, Support, digest
@@ -156,11 +158,13 @@ def _account(account: dict) -> dict:
     return {key: account[key] for key in ("id", "urn", "kind", "name")}
 
 
-def _active_accounts(connection) -> list[dict]:
+def _active_accounts(connection, actor) -> list[dict]:
+    """The connected pages and the actor's own profile; never another member's profile."""
+
     return [
         _account(item)
         for item in connection.configuration.get("accounts") or []
-        if item.get("active")
+        if item.get("active") and may_post_as(connection, item, actor)
     ]
 
 
@@ -177,14 +181,14 @@ class LinkedInPosts:
             raise LookupError("project not found")
         return project
 
-    async def accounts(self, project_id) -> list[dict]:
-        """The accounts this project may post as; empty while LinkedIn posting isn't connected."""
+    async def accounts(self, project_id, actor) -> list[dict]:
+        """The accounts the actor may post as; empty while LinkedIn posting isn't connected."""
 
         try:
             connection = await self.runtime.integrations.linkedin_posting.connection(project_id)
         except IntegrationError:
             return []
-        return _active_accounts(connection)
+        return _active_accounts(connection, actor)
 
     async def read(self, project_id, actor, path):
         project = await self.project(project_id, actor)
@@ -205,7 +209,7 @@ class LinkedInPosts:
             "revision": revision,
             "draft": validate_draft(raw),
             "sha256": digest(raw),
-            "accounts": await self.accounts(project_id),
+            "accounts": await self.accounts(project_id, actor),
         }
 
     async def save(
@@ -242,14 +246,23 @@ class LinkedInPosts:
         if post["readiness"] != "ready" or post["missing_assets"]:
             raise ValueError("Resolve the post's missing facts or images before publishing.")
         connection = await self.runtime.integrations.linkedin_posting.connection(project_id)
-        accounts = _active_accounts(connection)
+        accounts = _active_accounts(connection, actor)
         target = post["target"] or (accounts[0]["urn"] if len(accounts) == 1 else "")
         account = next((item for item in accounts if item["urn"] == target), None)
         if account is None:
+            if not post["target"]:
+                raise ValueError(
+                    "Choose who posts: one of the LinkedIn accounts connected to this project."
+                )
+            connected = connection.configuration.get("accounts") or []
+            if any(item["urn"] == target and item.get("active") for item in connected):
+                # Connected, so it is a profile that belongs to another member.
+                raise ValueError(
+                    "Only the member who connected this LinkedIn profile can post as it. "
+                    "Choose a page or your own profile."
+                )
             raise ValueError(
-                "Choose who posts: one of the LinkedIn accounts connected to this project."
-                if not post["target"]
-                else "This post's LinkedIn account isn't connected to this project. "
+                "This post's LinkedIn account isn't connected to this project. "
                 "Choose a connected account."
             )
         project = await self.project(project_id, actor)

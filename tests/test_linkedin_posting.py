@@ -21,6 +21,7 @@ from tin_lite.integrations import (
     IntegrationUpstreamError,
     registered_integrations,
 )
+from tin_lite.linkedin_posting import may_post_as, owners
 from tin_lite.settings import Settings
 from tin_lite.zernio import Zernio, linkedin_account
 
@@ -30,9 +31,13 @@ OTHER_PROFILE = "6b" + "0" * 22
 PERSONAL = "6c" + "0" * 22
 PAGE = "6d" + "0" * 22
 FOREIGN = "6e" + "0" * 22
+TEAMMATE_PROFILE = "6f" + "0" * 22
+TEAMMATE = "user_Teammate789"
+FOUNDER_URN = "urn:li:person:AZperson1"
+TEAMMATE_URN = "urn:li:person:AZperson2"
 
 
-def account(account_id, kind, *, profile=PROFILE, active=True):
+def account(account_id, kind, *, profile=PROFILE, active=True, person="AZperson1"):
     metadata = (
         {
             "accountType": "organization",
@@ -40,7 +45,7 @@ def account(account_id, kind, *, profile=PROFILE, active=True):
             "userProfile": {"id": "AZperson1"},
         }
         if kind == "organization"
-        else {"accountType": "personal", "profileData": {"id": "AZperson1"}}
+        else {"accountType": "personal", "profileData": {"id": person}}
     )
     return {
         "_id": account_id,
@@ -115,14 +120,14 @@ def service(api=None, **overrides):
     return integrations, db, api
 
 
-async def start(integrations):
+async def start(integrations, member=USER_ID):
     return await integrations.start_connect(
-        project_id=PROJECT_ID, provider_key=LINKEDIN_POSTING_PROVIDER, clerk_user_id=USER_ID
+        project_id=PROJECT_ID, provider_key=LINKEDIN_POSTING_PROVIDER, clerk_user_id=member
     )
 
 
 def state_from(api) -> str:
-    connect = next(r for r in api.calls if r.url.path == "/api/v1/connect/linkedin")
+    connect = [r for r in api.calls if r.url.path == "/api/v1/connect/linkedin"][-1]
     redirect = urlsplit(connect.url.params["redirect_url"])
     assert f"{redirect.scheme}://{redirect.netloc}{redirect.path}" == (
         "https://lite.tin.test/integrations/callback/linkedin"
@@ -179,6 +184,83 @@ async def test_connect_makes_the_project_profile_and_records_its_accounts() -> N
         state=state_from(api), clerk_user_id=USER_ID
     )
     assert again.id == connection.id and len(api.calls) == reads
+
+
+@pytest.mark.asyncio
+async def test_each_profile_belongs_to_the_member_who_signed_in_as_it() -> None:
+    integrations, db, api = service()
+    posting = integrations.linkedin_posting
+    api.accounts = []
+    await start(integrations)
+    # The founder signs in as themselves and picks the page.
+    api.accounts = [account(PERSONAL, "personal"), account(PAGE, "organization")]
+    first = await posting.complete(state=state_from(api), clerk_user_id=USER_ID)
+    assert first.configuration["owners"] == {FOUNDER_URN: USER_ID}
+    # A teammate signs in later and adds their own profile.
+    await start(integrations, TEAMMATE)
+    api.accounts.append(account(TEAMMATE_PROFILE, "personal", person="AZperson2"))
+    second = await posting.complete(state=state_from(api), clerk_user_id=TEAMMATE)
+    assert owners(second) == {FOUNDER_URN: USER_ID, TEAMMATE_URN: TEAMMATE}
+    founder, page, teammate = (
+        {item["id"]: item for item in second.configuration["accounts"]}[key]
+        for key in (PERSONAL, PAGE, TEAMMATE_PROFILE)
+    )
+    assert may_post_as(second, founder, USER_ID) and not may_post_as(second, founder, TEAMMATE)
+    assert may_post_as(second, teammate, TEAMMATE) and not may_post_as(second, teammate, USER_ID)
+    assert may_post_as(second, page, USER_ID) and may_post_as(second, page, TEAMMATE)
+    # Check again keeps who owns what.
+    checked = await posting.check(PROJECT_ID)
+    assert owners(checked) == owners(second)
+
+
+@pytest.mark.asyncio
+async def test_a_profile_already_in_zernio_before_the_sign_in_has_no_owner() -> None:
+    integrations, _, api = service()
+    # Left from an earlier connection whose cleanup didn't finish.
+    api.accounts = [account(PERSONAL, "personal")]
+    await start(integrations)
+    api.accounts.append(account(PAGE, "organization"))
+    connection = await integrations.linkedin_posting.complete(
+        state=state_from(api), clerk_user_id=USER_ID
+    )
+    assert connection.configuration["owners"] == {}
+    founder = next(a for a in connection.configuration["accounts"] if a["id"] == PERSONAL)
+    assert not may_post_as(connection, founder, USER_ID)
+
+
+@pytest.mark.asyncio
+async def test_members_connect_one_at_a_time() -> None:
+    integrations, _, api = service()
+    await start(integrations)
+    await start(integrations)
+    state = state_from(api)
+    with pytest.raises(IntegrationAuthorizationError, match="Another member is connecting"):
+        await start(integrations, TEAMMATE)
+    await integrations.linkedin_posting.complete(state=state, clerk_user_id=USER_ID)
+    # Connecting closed the founder's other tab, so the teammate may start.
+    await start(integrations, TEAMMATE)
+
+
+@pytest.mark.asyncio
+async def test_a_connection_from_before_owners_belongs_to_whoever_connected_it() -> None:
+    integrations, db, _ = service()
+    accounts = [
+        linkedin_account(account(PERSONAL, "personal")),
+        linkedin_account(account(PAGE, "organization")),
+    ]
+    legacy = await db.upsert_integration_connection(
+        project_id=PROJECT_ID,
+        provider_key=LINKEDIN_POSTING_PROVIDER,
+        external_account_id=PROFILE,
+        external_account_label="Sam Founder, Example Co",
+        configuration={"zernio_profile_id": PROFILE, "accounts": accounts},
+        credential_ciphertext=None,
+        credential_key_version=None,
+        connected_by_clerk_user_id=USER_ID,
+    )
+    assert owners(legacy) == {FOUNDER_URN: USER_ID}
+    checked = await integrations.linkedin_posting.check(PROJECT_ID)
+    assert checked.configuration["owners"] == {FOUNDER_URN: USER_ID}
 
 
 @pytest.mark.asyncio
@@ -262,6 +344,8 @@ async def test_staging_uses_only_a_mapped_profile_and_never_changes_it() -> None
         state=parse_qs(callback.query)["state"][0], clerk_user_id=USER_ID
     )
     assert connection.configuration["profile_mapped"] is True
+    # A mapped profile has no sign-in: the member who connects it owns its profiles.
+    assert connection.configuration["owners"] == {FOUNDER_URN: USER_ID}
     assert ("POST", "/api/v1/profiles") not in api.paths()
     await integrations.disconnect(project_id=PROJECT_ID, provider_key=LINKEDIN_POSTING_PROVIDER)
     assert api.paths("DELETE") == []
@@ -352,12 +436,21 @@ async def test_real_postgres_accepts_the_posting_connection(publication_db):
         project_id=project.id, provider_key=LINKEDIN_POSTING_PROVIDER, clerk_user_id=USER_ID
     )
     state = parse_qs(urlsplit(started.authorization_url).query)["state"][0]
+    teammate = {
+        "project_id": project.id,
+        "provider_key": LINKEDIN_POSTING_PROVIDER,
+        "clerk_user_id": TEAMMATE,
+    }
+    with pytest.raises(IntegrationAuthorizationError, match="Another member"):
+        await integrations.start_connect(**teammate)
     connection = await integrations.linkedin_posting.complete(state=state, clerk_user_id=USER_ID)
     stored = await db.get_integration_connection(
         project_id=project.id, provider_key=LINKEDIN_POSTING_PROVIDER
     )
     assert stored.id == connection.id and stored.credential_ciphertext is None
     assert len(stored.configuration["accounts"]) == 2
+    assert stored.configuration["owners"] == {FOUNDER_URN: USER_ID}
+    await integrations.start_connect(**teammate)
     assert await integrations.disconnect(
         project_id=project.id, provider_key=LINKEDIN_POSTING_PROVIDER
     )

@@ -50,6 +50,7 @@ MEMBER = {
     "active": True,
 }
 POST_ID = "6ace4bff89842e36a6692bd0"
+TEAMMATE = "user_linkedinteammate"
 URL = "https://www.linkedin.com/feed/update/urn:li:share:7300000000000000000"
 DRAFT_PATH = "social/linkedin/drafts/2026-10-13-launch.json"
 
@@ -123,17 +124,23 @@ class SyntheticPosting:
         self.id = uuid4()
         self.connected = True
         self.accounts = list(accounts)
+        # Without recorded owners, the member who connected owns its profiles.
+        self.owners = None
         self.zernio = SyntheticZernio()
 
     async def connection(self, project_id):
         assert project_id is not None
         if not self.connected:
             raise IntegrationAuthorizationError("Connect or reconnect LinkedIn posting")
+        configuration = {"zernio_profile_id": PROFILE, "accounts": self.accounts}
+        if self.owners is not None:
+            configuration["owners"] = self.owners
         return SimpleNamespace(
             id=self.id,
             status="connected",
             external_account_id=PROFILE,
-            configuration={"zernio_profile_id": PROFILE, "accounts": self.accounts},
+            connected_by_clerk_user_id=ACTOR,
+            configuration=configuration,
         )
 
 
@@ -306,6 +313,45 @@ async def test_preview_posts_only_as_a_connected_account(publication_db, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_member_posts_as_a_page_or_their_own_profile_only(publication_db, monkeypatch):
+    f, client, _ = await surface(publication_db, monkeypatch)
+    await f.db.record_tin_user(TEAMMATE)
+    await f.db.grant_project_membership(project_id=f.project.id, clerk_user_id=TEAMMATE)
+    teammate = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app(f, TEAMMATE)), base_url="https://tin.test"
+    )
+    base = f"/api/projects/{f.project.id}/linkedin"
+    put(f, draft(target=MEMBER["urn"]))
+    async with client, teammate:
+        # The founder connected their own profile, so only they see and use it.
+        mine = await client.get(base + "/drafts", params={"path": DRAFT_PATH})
+        assert [item["urn"] for item in mine.json()["accounts"]] == [PAGE["urn"], MEMBER["urn"]]
+        theirs = await teammate.get(base + "/drafts", params={"path": DRAFT_PATH})
+        assert [item["urn"] for item in theirs.json()["accounts"]] == [PAGE["urn"]]
+        refused = await teammate.post(base + "/preview", json={"path": DRAFT_PATH, "post_id": "p1"})
+        assert refused.status_code == 409
+        assert "Only the member who connected" in refused.json()["detail"]
+        allowed = await client.post(base + "/preview", json={"path": DRAFT_PATH, "post_id": "p1"})
+        assert allowed.status_code == 200 and allowed.json()["account"]["urn"] == MEMBER["urn"]
+        # The founder's preview is theirs: the teammate can't confirm it.
+        stolen = await teammate.post(
+            base + "/publish",
+            json={"preview_token": allowed.json()["preview_token"], "request_id": str(uuid4())},
+        )
+        assert stolen.status_code == 409
+        # With only the page left to them, an unchosen post goes out as the page.
+        put(f, draft(target=""))
+        page = await teammate.post(base + "/preview", json={"path": DRAFT_PATH, "post_id": "p1"})
+        assert page.status_code == 200 and page.json()["account"]["urn"] == PAGE["urn"]
+        # A profile someone else signed in as is never the founder's, either.
+        f.runtime.integrations.linkedin_posting.owners = {MEMBER["urn"]: TEAMMATE}
+        put(f, draft(target=MEMBER["urn"]))
+        now = await client.post(base + "/preview", json={"path": DRAFT_PATH, "post_id": "p1"})
+        assert now.status_code == 409 and "Only the member" in now.json()["detail"]
+    assert await runs(f) == 0
+
+
+@pytest.mark.asyncio
 async def test_changed_text_or_image_needs_a_new_preview(publication_db, monkeypatch):
     f, client, server = await surface(publication_db, monkeypatch)
     attachments = [
@@ -416,7 +462,7 @@ async def test_publish_starts_only_from_a_confirmed_approval(publication_db):
 # Activities: one approved post through a synthetic Zernio.
 
 
-async def setup(db, storage, posting, *, attachments=None):
+async def setup(db, storage, posting, *, attachments=None, account=PAGE):
     project = await db.create_project(name="LinkedIn publisher", state_repo_id=storage.repo.id)
     await db.grant_project_membership(project_id=project.id, clerk_user_id=ACTOR)
     workflow_id = await db.pool.fetchval("SELECT id FROM workflows WHERE key=$1", KEY)
@@ -439,9 +485,9 @@ async def setup(db, storage, posting, *, attachments=None):
         "attachments": attachments or [],
         "connection_id": str(posting.id),
         "profile_id": PROFILE,
-        "account_id": PAGE["id"],
-        "target": PAGE["urn"],
-        "account": {key: PAGE[key] for key in ("id", "urn", "kind", "name")},
+        "account_id": account["id"],
+        "target": account["urn"],
+        "account": {key: account[key] for key in ("id", "urn", "kind", "name")},
         "fingerprint": "f" * 64,
     }
     await save_effect(db, f"linkedin:approved:{approval_id}", payload)
@@ -599,6 +645,17 @@ async def test_an_account_gone_from_the_profile_never_posts(publication_db):
     run_id, _ = await setup(publication_db, storage, posting)
     work = activities(publication_db, storage, posting)
     with pytest.raises(IntegrationAuthorizationError, match="no longer connected"):
+        await work.execute(str(run_id))
+    assert posting.zernio.posts == []
+
+
+@pytest.mark.asyncio
+async def test_a_profile_that_is_no_longer_the_approvers_never_posts(publication_db):
+    storage, posting = HistoryStorage(), SyntheticPosting()
+    posting.owners = {MEMBER["urn"]: TEAMMATE}
+    run_id, _ = await setup(publication_db, storage, posting, account=MEMBER)
+    work = activities(publication_db, storage, posting)
+    with pytest.raises(ApplicationError, match="Only the member who connected"):
         await work.execute(str(run_id))
     assert posting.zernio.posts == []
 

@@ -7,6 +7,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
+from uuid import UUID
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -250,6 +251,46 @@ class Settings(BaseSettings):
     @property
     def linkedin_extension_ids(self) -> tuple[str, ...]:
         return tuple(v.strip() for v in self.linkedin_extension_ids_raw.split(",") if v.strip())
+
+    # LinkedIn posting through Tin's own Zernio account; see docs/linkedin-posting.md.
+    zernio_api_key: SecretStr | None = Field(default=None, alias="TIN_LITE_ZERNIO_API_KEY")
+    # Zernio bills per connected account, so only these projects see the posting card.
+    linkedin_posting_projects_raw: str = Field(
+        default="", alias="TIN_LITE_LINKEDIN_POSTING_PROJECTS"
+    )
+    # "<project id>=<Zernio profile id>,...": use an existing profile instead of creating one.
+    # Staging requires it, so it never creates profiles or connected accounts of its own.
+    zernio_profile_map_raw: str = Field(default="", alias="TIN_LITE_ZERNIO_PROFILE_MAP")
+
+    @field_validator("zernio_profile_map_raw")
+    @classmethod
+    def _zernio_profile_map(cls, value: str) -> str:
+        for item in (part.strip() for part in value.split(",")):
+            if not item:
+                continue
+            project, _, profile = item.partition("=")
+            try:
+                UUID(project.strip())
+            except ValueError:
+                raise ValueError(
+                    "TIN_LITE_ZERNIO_PROFILE_MAP needs <project id>=<profile id>"
+                ) from None
+            if not (
+                len(profile.strip()) == 24 and all(c in "0123456789abcdef" for c in profile.strip())
+            ):
+                raise ValueError("TIN_LITE_ZERNIO_PROFILE_MAP has an invalid Zernio profile id")
+        return value
+
+    @property
+    def linkedin_posting_projects(self) -> tuple[str, ...]:
+        return tuple(v.strip() for v in self.linkedin_posting_projects_raw.split(",") if v.strip())
+
+    @property
+    def zernio_profile_map(self) -> dict[str, str]:
+        pairs = (
+            item.split("=", 1) for item in self.zernio_profile_map_raw.split(",") if item.strip()
+        )
+        return {str(UUID(project.strip())): profile.strip() for project, profile in pairs}
 
     private_workflow_projects_raw: str = Field(
         default="", alias="TIN_LITE_PRIVATE_WORKFLOW_PROJECTS"

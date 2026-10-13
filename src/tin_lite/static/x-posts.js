@@ -329,7 +329,7 @@
         const card = document.createElement("section");
         card.className = "x-posts-card";
         card.dataset.xCard = i;
-        card.innerHTML = `${state.notes ? `<aside class="x-posts-notes" aria-label="Draft notes"><h2>Draft notes</h2>${post.editor_notes ? `<p>${esc(post.editor_notes)}</p>` : ""}
+        card.innerHTML = `${state.notes ? `<aside class="x-posts-notes" aria-label="Draft notes"><h2>Draft notes</h2>${post.editor_notes ? `<p class="x-posts-note-text">${esc(post.editor_notes)}</p>` : ""}
               ${post.missing_assets?.length ? `<p>Resolve these before publishing:</p><ul>${post.missing_assets.map((item, j) => `<li>${esc(item)} <button class="x-posts-link" type="button" data-x-action="resolve-asset" data-post="${i}" data-asset="${j}">Mark resolved</button></li>`).join("")}</ul>` : ""}
               ${post.support?.length ? `<details class="x-posts-support"><summary>Supporting facts · ${post.support.length}</summary>${post.support.map(item => `<p><code>${esc(item.source_path)}</code><br>${esc(item.excerpt)}</p>`).join("")}</details>` : ""}
               ${gapList(state)}

@@ -103,6 +103,9 @@ async def test_the_first_plan_waits_in_decisions_and_nothing_drafts_until_approv
     assert published == {"review": True}
     waiting = await f.db.get_run(run.id)
     assert waiting.review_required and waiting.status.value == "needs_input"
+    assert waiting.progress_step == "review" and "Waiting for your approval" in (
+        waiting.progress_summary
+    )
     # The plan is published and opens with which page serves each target.
     plan_md = (
         await f.storage.read_canonical_artifact(
@@ -331,3 +334,22 @@ async def test_an_edit_during_the_revision_keeps_the_founders_plan(publication_d
     assert (await programs.facts(f.configured.id))["pending_revision"] is None
     kept = await programs.read(project_id=f.project.id, program_id=f.configured.id)
     assert kept["plan"]["batches"][0]["items"] == edited["batches"][0]["items"]
+
+
+def test_mcp_names_the_revision_route_for_a_waiting_plan():
+    from tin_lite.document_handoff import revise
+
+    run = SimpleNamespace(
+        id=uuid4(),
+        project_id=uuid4(),
+        executor="content.plan",
+        workflow_id=next(w for w in BUILTIN_WORKFLOWS if w.key == legacy.KEY).id,
+        project_workflow_id=uuid4(),
+        status=SimpleNamespace(value="needs_input"),
+        review_required=True,
+        review_decision=None,
+        artifact_path="reports/content-plan/x/PLAN.md",
+        canonical_commit_sha="a" * 40,
+    )
+    route = revise(SimpleNamespace(public_url="https://tin.test", app_url=None), run)
+    assert route["tool"] == "request_workflow_changes" and route["keeps_review"]

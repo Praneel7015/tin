@@ -1223,6 +1223,15 @@ class ContentPlanActivities:
                 # from it. The workflow waits for the approval, then records the success.
                 planned = sum(len(batch["items"]) for batch in plan["batches"])
                 mapping = (quality or {}).get("targets")
+                await self.db.project_run_progress(
+                    run_id=run.id,
+                    mode="steps",
+                    step="review",
+                    current=3,
+                    total=3,
+                    summary="Plan saved. Waiting for your approval in Decisions; nothing drafts "
+                    "until you approve.",
+                )
                 await self.db.request_human_review(
                     run_id=run.id,
                     canonical_commit_sha=revision,

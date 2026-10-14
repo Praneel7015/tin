@@ -37,7 +37,10 @@ FOUNDER_URN = "urn:li:person:AZperson1"
 TEAMMATE_URN = "urn:li:person:AZperson2"
 
 
-def account(account_id, kind, *, profile=PROFILE, active=True, person="AZperson1"):
+EXPIRES = "2026-12-12T15:17:32.872Z"
+
+
+def account(account_id, kind, *, profile=PROFILE, active=True, person="AZperson1", expires=EXPIRES):
     metadata = (
         {
             "accountType": "organization",
@@ -55,6 +58,7 @@ def account(account_id, kind, *, profile=PROFILE, active=True, person="AZperson1
         "enabled": True,
         "metadata": metadata,
         "profileId": {"_id": profile, "name": "tin:x"},
+        "tokenExpiresAt": expires,
     }
 
 
@@ -62,6 +66,7 @@ class Zernio_:
     def __init__(self):
         self.calls: list[httpx.Request] = []
         self.profile_status = 201
+        self.profiles: list[dict] = []
         self.accounts = [account(PERSONAL, "personal"), account(PAGE, "organization")]
         self.auth_url = "https://www.linkedin.com/oauth/v2/authorization?client_id=z"
         self.fail = None
@@ -79,6 +84,11 @@ class Zernio_:
         if self.fail is not None:
             return self.fail(request)
         path, method = request.url.path, request.method
+        if (method, path) == ("GET", "/api/v1/profiles"):
+            name = request.url.params["name"]
+            return self.reply(
+                200, {"profiles": [item for item in self.profiles if item["name"] == name]}
+            )
         if (method, path) == ("POST", "/api/v1/profiles"):
             body = json.loads(request.content)
             assert body["externalId"] == str(PROJECT_ID)
@@ -88,7 +98,12 @@ class Zernio_:
                     409,
                     {"code": "profile_name_conflict", "details": {"existingProfileId": PROFILE}},
                 )
-            return self.reply(201, {"profile": {"_id": PROFILE, "name": body["name"]}})
+            profile = {"_id": PROFILE, "name": body["name"], "externalId": body["externalId"]}
+            self.profiles.append(profile)
+            if self.profile_status == 422:
+                # Another request made it first.
+                return self.reply(422, {"error": "Profile already exists"})
+            return self.reply(201, {"profile": profile})
         if (method, path) == ("GET", "/api/v1/connect/linkedin"):
             return self.reply(200, {"authUrl": self.auth_url})
         if (method, path) == ("GET", "/api/v1/accounts"):
@@ -275,6 +290,38 @@ async def test_an_existing_profile_is_reused_on_a_name_conflict() -> None:
         ]
         == PROFILE
     )
+
+
+@pytest.mark.asyncio
+async def test_a_profile_made_earlier_is_found_before_creating_one() -> None:
+    api = Zernio_()
+    api.profiles = [{"_id": PROFILE, "name": f"tin:{PROJECT_ID}", "externalId": str(PROJECT_ID)}]
+    integrations, _, _ = service(api)
+    await start(integrations)
+    assert ("POST", "/api/v1/profiles") not in api.paths()
+    # Zernio refuses a profile another request made meanwhile; Tin finds that one.
+    api = Zernio_()
+    api.profile_status = 422
+    integrations, _, _ = service(api)
+    await start(integrations)
+    assert api.paths("GET").count(("GET", "/api/v1/profiles")) == 2
+
+
+@pytest.mark.asyncio
+async def test_signing_in_again_as_a_profile_already_there_makes_it_yours() -> None:
+    integrations, _, api = service()
+    # The founder connected this profile outside Tin, before Tin recorded owners.
+    api.accounts = [account(PERSONAL, "personal"), account(PAGE, "organization")]
+    await start(integrations)
+    renewed = "2026-12-14T01:20:00.000Z"
+    api.accounts = [
+        account(PERSONAL, "personal", expires=renewed),
+        account(PAGE, "organization", expires=renewed),
+    ]
+    connection = await integrations.linkedin_posting.complete(
+        state=state_from(api), clerk_user_id=USER_ID
+    )
+    assert connection.configuration["owners"] == {FOUNDER_URN: USER_ID}
 
 
 @pytest.mark.asyncio

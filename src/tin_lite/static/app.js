@@ -450,6 +450,33 @@ function dayLabel(value) {
   return calendar;
 }
 
+// A file upload whose progress can be shown; fetch reports none while a body is sent.
+async function uploadWithProgress(path, file, { onProgress, attach } = {}) {
+  const token = await window.Clerk?.session?.getToken();
+  if (!token) throw new Error("Your Tin session has ended. Sign in again.");
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", path);
+    request.setRequestHeader("Authorization", `Bearer ${token}`);
+    request.setRequestHeader("Accept", "application/json");
+    request.setRequestHeader("Content-Type", file.type);
+    request.upload.onprogress = (event) => onProgress?.(event.loaded);
+    request.onload = () => {
+      let payload = null;
+      try {
+        payload = JSON.parse(request.responseText);
+      } catch (_error) {}
+      if (request.status >= 200 && request.status < 300 && payload) return resolve(payload);
+      const detail = payload?.detail;
+      reject(new Error(typeof detail === "string" ? detail : detail?.message || `${request.status} ${request.statusText}`));
+    };
+    request.onerror = () => reject(new Error("The upload didn't reach Tin."));
+    request.onabort = () => reject(new Error("Upload cancelled."));
+    attach?.(request);
+    request.send(file);
+  });
+}
+
 async function authorizedFetch(path, options = {}) {
   const token = await window.Clerk?.session?.getToken();
   if (!token) throw new Error("Your Tin session has ended. Sign in again.");
@@ -1734,6 +1761,21 @@ function renderXComposer() {
       if (!isCurrentProjectContext(context)) return;
       await pollRuns();
     },
+    // LinkedIn's reader shows an image's upload as it goes, opens its sources and connects.
+    upload: (apiPath, file, options) => {
+      if (!isCurrentProjectContext(context)) throw new Error("Project changed. Reopen the draft in the current project.");
+      return uploadWithProgress(apiPath, file, options);
+    },
+    openFile: (filePath, revision) => openProjectFile(filePath, revision),
+    // A revision writes a new batch; the reader moves to it, keeping where "back" leads.
+    openDraft: (draftPath, draftRunId) => {
+      if (!isCurrentProjectContext(context)) return;
+      goToRoute(`files?${new URLSearchParams({ x_draft: draftPath, x_run: draftRunId, x_back: back })}`);
+    },
+    connect: () => {
+      rememberConnectRequest(context.projectId, ["social.linkedin"]);
+      goToRoute("integrations");
+    },
   });
 }
 
@@ -1847,8 +1889,10 @@ function comparisonFileLabel(route) {
 }
 
 function render() {
-  // Both readers share one open reader, so either closes it.
-  if (state.view !== "x-draft" || state.projectAccess !== "ready") window.TinXPosts?.close();
+  if (state.view !== "x-draft" || state.projectAccess !== "ready") {
+    window.TinXPosts?.close();
+    window.TinLinkedInPosts?.close();
+  }
   state.comparePage?.destroy();
   state.comparePage = null;
   disposeDocument();

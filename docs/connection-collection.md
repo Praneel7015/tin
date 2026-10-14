@@ -179,6 +179,34 @@ Cloud pagination and source-login preservation have not passed production accept
 is no deployment, image build, provider configuration change or store release implicit in
 installing this source.
 
+### Engagement reads
+
+The same image also reads who engaged with the member's own posts (#435), in
+`linkedin_engagement.py`. The runner takes a packet `kind`:
+- `search`, the default: one people-search page, as above, within 90 seconds;
+- `linkedin_posts`: the member's own posts from their share feed
+  (`/voyager/api/identity/profileUpdatesV2`, `q=memberShareFeed`), newest first, within a
+  window and a limit. A plain repost names the original author, so it's left out; a repost
+  with the member's own words is their post. Each post keeps its
+  activity URN, the thread URN its reactions hang off, its date (from the activity ID), an
+  excerpt and its counts;
+- `linkedin_reactions`: one post's reactions (`/voyager/api/voyagerSocialDashReactions`
+  with the post's thread URN), up to ten pages of ten from a given start, returning where to
+  continue. Each person carries their LinkedIn profile ID, name, headline, connection degree
+  and reaction. Pages and companies that react, and the member themselves, are left out. A
+  post past 1,000 reactions is read to that point and marked capped.
+
+An engagement read runs within five minutes. It starts with the `/me` account check and waits
+a random 3 to 9 seconds before each page. Both reads are GET-only JSON on
+`www.linkedin.com`, and LinkedIn's refusals map to the same reasons as collection.
+
+Comments aren't read from the server: the comment endpoints answer 400 to plain GETs, and the
+post page renders only the first comment. Reading them needs LinkedIn's current query ID from
+the member's browser, as search once did.
+
+A new image with these reads needs a new `tin-linkedin-*` build and the template setting
+changed; the search read is unchanged inside it.
+
 ## Verification
 
 Use a disposable database for SQL contracts, never a configured customer database:

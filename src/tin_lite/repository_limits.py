@@ -123,3 +123,15 @@ def describe_omissions(items, *, limit: int = 5, total: int | None = None) -> st
     named = "; ".join(describe_omission(item) for item in items[:limit])
     more = (len(items) if total is None else total) - min(limit, len(items))
     return named + (f"; and {more} more" if more > 0 and named else "")
+
+
+def left_out_write(paths, entries) -> dict | None:
+    """The left-out entry a patch would write over, if any: the same path, or a path under
+    it (a submodule or a linked folder). A snapshot that leaves files out is still usable;
+    a fix just can't change what Tin never read."""
+    for path in sorted(paths):
+        for item in entries:
+            left = item.get("path") or ""
+            if left and (path == left or path.startswith(left.rstrip("/") + "/")):
+                return item
+    return None

@@ -90,6 +90,7 @@ NEARBY_EVIDENCE_BYTES = 24_000
 # v10: what a refresh brief cannot ask for. content.generate's refresh replaces the title, meta
 # description, H1, lead and up to three body paragraphs in place (content_refresh).
 REFRESH_REACH = re.compile(r"(?i)\b(?:tables?|rows?|columns?|sections?|faqs?)\b")
+LANGUAGE_SEGMENT = re.compile(r"/(?:[a-z]{2}|[a-z]{2}-[a-z]{2})/", re.I)
 NEARBY_SKIPPED_PAGES = frozenset(
     "about privacy terms legal cookies sign-in sign-up signin signup login status".split()
 )
@@ -696,9 +697,11 @@ def normalize(context, pages, portfolio, *, file_sizes=None):
                     rationale_files.append(path)
         if destination and inspected.get(page_path(destination), {}).get("source_id"):
             sources.append(inspected[page_path(destination)]["source_id"])
+        # A comparison or alternatives page is about one competitor; every such page shares
+        # "vs" and the product's words, so word overlap would only name the other comparisons.
         nearby = (
             nearby_pages(title, _text(raw.get("target_query"), 200), read, limit=nearby_limit)
-            if action == "new_page" and nearby_limit
+            if action == "new_page" and nearby_limit and fmt not in COMPARISON_FORMATS
             else []
         )
         # content.generate loads each page source into a 64 KB context; nearby pages join only
@@ -820,8 +823,14 @@ def nearby_pages(title, query, pages, *, limit):
     for page in pages:
         path = page_path(page["url"])
         # A redirect alias is the same page. The home and about pages touch every topic, and
-        # legal and sign-in pages none: neither is the page a new article would repeat.
-        if path in seen or path == "/" or path.rsplit("/", 1)[-1] in NEARBY_SKIPPED_PAGES:
+        # legal and sign-in pages none: neither is the page a new article would repeat. A
+        # translated copy (/blog/zh/...) is another language's page.
+        if (
+            path in seen
+            or path == "/"
+            or path.rsplit("/", 1)[-1] in NEARBY_SKIPPED_PAGES
+            or LANGUAGE_SEGMENT.search(path)
+        ):
             continue
         seen.add(path)
         head = _words(

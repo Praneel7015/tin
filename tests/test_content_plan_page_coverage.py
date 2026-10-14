@@ -266,3 +266,15 @@ def test_nearby_pages_never_push_a_draft_past_its_evidence_bound():
     item = kept[0]["item"]
     assert item["source_ids"] == ["keyword:k1"]
     assert not item["verification"][0].startswith("Read ")
+
+
+def test_comparisons_and_translated_pages_get_no_nearby_pages():
+    value = portfolio(0)
+    value["opportunities"] = [
+        opportunity(1, format="comparison", title="Acme vs Linear for SMS replies"),
+    ]
+    pages = {"pages": SITE, "omitted_candidates": 0}
+    kept, _ = agent.normalize(coverage_context(), pages, value)
+    assert kept[0]["item"]["source_ids"] == ["keyword:k1"]
+    translated = [{**SITE[2], "url": "https://example.com/blog/zh/docs", "source_id": "zh"}]
+    assert agent.nearby_pages("Receive SMS replies", "", translated, limit=3) == []

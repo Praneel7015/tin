@@ -2892,6 +2892,15 @@ class Database:
                 # This is the current conservative project default. A future project-wide
                 # autonomy setting will resolve this boolean here, once, when the run starts.
                 review_required = True
+                if workflow["key"] == "content.plan" and workflow["project_id"] is None:
+                    # Only a program's first plan waits for approval: a later batch follows
+                    # the approved plan, and a revision preview has its own apply.
+                    planned = project_workflow_id is not None and await conn.fetchval(
+                        "SELECT plan_revision IS NOT NULL FROM content_programs "
+                        "WHERE project_workflow_id=$1",
+                        project_workflow_id,
+                    )
+                    review_required = not input_payload.get("amendment_id") and not planned
             temporal_workflow_id = f"{executor}:{run_id}"
             # A saved configuration is one lease lineage: a newer generation fences the older.
             # Ad-hoc runs are independent jobs, so each gets its own lineage; sharing the
@@ -6914,6 +6923,14 @@ class Database:
             "DELETE FROM project_task_entries WHERE run_id IN "
             "(SELECT id FROM workflow_runs WHERE project_id = $1)",
             "DELETE FROM project_authors WHERE project_id = $1",
+            # LinkedIn listening's readings and follower counts, and its run receipts.
+            "DELETE FROM linkedin_post_readings WHERE project_id = $1",
+            "DELETE FROM linkedin_posts WHERE project_id = $1",
+            "DELETE FROM linkedin_follower_counts WHERE project_id = $1",
+            "DELETE FROM effect_receipts WHERE operation IN "
+            "('social.linkedin_listen', 'social.linkedin_results') AND "
+            "split_part(execution_key, ':', 1) IN (SELECT id::text FROM workflow_runs "
+            "WHERE project_id = $1)",
             # LinkedIn collection holds other people's names, headlines and page text. Jobs (and
             # their pages) go before the connections: a job interrupted mid-lease still points at
             # its extension device, which would block the devices' cascade.
@@ -7268,6 +7285,14 @@ class Database:
             "social.linkedin_publish": (
                 "linkedin_post_published",
                 "Your LinkedIn post is published.",
+            ),
+            "social.linkedin_listen": (
+                "linkedin_post_results_ready",
+                "Tin read your LinkedIn post's first three days.",
+            ),
+            "social.linkedin_results": (
+                "linkedin_results_ready",
+                "Today's LinkedIn results are in.",
             ),
             "growth.onboarding_plan": ("onboarding_plan_ready", "The growth plan is ready."),
             "content.plan": ("content_plan_ready", "Content plan is ready."),
@@ -7957,6 +7982,54 @@ class Database:
                 )
                 await self._track_run(run_id, "run_held", conn=conn, summary=summary[:1000])
             return review_required
+
+    async def repoint_review_artifact(
+        self,
+        *,
+        run_id: UUID,
+        canonical_commit_sha: str,
+        artifact_path: str,
+        artifact_ref: str,
+        explanation: str | None = None,
+    ) -> bool:
+        """Point a waiting review at a revised copy: the run and its pending decision.
+
+        Only while the run still waits with no decision, so an approval always binds the copy
+        the founder was shown. A content plan revised from feedback uses it.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            updated = await conn.fetchval(
+                """
+                UPDATE workflow_runs
+                SET canonical_commit_sha = $2, artifact_path = $3, artifact_ref = $4,
+                    progress_updated_at = now()
+                WHERE id = $1 AND status = 'needs_input' AND review_required
+                  AND review_decision IS NULL
+                RETURNING id
+                """,
+                run_id,
+                canonical_commit_sha,
+                artifact_path,
+                artifact_ref,
+            )
+            if updated is None:
+                return False
+            await conn.execute(
+                """
+                UPDATE run_decisions
+                SET items = jsonb_build_array(jsonb_build_object(
+                        'id', $2::text, 'title', regexp_replace($2::text, '^.*/', ''),
+                        'file', $2::text, 'revision', $3::text,
+                        'media_type', 'text/markdown')),
+                    explanation = COALESCE($4::text, explanation)
+                WHERE run_id = $1 AND status = 'pending'
+                """,
+                run_id,
+                artifact_path,
+                canonical_commit_sha,
+                explanation[:2000] if explanation else None,
+            )
+            return True
 
     async def record_human_review(
         self,

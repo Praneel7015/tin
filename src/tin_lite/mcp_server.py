@@ -68,6 +68,7 @@ from tin_lite.growth_onboarding_control import (
 )
 from tin_lite.integrations import IntegrationError
 from tin_lite.keyword_plan_control import stop_keyword_plan as stop_keyword_plan_service
+from tin_lite.linkedin_posting import visible as linkedin_visible
 from tin_lite.linkedin_posts import LinkedInPosts
 from tin_lite.mcp_errors import GuardedMCPServer
 from tin_lite.onboarding_experience import (
@@ -2035,6 +2036,7 @@ def create_mcp_app(
             workflow
             for workflow in await services.database.list_workflows(project_id=parsed_project_id)
             if collection_visible(settings, workflow, parsed_project_id)
+            and linkedin_visible(settings, workflow, parsed_project_id)
             and workflow.status.value == "active"
             and (workflow.definition or {}).get("public_discovery", True)
             and (
@@ -3694,7 +3696,11 @@ def create_mcp_app(
         post_id: str = "",
         billing_quote_id: str | None = None,
     ) -> dict[str, Any]:
-        """Revise an article, X post or X guide from the user's verbatim feedback.
+        """Revise an article, X post, X guide or waiting content plan from verbatim feedback.
+
+        A content plan waiting in Decisions is revised in place: Tin re-plans every week from
+        the feedback (one metered planning-agent run) and the same review shows the revised
+        plan; approve it there. Approving waits while the revision runs.
 
         Relay the user's words unchanged. For X, pass post_id from get_workflow_review.
         Clear reusable writing preferences are automatically saved to the X guide; factual
@@ -5050,7 +5056,12 @@ def create_mcp_app(
                 relay=(
                     f"I am opening one page where you connect {listed} for "
                     f"{project.name if project else 'your project'}. Each takes about a minute"
-                    + ("; GitHub also asks which repository" if "infra.github" in chosen else "")
+                    + (
+                        "; GitHub also asks which repository serves the website and which "
+                        "other repositories, such as the app, Tin may read"
+                        if "infra.github" in chosen
+                        else ""
+                    )
                     + ("; PostHog asks which project" if "analytics.posthog" in chosen else "")
                     + (
                         "; for Stripe you paste a read-only restricted key there, never in chat"
@@ -5121,6 +5132,31 @@ def create_mcp_app(
             "billing_approved": health.get("billing_approved"),
             "conversion_actions_with_data": health.get("conversion_actions_with_data"),
             "checked_at": health.get("checked_at"),
+        }
+
+    @server.tool()
+    async def set_code_repositories(project_id: str, repositories: list[str]) -> dict[str, Any]:
+        """Set the GitHub repositories Tin uses beside the website repository.
+
+        Use it when the app, docs or an SDK live in their own repositories. Pass every
+        owner/name to keep, at most five; an empty list clears them. Every workflow reads
+        them for context. Workflows that change the app itself (a signup question, a
+        framework starter) may open a pull request in one for the founder to review; Tin
+        never merges or commits there. Published pages and site fixes still go to the
+        website repository chosen on Tin's Integrations page.
+        """
+        token = await caller()
+        parsed_project_id = _mcp_uuid(project_id, field="project_id")
+        await require_project(parsed_project_id, token, tool_name="set_code_repositories")
+        try:
+            connection = await runtime().integrations.select_code_repositories(
+                project_id=parsed_project_id, repositories=repositories
+            )
+        except IntegrationError as exc:
+            raise ToolError(str(exc)) from exc
+        return {
+            "website_repository": connection.configuration.get("selected_repository"),
+            "code_repositories": connection.configuration.get("code_repositories", []),
         }
 
     @server.tool()

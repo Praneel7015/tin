@@ -18,6 +18,7 @@ from tin_lite import (
     content_repository_delivery,
     growth_onboarding,
     growth_plan,
+    linkedin_listening,
     linkedin_posts,
     organic_system,
     paid_ads,
@@ -70,6 +71,7 @@ from tin_lite.integrations import (
     GITHUB_USER_PROVIDER,
     GOOGLE_WORKSPACE_PROVIDER,
     GSC_PROVIDER,
+    LINKEDIN_POSTING_PROVIDER,
     STRIPE_PROVIDER,
     IntegrationRequirement,
     parse_integration_requirements,
@@ -282,6 +284,19 @@ STYLE_CAPTURE_REVIEW_POLICY = HumanReviewPolicy(
         "until then your current guide stays in place."
     ),
     queue_clause="Writing style guide ready to review",
+)
+
+# content.plan 1.1.0: a program's first plan waits for approval before anything drafts from
+# it. Later batches and revision previews don't (db.create_run); a revision has its own apply.
+CONTENT_PLAN_REVIEW_POLICY = HumanReviewPolicy(
+    reason="Tin drafts from this plan every week.",
+    review_label="Review plan",
+    defer_label="Not now",
+    summary=(
+        "Your content plan is ready. Check which page serves each target, then approve it to "
+        "start drafting; nothing is drafted until you do."
+    ),
+    queue_clause="Content plan ready to review",
 )
 
 PUBLIC_ARTICLE_REVIEW_POLICY = HumanReviewPolicy(
@@ -512,6 +527,9 @@ class BuiltinWorkflow:
             definition["proposal_revision"] = AGENT_REVISION
         if self.key == x_draft.KEY:
             definition["x_draft_policy"] = dict(x_draft.POLICY)
+        if self.key == linkedin_listening.LISTEN_KEY:
+            # Tin starts it when it publishes a post; nobody else can.
+            definition["public_discovery"] = False
         if self.key == x_feedback.KEY:
             definition["public_discovery"] = False
             definition["x_feedback_contract"] = {
@@ -981,8 +999,8 @@ BUILTIN_WORKFLOWS = (
                 DiagramNode(
                     "write",
                     "step",
-                    "Check coverage, then draft",
-                    "Codex reads up to 12 current pages first",
+                    "Compare coverage, then draft",
+                    "reads up to 12 pages, then always writes",
                 ),
                 DiagramNode(
                     "files",
@@ -994,7 +1012,7 @@ BUILTIN_WORKFLOWS = (
                 DiagramNode(
                     "no_draft",
                     "ghost",
-                    "No draft needed",
+                    "Update target unreadable",
                     "assessment saved, closes without review",
                 ),
                 DiagramNode(
@@ -1027,15 +1045,15 @@ BUILTIN_WORKFLOWS = (
         ),
         public_mcp=PublicMCPExposure("start_content_draft", destructive=True, open_world=True),
         title="Draft planned content",
-        description="Check current coverage before drafting the next item in your content "
-        "plan, in your style: a new article, an answer page for a buyer question AI assistants "
-        "miss you on, or a refresh of an existing page's title, snippet and opening. Save useful "
-        "copy for review, or explain why no draft is needed. After approval an article follows "
+        description="Draft the next item in your content plan, in your style, after reading "
+        "the pages that already cover it: a new article, an answer page for a buyer question AI "
+        "assistants miss you on, or a refresh of an existing page's title, snippet and opening. "
+        "Every item gets a draft for review. After approval an article follows "
         "your delivery setting, an answer page goes to your site through website.change at the "
         "route you chose, and a refresh changes exactly the approved lines. The roadmap stays "
         "unchanged.",
         executor=CODEX_PROCEDURE_EXECUTOR,
-        version_label="1.16.0",
+        version_label="1.17.0",
         system=ORGANIC_TRAFFIC_SYSTEM,
         # A weekly occurrence drafts the next article in plan order and holds while an
         # earlier draft from the same program still waits for review.
@@ -1535,6 +1553,128 @@ BUILTIN_WORKFLOWS = (
         input_schema=linkedin_posts.INPUT_SCHEMA,
     ),
     BuiltinWorkflow(
+        id=linkedin_listening.LISTEN_WORKFLOW_ID,
+        key=linkedin_listening.LISTEN_KEY,
+        title="Read a new LinkedIn post's results",
+        description=(
+            "Read a post Tin just published 1, 4, 24 and 72 hours after posting, and keep the "
+            "numbers in social/linkedin/RESULTS.md. Tin starts it when it publishes the post."
+        ),
+        executor=linkedin_listening.LISTEN_KEY,
+        version_label="1.0.0",
+        presentation=WorkflowDiagram(
+            direction="TD",
+            nodes=(
+                DiagramNode(
+                    "post",
+                    "store",
+                    "The post Tin just published",
+                    "its publish receipt, draft and account",
+                ),
+                DiagramNode(
+                    "wait", "wait", "Wait for the next reading", "1, 4, 24 and 72 hours after"
+                ),
+                DiagramNode(
+                    "linkedin",
+                    "surface",
+                    "The post on LinkedIn",
+                    "impressions, reach, reactions, comments, shares",
+                ),
+                DiagramNode(
+                    "files",
+                    "store",
+                    "Results in project Files",
+                    "results.json and RESULTS.md, after each reading",
+                ),
+                DiagramNode(
+                    "receipt",
+                    "receipt",
+                    "Listening receipt",
+                    "stops early if the post is removed",
+                ),
+            ),
+            edges=(
+                DiagramEdge("post", "wait"),
+                DiagramEdge("wait", "linkedin", "signal", "each reading"),
+                DiagramEdge("linkedin", "files"),
+                DiagramEdge("files", "receipt"),
+            ),
+        ),
+        schedule_modes=("on_demand",),
+        system=LINKEDIN_SYSTEM,
+        agent_only=True,
+        input_schema=linkedin_listening.LISTEN_INPUT_SCHEMA,
+        # Listening reads through the posting connection, whose consent covers analytics.
+        integration_requirements=(
+            IntegrationRequirement(
+                LINKEDIN_POSTING_PROVIDER, ("linkedin.posts.publish",), required=True
+            ),
+        ),
+    ),
+    BuiltinWorkflow(
+        id=linkedin_listening.RESULTS_WORKFLOW_ID,
+        key=linkedin_listening.RESULTS_KEY,
+        title="Read LinkedIn results",
+        description=(
+            "Read every post from the last 30 days on your connected LinkedIn page, and the "
+            "posts Tin published as you, with each account's followers, into "
+            "social/linkedin/RESULTS.md. Page posts made on LinkedIn are picked up too."
+        ),
+        executor=linkedin_listening.RESULTS_KEY,
+        version_label="1.0.0",
+        presentation=WorkflowDiagram(
+            direction="TD",
+            nodes=(
+                DiagramNode(
+                    "connection",
+                    "store",
+                    "Your LinkedIn connection",
+                    "the page and profiles Tin posts as",
+                ),
+                DiagramNode(
+                    "find",
+                    "step",
+                    "Find the posts to read",
+                    "Tin's from the last 30 days, new page posts",
+                ),
+                DiagramNode(
+                    "linkedin",
+                    "surface",
+                    "LinkedIn, through Zernio",
+                    "each post's numbers and follower counts",
+                ),
+                DiagramNode(
+                    "files",
+                    "store",
+                    "Results in project Files",
+                    "results.json and RESULTS.md",
+                ),
+                DiagramNode(
+                    "receipt",
+                    "receipt",
+                    "Results receipt",
+                    "posts read, new and removed",
+                ),
+            ),
+            edges=(
+                DiagramEdge("connection", "find"),
+                DiagramEdge("find", "linkedin"),
+                DiagramEdge("linkedin", "files"),
+                DiagramEdge("files", "receipt"),
+            ),
+        ),
+        schedule_modes=("on_demand", "daily"),
+        default_schedule={"cadence": "daily", "local_time": "08:00"},
+        system=LINKEDIN_SYSTEM,
+        input_schema=linkedin_listening.RESULTS_INPUT_SCHEMA,
+        # Listening reads through the posting connection, whose consent covers analytics.
+        integration_requirements=(
+            IntegrationRequirement(
+                LINKEDIN_POSTING_PROVIDER, ("linkedin.posts.publish",), required=True
+            ),
+        ),
+    ),
+    BuiltinWorkflow(
         id=UUID("00000000-0000-4000-8000-000000000028"),
         key=technical_fix.KEY,
         # Hidden (public_discovery: false): the public plugin no longer starts it either.
@@ -1639,11 +1779,13 @@ BUILTIN_WORKFLOWS = (
             "your real competitors, answer pages for the questions buyers ask search and AI "
             "assistants, pages for each workflow, integration or use case your product has, "
             "guides, and refreshes of existing pages. A planning agent researches and proposes; "
-            "Tin checks each piece against your site and fills every week. Save to My system to "
-            "prepare weekly batches. Does not write or publish anything."
+            "Tin checks each piece against your site and fills every week. The plan opens with "
+            "which page serves each keyword group, page and competitor, and you approve it in "
+            "Decisions before anything is drafted. Does not write or publish anything."
         ),
         executor=content_plan.KEY,
-        version_label="1.0.0",
+        version_label="1.1.0",
+        review_policy=CONTENT_PLAN_REVIEW_POLICY,
         presentation=WorkflowDiagram(
             direction="TD",
             nodes=(
@@ -1663,7 +1805,10 @@ BUILTIN_WORKFLOWS = (
                     "batch", "step", "Prepare the next batch", "next due batch, no model call"
                 ),
                 DiagramNode(
-                    "pages", "step", "Read existing pages", "up to 60, four at a time, 20 s each"
+                    "pages",
+                    "step",
+                    "Read existing pages",
+                    "60 in full, the outline of every other",
                 ),
                 DiagramNode(
                     "model",
@@ -1675,19 +1820,19 @@ BUILTIN_WORKFLOWS = (
                     "allocate",
                     "step",
                     "Fill every week",
-                    "Tin checks each piece, then fills weeks in order",
+                    "checks each piece, names its nearest pages",
                 ),
                 DiagramNode(
                     "files",
                     "store",
                     "Plan in project Files",
-                    "PLAN.md, plan.json and evidence.json",
+                    "one commit: PLAN.md, plan.json, evidence",
                 ),
                 DiagramNode(
-                    "receipt",
-                    "receipt",
-                    "Publish receipt",
-                    "one commit, nothing drafted or published",
+                    "approve",
+                    "gate",
+                    "Approve the plan",
+                    "targets and pages first, no timer",
                 ),
             ),
             edges=(
@@ -1698,7 +1843,7 @@ BUILTIN_WORKFLOWS = (
                 DiagramEdge("model", "allocate"),
                 DiagramEdge("allocate", "files"),
                 DiagramEdge("batch", "files"),
-                DiagramEdge("files", "receipt"),
+                DiagramEdge("files", "approve", "call", "first plan only"),
             ),
         ),
         prerequisites=(
@@ -1736,7 +1881,7 @@ BUILTIN_WORKFLOWS = (
         "searches where a choice depends on what ranks, and proposes a prioritized portfolio "
         "of pages for every week. Started by Plan upcoming content, never on its own.",
         executor=CODEX_PROCEDURE_EXECUTOR,
-        version_label="1.0.0",
+        version_label="1.1.0",
         presentation=WorkflowDiagram(
             direction="TD",
             nodes=(

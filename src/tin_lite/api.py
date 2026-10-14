@@ -82,6 +82,7 @@ from tin_lite.integrations import (
     registered_integrations,
 )
 from tin_lite.keyword_plan_control import stop_keyword_plan as stop_keyword_plan_service
+from tin_lite.linkedin_posting import visible as linkedin_visible
 from tin_lite.linkedin_posts import LinkedInPosts
 from tin_lite.luna import LunaProtocolError, LunaSafetyError, LunaUpstreamError
 from tin_lite.organic_audit_control import stop_organic_audit as stop_organic_audit_service
@@ -1474,6 +1475,12 @@ class IntegrationSelection(BaseModel):
     option_id: str = Field(min_length=1, max_length=500)
 
 
+class CodeRepositorySelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repositories: list[str] = Field(default_factory=list, max_length=20)
+
+
 class GoogleAdsLinkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2257,6 +2264,27 @@ async def refresh_linkedin_posting(
 
 
 @router.put(
+    "/api/projects/{project_id}/integrations/infra.github/code-repositories",
+    response_model=IntegrationView,
+)
+async def configure_code_repositories(
+    project_id: UUID,
+    payload: CodeRepositorySelection,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    await _require_project_access(project_id, request, user)
+    service = request.app.state.runtime.integrations
+    try:
+        connection = await service.select_code_repositories(
+            project_id=project_id, repositories=payload.repositories
+        )
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from exc
+    return _integration_view(service._definition("infra.github"), connection, configured=True)
+
+
+@router.put(
     "/api/projects/{project_id}/integrations/{provider_key}",
     response_model=IntegrationView,
 )
@@ -2438,6 +2466,7 @@ async def list_workflows(
         for item in workflows
         # Agent-only workflows (start here) run through the MCP; the catalog does not list them.
         if collection_visible(request.app.state.settings, item, project_id)
+        and linkedin_visible(request.app.state.settings, item, project_id)
         and not (item.definition or {}).get("agent_only")
         and (item.definition or {}).get("public_discovery", True)
         and (

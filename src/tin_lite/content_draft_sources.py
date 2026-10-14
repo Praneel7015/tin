@@ -397,6 +397,23 @@ class ContentDraftSources:
         receipt = await self.db.get_effect(content_draft.receipt_key(run_id))
         return receipt.result if receipt and receipt.status == "completed" else None
 
+    async def draft_member(self, run):
+        """Whether the member behind this draft can still read the project.
+
+        A scheduled occurrence has no starter of its own; it drafts for the member who saved
+        the schedule, so that member must still belong to the project.
+        """
+        actor = run.started_by_clerk_user_id
+        if actor is None and run.trigger_source == "schedule" and run.project_workflow_id:
+            configured = await self.db.get_project_workflow(
+                run.project_workflow_id, include_archived=True
+            )
+            if configured is not None and configured.project_id == run.project_id:
+                actor = configured.created_by_clerk_user_id
+        return actor is not None and await self.db.has_project_access(
+            project_id=run.project_id, clerk_user_id=actor
+        )
+
     async def prepare(
         self, run, *, output_validator=content_draft.VALIDATOR, positioning=False, kinds=None
     ):
@@ -420,9 +437,11 @@ class ContentDraftSources:
                 ):
                     raise ValueError("Draft contract changed after preparation.")
                 return receipt.result
-            if not await self.db.has_project_access(
-                project_id=run.project_id, clerk_user_id=run.started_by_clerk_user_id
-            ):
+            if not await self.draft_member(run):
+                if run.started_by_clerk_user_id is None:
+                    raise LookupError(
+                        "The member who saved this schedule no longer has project access."
+                    )
                 raise LookupError("project not found")
             if run.review_source_run_id is not None:
                 command = await conn.fetchrow(

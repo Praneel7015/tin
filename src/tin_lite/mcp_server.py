@@ -5127,12 +5127,14 @@ def create_mcp_app(
 
     @server.tool()
     async def set_code_repositories(project_id: str, repositories: list[str]) -> dict[str, Any]:
-        """Set the GitHub repositories Tin reads beside the website repository.
+        """Set the GitHub repositories Tin uses beside the website repository.
 
         Use it when the app, docs or an SDK live in their own repositories. Pass every
-        owner/name to keep, at most five; an empty list clears them. Workflows read these
-        repositories for context and never write to them: pull requests and published pages
-        still go to the website repository chosen on Tin's Integrations page.
+        owner/name to keep, at most five; an empty list clears them. Every workflow reads
+        them for context. Workflows that change the app itself (a signup question, a
+        framework starter) may open a pull request in one for the founder to review; Tin
+        never merges or commits there. Published pages and site fixes still go to the
+        website repository chosen on Tin's Integrations page.
         """
         token = await caller()
         parsed_project_id = _mcp_uuid(project_id, field="project_id")

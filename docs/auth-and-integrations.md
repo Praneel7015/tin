@@ -65,7 +65,8 @@ provider as a special workflow:
    as soon as the provider's sign-in returns, and "Set up" and "Configure" open the same
    dialog; its confirm button reads "Link". Until one is chosen the row shows "Set up" and
    workflows that need it stay blocked. GitHub's dialog also offers an optional checklist of
-   other repositories (the app, docs or an SDK) that workflows read and never write; see
+   other repositories (the app, docs or an SDK) that workflows read, and where app-changing
+   workflows may open unmerged pull requests; see
    [GitHub repositories](github-repositories.md).
 2. A provider adapter owns authorization, token refresh, revocation, health checks, and provider API
    translation. LinkedIn-specific behavior stops at that adapter.

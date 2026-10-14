@@ -7970,14 +7970,14 @@ function renderIntegrationResourceOptions() {
     integrationProjectOptions.append(option);
   }
   if (choice.providerKey === "infra.github" && choice.options.length > 1) {
-    // The app, docs or an SDK in their own repositories: every workflow reads them for
-    // context, and none of them writes there.
+    // The app, docs or an SDK in their own repositories: every workflow reads them; a
+    // workflow that changes the app may open a pull request there, never a merge.
     const heading = document.createElement("p");
     heading.className = "integration-project-subhead";
-    heading.innerHTML = "<strong>Other repositories Tin reads</strong><small>Optional. Your app, docs or SDK when they live apart from the website. Workflows read them for context; Tin never merges into them.</small>";
+    heading.innerHTML = "<strong>Other repositories</strong><small>Optional. Your app, docs or SDK when they live apart from the website. Every workflow reads them; a workflow that changes your app, such as adding a signup question, may open a pull request there for you to review. Tin never merges or commits to them.</small>";
     const group = document.createElement("div");
     group.setAttribute("role", "group");
-    group.setAttribute("aria-label", "Other repositories Tin reads");
+    group.setAttribute("aria-label", "Other repositories");
     integrationProjectOptions.append(heading, group);
     for (const item of choice.options) {
       if (item.id === choice.selected) continue;

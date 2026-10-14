@@ -3,7 +3,8 @@
 A project links one GitHub connection, and that connection names one **website repository**,
 plus up to five optional **code repositories**. A founder whose marketing site and app live
 apart, for example `acme/www` and `acme/app`, picks `acme/www` as the website and adds
-`acme/app` under "Other repositories Tin reads".
+`acme/app` under "Other repositories". The dialog says that workflows read them and that a
+workflow changing the app may open a pull request there for review, never a merge.
 
 ## Who writes where
 

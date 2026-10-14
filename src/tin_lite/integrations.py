@@ -4374,7 +4374,8 @@ class IntegrationService:
     async def select_code_repositories(
         self, *, project_id: UUID, repositories: list[str]
     ) -> IntegrationConnection:
-        """Set the repositories Tin reads beside the website repository, never writes to."""
+        """Set the repositories beside the website repository: read by every workflow, and
+        open to unmerged pull requests from workflows that change the app."""
         if not isinstance(repositories, list) or not all(
             isinstance(name, str) for name in repositories
         ):
@@ -4409,7 +4410,7 @@ class IntegrationService:
         await self._record_activity(
             updated,
             "integration_configured",
-            f"GitHub now also reads {summary}.",
+            f"GitHub now also uses {summary}.",
             suffix=_sha256(_canonical_json(chosen))[:12],
         )
         return updated
@@ -5601,8 +5602,9 @@ def _provider_list(response: httpx.Response, *, provider: str) -> list[Any]:
     return payload
 
 
-# Repositories Tin reads beside the website repository: the app, docs or an SDK. Every
-# write (a pull request, a commit, a merge) still goes to the website repository alone.
+# Repositories beside the website repository: the app, docs or an SDK. Every workflow reads
+# them; only a declared product-code output opens an unmerged pull request in one. Commits,
+# merges and site changes go to the website repository alone.
 CODE_REPOSITORIES_KEY = "code_repositories"
 CODE_REPOSITORY_LIMIT = 5
 

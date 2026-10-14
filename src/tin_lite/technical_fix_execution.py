@@ -593,10 +593,9 @@ class TechnicalFixExecution:
                 f"The patch writes to {describe_omission(left)}, which Tin didn't read, so a "
                 "fix can't change it."
             )
-        skipped = sorted(changed & {item["path"] for item in getattr(bundle, "skipped", ())})
-        if skipped:
+        if skipped := left_out_write(changed, getattr(bundle, "skipped", ())):
             raise ValueError(
-                f"{skipped[0]} is a large media or built file Tin didn't read, so a fix "
+                f"{skipped['path']} is a large media or built file Tin didn't read, so a fix "
                 "can't change it."
             )
         files = archive_files(bundle.archive, select=lambda path, _size: path in changed)

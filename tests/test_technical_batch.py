@@ -526,6 +526,19 @@ async def test_a_snapshot_without_its_large_media_prepares_and_delivers(monkeypa
     video = {"path": "public/opensource/hero.mp4", "content": "not a video\n"}
     with pytest.raises(ValueError, match="hero.mp4 is a large media or built file"):
         await execution._validate_batch_delivery(run, patch(prepared, [video], body=NOTE), prepared)
+    above = {"path": "public/opensource", "content": "not a folder\n"}
+    with pytest.raises(ValueError, match="hero.mp4 is a large media or built file"):
+        await execution._validate_batch_delivery(run, patch(prepared, [above], body=NOTE), prepared)
+
+
+def test_a_write_reaches_a_left_out_entry_at_under_or_above_its_path():
+    from tin_lite.repository_limits import left_out_write
+
+    entries = ({"path": "src/data/posts.json"}, {"path": "vendor/theme"})
+    for path in ("src/data/posts.json", "vendor/theme/a.css", "src/data", "src", "vendor"):
+        assert left_out_write({path}, entries) is not None, path
+    for path in ("src/data/posts.json.bak", "src/database.ts", "vendor/themes/a.css", "srcx"):
+        assert left_out_write({path}, entries) is None, path
 
 
 async def test_files_left_out_of_the_snapshot_are_named_and_never_written():
@@ -571,6 +584,8 @@ async def test_files_left_out_of_the_snapshot_are_named_and_never_written():
     for path, named in (
         ("src/data/posts.json", r"src/data/posts\.json \(12\.4 MB"),
         ("vendor/theme/head.html", r"vendor/theme \(a Git submodule\)"),
+        # A file written where a folder is replaces the folder, left-out file and all.
+        ("src/data", r"src/data/posts\.json \(12\.4 MB"),
     ):
         with pytest.raises(ValueError, match=named + r".*, which Tin didn't read"):
             await execution._validate_batch_delivery(

@@ -126,12 +126,17 @@ def describe_omissions(items, *, limit: int = 5, total: int | None = None) -> st
 
 
 def left_out_write(paths, entries) -> dict | None:
-    """The left-out entry a patch would write over, if any: the same path, or a path under
-    it (a submodule or a linked folder). A snapshot that leaves files out is still usable;
-    a fix just can't change what Tin never read."""
+    """The left-out entry a patch would write over, if any. A snapshot that leaves files out
+    is still usable; a fix just can't change what Tin never read.
+
+    Git paths nest, so three writes reach a left-out entry: the same path; a path under it
+    (inside a submodule or a linked folder); and a path above it, since a file written where
+    a folder is replaces that whole folder on GitHub's tree."""
     for path in sorted(paths):
         for item in entries:
-            left = item.get("path") or ""
-            if left and (path == left or path.startswith(left.rstrip("/") + "/")):
+            left = (item.get("path") or "").rstrip("/")
+            if left and (
+                path == left or path.startswith(left + "/") or left.startswith(path + "/")
+            ):
                 return item
     return None

@@ -101,11 +101,11 @@ def validate_draft(value) -> dict:
     return result
 
 
-async def save_effect(db, key, value):
-    async with db.effect_lock(key, KEY) as (conn, saved):
+async def save_effect(db, key, value, *, operation=KEY):
+    async with db.effect_lock(key, operation) as (conn, saved):
         if saved and saved.status == "completed":
             return saved.result
-        await db.start_effect(conn, execution_key=key, operation=KEY)
+        await db.start_effect(conn, execution_key=key, operation=operation)
         await db.complete_effect(conn, execution_key=key, result=value)
     return value
 

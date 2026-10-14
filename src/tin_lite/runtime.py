@@ -44,6 +44,7 @@ from tin_lite.integrations import IntegrationService
 from tin_lite.keyword_plan import POLICY as KEYWORD_POLICY
 from tin_lite.keyword_plan import ROUTE_KEY as KEYWORD_ROUTE_KEY
 from tin_lite.keyword_plan_activities import KeywordPlanActivities
+from tin_lite.linkedin_publish_activities import LinkedInPublishActivities
 from tin_lite.luna import LunaService, OpenAIResponsesClient, TinWorkflowApiClient
 from tin_lite.memory import MemoryGardener
 from tin_lite.model_providers import (
@@ -110,6 +111,7 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
     storage = CodeStorage(
         organization=settings.code_storage_org,
         private_key=settings.code_storage_api_key.get_secret_value(),
+        repo_prefix=settings.code_storage_repo_prefix,
     )
     system_wiki = await sync_system_wiki(
         storage=storage,
@@ -285,6 +287,9 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
     x_publish_activities = XPublishActivities(
         database=database, storage=storage, integrations=integrations
     )
+    linkedin_publish_activities = LinkedInPublishActivities(
+        database=database, storage=storage, integrations=integrations
+    )
     plan_activities = GrowthPlanActivities(
         database=database,
         storage=storage,
@@ -380,6 +385,8 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         x_style_activities.failure,
         x_publish_activities.execute,
         x_publish_activities.failure,
+        linkedin_publish_activities.execute,
+        linkedin_publish_activities.failure,
         plan_activities.prepare,
         plan_activities.write,
         plan_activities.publish,

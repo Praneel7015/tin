@@ -29,11 +29,14 @@ def review_pending(run: Any) -> bool:
     return status == RunStatus.NEEDS_INPUT.value and bool(getattr(run, "review_required", False))
 
 
+# Draft batches open in the post reader, which picks X's or LinkedIn's by the folder.
+DRAFT_FOLDERS = ("social/x-drafts/", "social/linkedin/drafts/")
+
+
 def document_url(settings: Any, run: Any) -> str:
-    if (getattr(run, "artifact_path", "") or "").startswith(
-        "social/x-drafts/"
-    ) and run.artifact_path.endswith(".json"):
-        query = urlencode({"project": str(run.project_id), "x_draft": run.artifact_path})
+    path = getattr(run, "artifact_path", "") or ""
+    if path.startswith(DRAFT_FOLDERS) and path.endswith(".json"):
+        query = urlencode({"project": str(run.project_id), "x_draft": path, "x_run": str(run.id)})
         return f"{dashboard_url(settings)}/files?{query}"
     return f"{dashboard_url(settings)}/document/{run.id}?project={run.project_id}"
 
@@ -203,6 +206,31 @@ def revise(settings: Any, run: Any, proposal: Any = None) -> dict[str, Any]:
                 "follow_up_body": "<the replacement follow-up copy>",
             },
             "keeps_review": True,
+        }
+    if path.startswith(DRAFT_FOLDERS) and path.endswith(".json"):
+        platform = "linkedin" if path.startswith("social/linkedin/") else "x"
+        return {
+            "direct_edit": False,
+            "reason": (
+                "A draft is checked JSON, so it changes through the draft tools, which keep "
+                "its shape and never publish."
+            ),
+            "before": [
+                {
+                    "tool": f"read_{platform}_drafts",
+                    "arguments": {"project_id": project, "path": path},
+                    "use": "Read the current draft and its `revision`; keep others' edits.",
+                }
+            ],
+            "tool": f"save_{platform}_draft",
+            "arguments": {
+                "project_id": project,
+                "path": path,
+                "expected_revision": f"<revision from read_{platform}_drafts>",
+                "request_id": NEW_REQUEST,
+                "draft": "<the complete edited draft>",
+            },
+            "after": "Give the founder `review_url`; it opens the saved draft in the post reader.",
         }
     if PurePosixPath(path).suffix.casefold() not in TEXT_SUFFIXES:
         return {

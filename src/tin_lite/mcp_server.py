@@ -68,6 +68,7 @@ from tin_lite.growth_onboarding_control import (
 )
 from tin_lite.integrations import IntegrationError
 from tin_lite.keyword_plan_control import stop_keyword_plan as stop_keyword_plan_service
+from tin_lite.linkedin_posts import LinkedInPosts
 from tin_lite.mcp_errors import GuardedMCPServer
 from tin_lite.onboarding_experience import (
     delivery_destination,
@@ -4561,6 +4562,105 @@ def create_mcp_app(
         if not safe_project_file_path(path) or not path.endswith(".json"):
             raise ToolError("Choose an X draft JSON path in this project")
         return x_draft_handoff(project, path)
+
+    @server.tool()
+    async def read_linkedin_drafts(project_id: str, path: str) -> dict[str, Any]:
+        """Read a bounded LinkedIn draft in project Files and get its browser editor link.
+
+        The JSON keeps publishable text apart from facts, notes and images; each post's
+        `target` is the LinkedIn URN it posts as, one of `accounts`: the pages connected for
+        this project and your own LinkedIn profile if you connected it. No member posts as
+        another member's profile. Reading or editing a draft never publishes.
+        """
+        token = await caller()
+        project = _mcp_uuid(project_id, field="project_id")
+        await require_project(project, token, tool_name="read_linkedin_drafts")
+        assert token.subject is not None
+        try:
+            view = await LinkedInPosts(runtime(), settings).read(project, token.subject, path)
+        except ValidationError as exc:
+            raise ToolError("LinkedIn draft is invalid or unavailable") from exc
+        return {**view, **x_draft_handoff(project, path)}
+
+    @server.tool()
+    async def save_linkedin_draft(
+        project_id: str,
+        path: str,
+        expected_revision: str,
+        request_id: str,
+        draft: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Save an edited LinkedIn draft as an ordinary project file at expected_revision.
+
+        Use schema_version "tin.social.linkedin_draft.v1" under social/linkedin/drafts/.
+        Keep stable post IDs, text within 3,000 characters, up to 20 PNG or JPEG images
+        already in Files, and notes apart from publishable text. Reuse the same request_id
+        only when retrying identical edits after an uncertain response. This does not
+        approve or publish any post.
+        """
+        token = await caller()
+        project = _mcp_uuid(project_id, field="project_id")
+        request = _mcp_uuid(request_id, field="request_id")
+        await require_project(project, token, tool_name="save_linkedin_draft")
+        _validate_revision(expected_revision)
+        assert token.subject is not None
+        try:
+            view = await LinkedInPosts(runtime(), settings).save(
+                project,
+                token.subject,
+                path=path,
+                expected_revision=expected_revision,
+                request_id=request,
+                draft=draft,
+                client_id=token.client_id,
+            )
+        except ValidationError as exc:
+            raise ToolError("LinkedIn draft has an invalid field") from exc
+        return {**view, **x_draft_handoff(project, path)}
+
+    @server.tool()
+    async def preview_linkedin_post(project_id: str, path: str, post_id: str) -> dict[str, Any]:
+        """Prepare one exact LinkedIn post preview; its token is not consent to publish.
+
+        Show the person who it posts as (their profile or a page), the exact text and the
+        images. Any later edit requires a fresh preview. Publishing is a separate explicit
+        confirmation.
+        """
+        token = await caller()
+        project = _mcp_uuid(project_id, field="project_id")
+        await require_project(project, token, tool_name="preview_linkedin_post")
+        assert token.subject is not None
+        try:
+            view = await LinkedInPosts(runtime(), settings).preview(
+                project, token.subject, path=path, post_id=post_id
+            )
+        except ValidationError as exc:
+            raise ToolError("LinkedIn draft has an invalid field") from exc
+        return {**view, **x_draft_handoff(project, path)}
+
+    @server.tool()
+    async def publish_linkedin_post(
+        project_id: str,
+        preview_token: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Publish only after the person explicitly confirms this exact LinkedIn preview.
+
+        The call starts durable delivery; return its run ID immediately and check
+        list_project_runs for progress. Retry an uncertain call only with the SAME
+        preview_token and request_id. Never silently send another post.
+        """
+        token = await caller()
+        project = _mcp_uuid(project_id, field="project_id")
+        await require_project(project, token, tool_name="publish_linkedin_post")
+        assert token.subject is not None
+        return await LinkedInPosts(runtime(), settings).publish(
+            project,
+            token.subject,
+            preview_token=_mcp_uuid(preview_token, field="preview_token"),
+            request_id=_mcp_uuid(request_id, field="request_id"),
+            client_id=token.client_id,
+        )
 
     @server.tool()
     async def list_project_files(project_id: str, revision: str | None = None) -> dict[str, Any]:

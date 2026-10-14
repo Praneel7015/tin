@@ -137,6 +137,28 @@ def test_documents_with_their_own_revision_tool_point_to_it():
     }
 
 
+def test_a_draft_batch_opens_in_the_post_reader_and_changes_through_its_tools():
+    for path, platform in (
+        ("social/linkedin/drafts/2026-10-13-launch.json", "linkedin"),
+        ("social/x-drafts/2026-10-13-launch.json", "x"),
+    ):
+        batch = run(executor="workflow.code", artifact_path=path)
+        [link] = result_links(SETTINGS, batch)
+        assert link["url"].startswith("https://tin.test/files?")
+        assert f"x_draft={path.replace('/', '%2F')}" in link["url"]
+        assert f"x_run={batch.id}" in link["url"]
+        assert link["review_url"] == link["url"]
+        route = link["revise"]
+        assert route["before"][0]["tool"] == f"read_{platform}_drafts"
+        assert route["tool"] == f"save_{platform}_draft"
+        assert route["arguments"]["path"] == path
+    # Any other JSON file is still an ordinary document.
+    other = run(artifact_path="reports/linkedin/summary.json")
+    [link] = result_links(SETTINGS, other)
+    assert f"/document/{other.id}" in link["url"]
+    assert link["revise"]["tool"] == "commit_project_changes"
+
+
 def test_a_file_mcp_cannot_edit_has_no_route():
     video = document_handoff(SETTINGS, run(artifact_path="creative/demo.mp4"))["revise"]
     assert video["direct_edit"] is False and video["tool"] is None

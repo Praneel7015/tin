@@ -119,7 +119,7 @@ const CUSTOM_API_TEMPLATE = Object.freeze({
   status: "available",
 });
 const CONNECT_REQUEST_KEY = "tin-lite:connect-providers";
-const CONNECT_PROVIDERS = new Set(["infra.github", "infra.github_user", "analytics.gsc", "workspace.google", "ads.google", "payments.stripe", "analytics.posthog", "social.x"]);
+const CONNECT_PROVIDERS = new Set(["infra.github", "infra.github_user", "analytics.gsc", "workspace.google", "ads.google", "payments.stripe", "analytics.posthog", "social.x", "social.linkedin"]);
 let pendingConnectRequest = null;
 
 function rememberConnectRequest(projectId, providers) {
@@ -1664,7 +1664,7 @@ function openRunArtifact(runId, returnView = state.view) {
   const run = state.runs.find((item) => item.id === runId);
   if (hasOutputConflict(run)) { openOutputComparison(runId, returnView); return; }
   const output = availableRunOutput(run);
-  if (output?.source === "canonical" && /^social\/x-drafts\/[^/]+\.json$/.test(output.path) && window.TinXPosts) {
+  if (output?.source === "canonical" && draftPlatform(output.path) && draftReader(output.path)) {
     openXComposer(output.path, runId);
     return;
   }
@@ -1675,21 +1675,34 @@ function openRunArtifact(runId, returnView = state.view) {
   openRunOutputFile(run, output, returnView);
 }
 
+// Exact-post drafts open in the post reader, which X and LinkedIn share; the path names which.
+function draftPlatform(path) {
+  if (/^social\/x-drafts\/[^/]+\.json$/.test(path || "")) return "X";
+  if (/^social\/linkedin\/drafts\/[^/]+\.json$/.test(path || "")) return "LinkedIn";
+  return null;
+}
+
+// A draft link from an agent may name any JSON path; only LinkedIn's folder opens LinkedIn's.
+function draftReader(path) {
+  return /^social\/linkedin\//.test(path || "") ? window.TinLinkedInPosts : window.TinXPosts;
+}
+
 function openXComposer(path, runId = "manual") {
-  if (!window.TinXPosts || !state.project || state.projectAccess !== "ready") return;
+  if (!draftReader(path) || !state.project || state.projectAccess !== "ready") return;
   goToRoute(`files?${new URLSearchParams({x_draft: path, x_run: runId, x_back: currentRoute()})}`);
 }
 
 function renderXComposer() {
   const path = xDraftPathFromLocation();
-  if (!path || !window.TinXPosts) return;
+  const reader = draftReader(path);
+  if (!path || !reader) return;
   const query = new URLSearchParams(window.location.search);
   const runId = query.get("x_run") || "manual";
   const candidate = query.get("x_back") || "files";
   const back = DASHBOARD_ROUTE.test(candidate) && !new URLSearchParams(candidate.split("?")[1]).has("x_draft") ? candidate : "files";
   const backView = back.split("?")[0];
   const context = currentProjectContext();
-  window.TinXPosts.open({
+  reader.open({
     host: main,
     actorId: state.signedInUserId,
     returnLabel: backView === "file" ? "files" : backView === "system" ? "my system" : backView,
@@ -1697,7 +1710,8 @@ function renderXComposer() {
     projectId: context.projectId,
     path,
     runId,
-    supportsAltText: state.integrations.find(item => item.key === "social.x")?.configuration?.supports_alt_text !== false,
+    // LinkedIn takes alt text on every image; X only where the connected app allows it.
+    supportsAltText: reader === window.TinLinkedInPosts || state.integrations.find(item => item.key === "social.x")?.configuration?.supports_alt_text !== false,
     api: async (apiPath, options) => {
       if (!isCurrentProjectContext(context)) throw new Error("Project changed. Reopen the draft in the current project.");
       const result = await api(apiPath, options);
@@ -1827,6 +1841,7 @@ function comparisonFileLabel(route) {
 }
 
 function render() {
+  // Both readers share one open reader, so either closes it.
   if (state.view !== "x-draft" || state.projectAccess !== "ready") window.TinXPosts?.close();
   state.comparePage?.destroy();
   state.comparePage = null;
@@ -6339,14 +6354,15 @@ function renderJsonProjectFile(route, file) {
       }
     },
   });
-  if (route.source === "canonical" && !route.compareRun && /^social\/x-drafts\/[^/]+\.json$/.test(route.path)) {
+  const drafts = route.source === "canonical" && !route.compareRun ? draftPlatform(route.path) : null;
+  if (drafts) {
     const actions = main.querySelector(".project-json-actions");
     if (actions) {
       const edit = document.createElement("button");
       edit.type = "button";
       edit.className = "project-file-action";
-      edit.textContent = "Edit X drafts";
-      edit.title = "Open the latest saved X draft";
+      edit.textContent = `Edit ${drafts} drafts`;
+      edit.title = `Open the latest saved ${drafts} draft`;
       edit.addEventListener("click", () => openXComposer(route.path));
       actions.prepend(edit);
     }
@@ -6712,6 +6728,9 @@ function bindIntegrationCardControls() {
   document.querySelectorAll("[data-stripe-refresh]").forEach((button) => {
     button.addEventListener("click", () => refreshStripe(button));
   });
+  document.querySelectorAll("[data-linkedin-posting-refresh]").forEach((button) => {
+    button.addEventListener("click", () => refreshLinkedInPosting(button));
+  });
 }
 
 function renderIntegrations() {
@@ -6810,6 +6829,8 @@ function renderIntegrationCard(integration) {
     : integration.key === "social.x" && connected
     ? integration.status === "needs_attention" ? "reconnect required"
       : (integration.configuration?.granted_capabilities || []).includes("x.posts.publish") ? "ready to publish approved posts" : "reading only"
+    : integration.key === "social.linkedin" && connected
+    ? linkedInPostingHealth(integration)
     : integration.key === "ads.google" && connected
     ? googleAdsHealth(integration)
     : integration.key === "payments.stripe" && connected
@@ -6930,6 +6951,37 @@ function renderXIntegrationExpanded(integration) {
   </div>`;
 }
 
+function linkedInPostingAccounts(integration) {
+  return (integration.configuration?.accounts || []).filter((account) => account.active);
+}
+
+function linkedInPostingHealth(integration) {
+  if (integration.status === "needs_attention") return "reconnect required";
+  const count = linkedInPostingAccounts(integration).length;
+  return `approved posts only · ${count} ${count === 1 ? "account" : "accounts"}`;
+}
+
+function renderLinkedInPostingExpanded(integration) {
+  const accounts = integration.configuration?.accounts || [];
+  const rows = accounts.map((account) => `<div class="integration-detail-row">
+      <span class="integration-detail-label">${account.kind === "organization" ? "Page" : "Profile"}</span>
+      <span class="integration-detail-value">${account.active ? "" : "○ "}${escapeHtml(account.name)}${account.active ? "" : " · needs reconnecting"}</span>
+    </div>`).join("");
+  return `<div class="integration-expanded">
+    ${integration.status === "needs_attention" ? `<p class="integration-setup-prompt" role="status"><strong>LinkedIn needs reconnecting.</strong> No connected account can post. Connect again and pick yourself or a page.</p>` : ""}
+    ${rows || `<div class="integration-detail-row"><span class="integration-detail-label">Accounts</span><span class="integration-detail-value is-muted">None connected</span></div>`}
+    <div class="integration-detail-row"><span class="integration-detail-label">Unlocks</span><span class="integration-detail-value is-muted">${escapeHtml((integration.unlocks || []).join(" · "))}</span></div>
+    <p class="integration-setup-prompt">Drafting never posts to LinkedIn. Tin publishes only the exact post you preview and confirm, as the account you choose for it.</p>
+    <div class="integration-control-footer">
+      <span>connected ${escapeHtml(integration.connected_at ? timeLabel(integration.connected_at) : "recently")} · via Zernio · ${escapeHtml(integration.last_checked_at ? `checked ${timeLabel(integration.last_checked_at)}` : "not checked yet")}</span>
+      <button class="integration-reconnect" type="button" data-linkedin-posting-refresh>Check again</button>
+      <button class="integration-reconnect" type="button" data-integration-connect="social.linkedin">${integration.status === "needs_attention" ? "Reconnect" : "Add accounts"}</button>
+      <button class="integration-disconnect" type="button" data-integration-disconnect="social.linkedin">Disconnect</button>
+      <button class="integration-done" type="button" data-integration-expand="social.linkedin">Done</button>
+    </div>
+  </div>`;
+}
+
 function renderIntegrationExpanded(integration) {
   if (integration.key === "network.linkedin") {
     const permission = integration.configuration?.collection_permission;
@@ -6947,6 +6999,7 @@ function renderIntegrationExpanded(integration) {
   }
   if (integration.key === "payments.stripe") return renderStripeExpanded(integration);
   if (integration.key === "social.x") return renderXIntegrationExpanded(integration);
+  if (integration.key === "social.linkedin") return renderLinkedInPostingExpanded(integration);
   const selected = integrationSelection(integration) || "";
   const isPostHog = integration.key === "analytics.posthog";
   const resourceLabel = integration.key === "infra.github" ? "Repository" : isPostHog ? "PostHog project" : "Search property";
@@ -7698,12 +7751,21 @@ async function bootstrap(invitedProjectId = null, integrationReturn = null) {
 
 async function completeIntegrationCallback() {
   const path = window.location.pathname.replace(/\/$/, "");
-  if (!["/integrations/callback/google", "/integrations/callback/github", "/integrations/callback/posthog", "/integrations/callback/github-account", "/integrations/callback/x"].includes(path)) return null;
+  if (!["/integrations/callback/google", "/integrations/callback/github", "/integrations/callback/posthog", "/integrations/callback/github-account", "/integrations/callback/x", "/integrations/callback/linkedin"].includes(path)) return null;
   const values = new URL(window.location.href).searchParams;
   const provider = path.split("/").pop();
   const stateToken = values.get("state");
   let connected;
-  if (provider === "google" || provider === "posthog" || provider === "github-account" || provider === "x") {
+  if (provider === "linkedin") {
+    // Zernio returns without a code; Tin reads the accounts from the project's profile.
+    if (!stateToken) throw new Error("The integration connection did not return a valid state.");
+    if (values.get("error")) throw new Error("LinkedIn was not connected. Connect again and pick yourself or a page.");
+    connected = await api("/api/integrations/linkedin/complete", {
+      method: "POST",
+      body: JSON.stringify({ state: stateToken }),
+    });
+    showToast(`${connected.name} connected.`);
+  } else if (provider === "google" || provider === "posthog" || provider === "github-account" || provider === "x") {
     if (!stateToken) throw new Error("The integration connection did not return a valid state.");
     const code = values.get("code");
     const label = { google: "Google", posthog: "PostHog", "github-account": "GitHub account", x: "X" }[provider];
@@ -8065,6 +8127,24 @@ async function refreshStripe(button) {
     if (!isCurrentProjectContext(context)) return;
     button.disabled = false;
     showToast(`Could not check Stripe: ${error.message}`);
+  }
+}
+
+async function refreshLinkedInPosting(button) {
+  const context = currentProjectContext();
+  if (!context.projectId) return;
+  button.disabled = true;
+  try {
+    const updated = await api(`/api/projects/${encodeURIComponent(context.projectId)}/integrations/social.linkedin/refresh`, { method: "POST" });
+    if (!isCurrentProjectContext(context)) return;
+    const index = state.integrations.findIndex((item) => item.key === "social.linkedin");
+    if (index >= 0) state.integrations[index] = updated;
+    showToast(`LinkedIn posting: ${linkedInPostingHealth(updated)}.`);
+    renderIntegrations();
+  } catch (error) {
+    if (!isCurrentProjectContext(context)) return;
+    button.disabled = false;
+    showToast(`Could not check LinkedIn: ${error.message}`);
   }
 }
 

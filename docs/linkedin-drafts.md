@@ -17,9 +17,11 @@ verification should be labeled accordingly. Missing material should produce a us
 explanation, not invented posts.
 
 Reading, downloading and editing use ordinary project file services and their membership
-and revision checks. There is no LinkedIn-specific reader, file API or posting control.
-Private package validation and activation remain separate project-bound operations.
-Generation requires no LinkedIn connection.
+and revision checks. A Markdown draft has no LinkedIn-specific reader or posting control. A
+JSON draft (`tin.social.linkedin_draft.v1`) in the same folder opens in the post reader
+instead, where one post at a time is previewed and published; see
+[LinkedIn posting](linkedin-posting.md). Private package validation and activation remain
+separate project-bound operations. Generation requires no LinkedIn connection.
 
 Package authors can put optional infrequently changed inputs behind **More options** using
 `x-tin-ui: {"advanced": true}`. Required inputs remain visible. This hint changes only form

@@ -18,6 +18,7 @@ remain authoritative; older contract versions are retained for compatibility.
 ## Self-hosting and operations
 
 - [Engineering reference](engineering.md): configuration, local commands and service APIs.
+- [Staging](staging.md): deploying a change end to end before production, and what it shares.
 - [Optional billing](self-hosted-billing.md), [billing coverage](workflow-billing-coverage.md)
   and [model accounting](model-service-accounting.md).
 - [Authentication and integrations](auth-and-integrations.md),
@@ -50,6 +51,8 @@ your own accounts before use; ordinary contributor tests need no production cred
   from project files, and article repurposing with the current writing guide.
 - [LinkedIn drafts](linkedin-drafts.md): private workflow grouping and ordinary draft
   documents for choosing posts before a separate publishing step.
+- [LinkedIn posting](linkedin-posting.md): the project's Zernio connection, the accounts Tin
+  may post as, exact-post drafts, preview and publishing, and how staging reuses a profile.
 - [X drafting and publishing](x-workflow.md): account connection, personal voice capture,
   project-file drafts and individually confirmed posts with images or video.
 - [Project files in code workflows](code-project-files.md): direct reads of current files,

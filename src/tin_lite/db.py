@@ -982,6 +982,42 @@ class Database:
         )
         return _integration_auth_attempt(row) if row else None
 
+    async def other_member_integration_auth_attempt(
+        self, *, project_id: UUID, provider_key: str, clerk_user_id: str
+    ) -> bool:
+        """Whether another member has an unfinished connection attempt for this provider."""
+        return bool(
+            await self.pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM integration_auth_attempts
+                    WHERE project_id = $1 AND provider_key = $2
+                      AND clerk_user_id <> $3 AND used_at IS NULL
+                      AND expires_at > now()
+                )
+                """,
+                project_id,
+                provider_key,
+                clerk_user_id,
+            )
+        )
+
+    async def close_integration_auth_attempts(
+        self, *, project_id: UUID, provider_key: str, clerk_user_id: str
+    ) -> None:
+        """End a member's other unfinished attempts once one of them connected."""
+        await (borrowed_connection(self) or self.pool).execute(
+            """
+            UPDATE integration_auth_attempts
+            SET expires_at = LEAST(expires_at, now())
+            WHERE project_id = $1 AND provider_key = $2
+              AND clerk_user_id = $3 AND used_at IS NULL
+            """,
+            project_id,
+            provider_key,
+            clerk_user_id,
+        )
+
     @asynccontextmanager
     async def integration_refresh_lock(
         self, *, project_id: UUID, provider_key: str, conn: asyncpg.Connection | None = None
@@ -6840,6 +6876,24 @@ class Database:
             )""",
             str(project_id),
         )
+        await conn.execute(
+            """WITH approvals AS (
+                SELECT split_part(execution_key, ':', 3) AS id FROM effect_receipts
+                WHERE operation='social.linkedin_publish'
+                  AND execution_key LIKE 'linkedin:approved:%'
+                  AND result->>'project_id'=$1::text
+            )
+            DELETE FROM effect_receipts
+            WHERE operation = 'social.linkedin_publish' AND (
+                (execution_key LIKE 'linkedin:preview:%' AND result->>'project_id'=$1::text)
+                OR execution_key LIKE 'linkedin:confirm:' || $1::text || ':%'
+                OR (split_part(execution_key, ':', 2) IN ('approved', 'media', 'post')
+                    AND split_part(execution_key, ':', 3) IN (SELECT id FROM approvals))
+                OR split_part(execution_key, ':', 1) IN (
+                    SELECT id::text FROM workflow_runs WHERE project_id=$1::uuid)
+            )""",
+            str(project_id),
+        )
         statements = (
             "DELETE FROM content_plan_revisions WHERE project_id = $1",
             "DELETE FROM content_plan_batches WHERE project_workflow_id IN "
@@ -6857,6 +6911,16 @@ class Database:
             "DELETE FROM run_rollouts WHERE run_id IN "
             "(SELECT id FROM workflow_runs WHERE project_id = $1)",
             "DELETE FROM project_test_identities WHERE project_id = $1",
+            "DELETE FROM project_task_entries WHERE run_id IN "
+            "(SELECT id FROM workflow_runs WHERE project_id = $1)",
+            "DELETE FROM project_authors WHERE project_id = $1",
+            # LinkedIn collection holds other people's names, headlines and page text. Jobs (and
+            # their pages) go before the connections: a job interrupted mid-lease still points at
+            # its extension device, which would block the devices' cascade.
+            "DELETE FROM connection_collection_jobs WHERE project_id = $1",
+            "DELETE FROM connection_collection_account_leases WHERE run_id IN "
+            "(SELECT id FROM workflow_runs WHERE project_id = $1)",
+            "DELETE FROM connection_extension_devices WHERE project_id = $1",
             "DELETE FROM integration_auth_attempts WHERE project_id = $1",
             "DELETE FROM integration_call_receipts WHERE project_id = $1",
             # Failed-payment recovery keeps Stripe and mailbox evidence in its run receipts and
@@ -7201,6 +7265,10 @@ class Database:
             "social.x_revise": ("x_revision_ready", "Your X revision is ready."),
             "social.x_draft": ("x_draft_ready", "Your X draft is ready."),
             "social.x_publish": ("x_post_published", "Your X post is published."),
+            "social.linkedin_publish": (
+                "linkedin_post_published",
+                "Your LinkedIn post is published.",
+            ),
             "growth.onboarding_plan": ("onboarding_plan_ready", "The growth plan is ready."),
             "content.plan": ("content_plan_ready", "Content plan is ready."),
             "organic.audit": ("organic_audit_ready", "Organic visibility audit is ready."),
@@ -7328,6 +7396,28 @@ class Database:
             artifact_ref=artifact_ref,
             summary=summary,
             workflow_key="social.x_publish",
+        )
+
+    async def complete_linkedin_publish_projection(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        execution_key: str,
+        run_id: UUID,
+        canonical_commit_sha: str,
+        artifact_path: str,
+        artifact_ref: str,
+        summary: str,
+    ) -> None:
+        await self._complete_readonly_report_projection(
+            conn,
+            execution_key=execution_key,
+            run_id=run_id,
+            canonical_commit_sha=canonical_commit_sha,
+            artifact_path=artifact_path,
+            artifact_ref=artifact_ref,
+            summary=summary,
+            workflow_key="social.linkedin_publish",
         )
 
     async def retain_procedure_output(

@@ -66,6 +66,7 @@ from tin_lite.integrations import (
     GITHUB_USER_PROVIDER,
     GOOGLE_WORKSPACE_PROVIDER,
     GSC_PROVIDER,
+    LINKEDIN_POSTING_PROVIDER,
     POSTHOG_PROVIDER,
     STRIPE_PROVIDER,
     X_PROVIDER,
@@ -81,6 +82,7 @@ from tin_lite.integrations import (
     registered_integrations,
 )
 from tin_lite.keyword_plan_control import stop_keyword_plan as stop_keyword_plan_service
+from tin_lite.linkedin_posts import LinkedInPosts
 from tin_lite.luna import LunaProtocolError, LunaSafetyError, LunaUpstreamError
 from tin_lite.organic_audit_control import stop_organic_audit as stop_organic_audit_service
 from tin_lite.output_resolution import OutputResolutionError, OutputResolutionRequest
@@ -1423,6 +1425,14 @@ class GoogleIntegrationComplete(BaseModel):
     code: str = Field(min_length=1, max_length=4096)
 
 
+class LinkedInPostingComplete(BaseModel):
+    """Zernio returns without a code: the accounts are read from the project's profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: str = Field(min_length=1, max_length=256)
+
+
 class GitHubIntegrationComplete(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1495,6 +1505,7 @@ async def authentication_ui(request: Request) -> HTMLResponse:
 @router.get("/integrations/callback/github", response_class=HTMLResponse, include_in_schema=False)
 @router.get("/integrations/callback/posthog", response_class=HTMLResponse, include_in_schema=False)
 @router.get("/integrations/callback/x", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/integrations/callback/linkedin", response_class=HTMLResponse, include_in_schema=False)
 @router.get(
     "/integrations/callback/github-account", response_class=HTMLResponse, include_in_schema=False
 )
@@ -1929,6 +1940,29 @@ async def complete_x_integration(
     return _integration_view(service._definition(X_PROVIDER), connection, configured=True)
 
 
+@router.post("/api/integrations/linkedin/complete", response_model=IntegrationView)
+async def complete_linkedin_posting_integration(
+    payload: LinkedInPostingComplete,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    """Finish LinkedIn posting: record the accounts the founder picked in Zernio's connect."""
+    service = request.app.state.runtime.integrations
+    try:
+        project_id = await service.linkedin_posting.pending_project(
+            state=payload.state, clerk_user_id=user.clerk_user_id
+        )
+        await _require_project_access(project_id, request, user)
+        connection = await service.linkedin_posting.complete(
+            state=payload.state, clerk_user_id=user.clerk_user_id
+        )
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from None
+    return _integration_view(
+        service._definition(LINKEDIN_POSTING_PROVIDER), connection, configured=True
+    )
+
+
 @router.post(
     "/api/integrations/github-account/complete",
     response_model=IntegrationView,
@@ -2190,6 +2224,27 @@ async def refresh_stripe_key(
     except IntegrationError as exc:
         raise _integration_http_error(exc) from exc
     return _integration_view(service._definition(STRIPE_PROVIDER), connection, configured=True)
+
+
+@router.post(
+    "/api/projects/{project_id}/integrations/social.linkedin/refresh",
+    response_model=IntegrationView,
+)
+async def refresh_linkedin_posting(
+    project_id: UUID,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> IntegrationView:
+    """Read the project's LinkedIn accounts from Zernio again."""
+    await _require_project_access(project_id, request, user)
+    service = request.app.state.runtime.integrations
+    try:
+        connection = await service.linkedin_posting.check(project_id)
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from exc
+    return _integration_view(
+        service._definition(LINKEDIN_POSTING_PROVIDER), connection, configured=True
+    )
 
 
 @router.put(
@@ -2610,6 +2665,113 @@ async def publish_x_post(
     except (TemporalStartError, WorkflowExecutorUnavailableError) as exc:
         raise HTTPException(
             status_code=503, detail="X delivery could not start; retry the same request ID."
+        ) from exc
+
+
+def _linkedin_posts_service(request: Request) -> LinkedInPosts:
+    return LinkedInPosts(request.app.state.runtime, request.app.state.settings)
+
+
+@router.get("/api/projects/{project_id}/linkedin/drafts")
+async def read_linkedin_drafts(
+    project_id: UUID,
+    request: Request,
+    path: str = Query(min_length=1, max_length=512),
+    user: AuthContext = AUTHENTICATED_USER,
+) -> dict:
+    await _require_project_access(project_id, request, user)
+    try:
+        return await _linkedin_posts_service(request).read(project_id, user.clerk_user_id, path)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=public_error_text(exc)) from exc
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=422, detail="LinkedIn draft is invalid or unavailable."
+        ) from exc
+
+
+@router.put("/api/projects/{project_id}/linkedin/drafts")
+async def save_linkedin_draft(
+    project_id: UUID,
+    payload: XDraftSave,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> dict:
+    await _require_project_access(project_id, request, user)
+    try:
+        return await _linkedin_posts_service(request).save(
+            project_id,
+            user.clerk_user_id,
+            path=payload.path,
+            expected_revision=payload.expected_revision,
+            request_id=payload.request_id,
+            draft=payload.draft,
+            client_id="browser",
+        )
+    except (StaleProjectRevisionError, SideEffectConflictError) as exc:
+        raise HTTPException(status_code=409, detail=public_error_text(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail="LinkedIn draft has an invalid field or path."
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=public_error_text(exc, "LinkedIn draft has an invalid field or path."),
+        ) from exc
+
+
+@router.post("/api/projects/{project_id}/linkedin/preview")
+async def preview_linkedin_post(
+    project_id: UUID,
+    payload: XPostPreview,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> dict:
+    await _require_project_access(project_id, request, user)
+    try:
+        return await _linkedin_posts_service(request).preview(
+            project_id, user.clerk_user_id, path=payload.path, post_id=payload.post_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=public_error_text(exc)) from exc
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="LinkedIn draft is invalid.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=public_error_text(exc)) from exc
+
+
+@router.post("/api/projects/{project_id}/linkedin/publish")
+async def publish_linkedin_post(
+    project_id: UUID,
+    payload: XPostPublish,
+    request: Request,
+    user: AuthContext = AUTHENTICATED_USER,
+) -> dict:
+    await _require_project_access(project_id, request, user)
+    try:
+        return await _linkedin_posts_service(request).publish(
+            project_id,
+            user.clerk_user_id,
+            preview_token=payload.preview_token,
+            request_id=payload.request_id,
+            client_id="browser",
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=public_error_text(exc)) from exc
+    except IntegrationError as exc:
+        raise _integration_http_error(exc) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="LinkedIn draft is invalid.") from exc
+    except (ValueError, SideEffectConflictError) as exc:
+        raise HTTPException(status_code=409, detail=public_error_text(exc)) from exc
+    except BillingError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.diagnostic()) from exc
+    except (TemporalStartError, WorkflowExecutorUnavailableError) as exc:
+        raise HTTPException(
+            status_code=503, detail="LinkedIn delivery could not start; retry the same request ID."
         ) from exc
 
 

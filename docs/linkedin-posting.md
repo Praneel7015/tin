@@ -141,7 +141,7 @@ its documentation says otherwise); Tin just has no way to find it without its li
 whose analytics LinkedIn refuses asks the founder to reconnect LinkedIn posting; the daily run
 still reads the other accounts and names the refused one.
 
-**The record.** Postgres keeps it (`065_linkedin_listening.sql`):
+**The record.** Postgres keeps it (`066_linkedin_listening.sql`):
 - `linkedin_posts`: the post, its account, publish time, publish run, and the draft path and
   post ID it came from;
 - `linkedin_post_readings`: one row per post and checkpoint, `1h`, `4h`, `24h`, `72h` or
@@ -200,7 +200,7 @@ profile in Zernio. Without a mapping, staging refuses to connect.
 | `TIN_LITE_ZERNIO_PROFILE_MAP` | Optional; required on staging |
 
 Apply `064_linkedin_posting.sql`, which adds `social.linkedin` to the integration tables'
-provider checks, and `065_linkedin_listening.sql`, which adds listening's three tables.
+provider checks, and `066_linkedin_listening.sql`, which adds listening's three tables.
 
 ## Checked against Zernio
 

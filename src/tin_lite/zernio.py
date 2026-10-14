@@ -114,12 +114,15 @@ def linkedin_account(value: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(name, str) or not name.strip():
         name = "LinkedIn page" if kind == "organization" else "LinkedIn profile"
+    expires = value.get("tokenExpiresAt")
     return {
         "id": account_id,
         "urn": urn,
         "kind": kind,
         "name": " ".join(name.split())[:100],
         "active": value.get("isActive") is True and value.get("enabled", True) is not False,
+        # A sign-in gives the account a new token, so this moves when someone signs in again.
+        "token_expires_at": expires if isinstance(expires, str) and len(expires) <= 40 else None,
     }
 
 
@@ -235,8 +238,11 @@ class Zernio:
         return status, payload
 
     async def ensure_profile(self, project_id: UUID) -> str:
-        """The project's one profile: created once, then found again by its unique name."""
+        """The project's one profile: found by its unique name, or created once."""
 
+        found = await self.find_profile(project_id)
+        if found is not None:
+            return found
         name = profile_name(project_id)
         status, payload = await self._call(
             "POST",
@@ -253,6 +259,9 @@ class Zernio:
             existing = details.get("existingProfileId") if isinstance(details, dict) else None
             if isinstance(existing, str) and ID.fullmatch(existing):
                 return existing
+        if 400 <= status < 500:
+            # Another request may have made it meanwhile; Zernio refuses a duplicate with 409
+            # or 422.
             found = await self.find_profile(project_id)
             if found is not None:
                 return found

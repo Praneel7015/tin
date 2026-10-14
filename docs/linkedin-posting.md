@@ -10,8 +10,8 @@ confirmation and a receipt around every write.
 The **LinkedIn posting** card (`social.linkedin`) is separate from the **LinkedIn** card
 (`network.linkedin`), which collects connections through the browser extension.
 
-1. **Connect** makes the project's Zernio profile, or finds it again. There is one profile
-   per project, named `tin:<project id>`, with the project ID as its `externalId`.
+1. **Connect** finds the project's Zernio profile by its name, or makes it. There is one
+   profile per project, named `tin:<project id>`, with the project ID as its `externalId`.
 2. The founder signs in to LinkedIn through Zernio's hosted connect and picks where Tin may
    post: themselves, the pages they administer, or both. Each pick is its own Zernio
    account in the project's profile. The consent covers posting, analytics and comments,
@@ -31,11 +31,12 @@ already has.
 Any member may post as a connected page. A personal profile is its owner's alone: no member
 posts as another member's profile, over the dashboard or MCP.
 
-- Connect notes the accounts already in the project's profile before the sign-in. A personal
-  profile the sign-in adds belongs to the member who signed in. The connection keeps this as
-  `owners` (LinkedIn URN to Clerk user), and a later connect or **Check again** keeps it.
-- A profile that was already there and has no owner, such as one left by a cleanup that
-  didn't finish, belongs to nobody, and nobody posts as it.
+- Connect notes the accounts already in the project's profile, and when each one's token
+  expires, before the sign-in. A personal profile the sign-in adds, or signs in again so its
+  token changes, belongs to the member who signed in. The connection keeps this as `owners`
+  (LinkedIn URN to Clerk user), and a later connect or **Check again** keeps it.
+- A profile that was already there, has no owner and wasn't signed in again, such as one left
+  by a cleanup that didn't finish, belongs to nobody, and nobody posts as it.
 - Members connect one at a time: while one member's attempt is open, another's is refused.
   Finishing a connect closes the member's other open attempts.
 - A connection from before `owners` was recorded gives its profiles to the member who

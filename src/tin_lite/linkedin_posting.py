@@ -113,10 +113,17 @@ class LinkedInPosting:
     async def start(self, *, project_id: UUID, clerk_user_id: str) -> ConnectStart:
         self._require_enabled(project_id)
         profile_id, mapped = await self._profile(project_id)
-        # A profile this sign-in adds belongs to the member signing in, so note what the
-        # project's profile holds already. A mapped profile has no sign-in: the member who
-        # connects it is taken to own its profiles.
-        before = [] if mapped else [item["urn"] for item in await self.zernio.accounts(profile_id)]
+        # A profile this sign-in adds or signs in again belongs to the member signing in, so
+        # note what the project's profile holds already and when each token expires. A mapped
+        # profile has no sign-in: the member who connects it is taken to own its profiles.
+        before = (
+            {}
+            if mapped
+            else {
+                item["urn"]: item.get("token_expires_at")
+                for item in await self.zernio.accounts(profile_id)
+            }
+        )
         state = secrets.token_urlsafe(32)
         # Zernio keeps an existing query string and appends its own parameters to it.
         callback = f"{self.integrations._callback_url(CALLBACK)}?{urlencode({'state': state})}"
@@ -193,17 +200,23 @@ class LinkedInPosting:
             )
             known = owners(existing) if existing is not None else {}
             before = attempt.context.get("accounts_before")
-            if not isinstance(before, list):
+            if isinstance(before, list):
+                # Noted before Tin kept each token's expiry.
+                before = dict.fromkeys(before)
+            elif not isinstance(before, dict):
                 # An attempt started before Tin noted the profile's accounts.
-                before = list(known)
+                before = dict.fromkeys(known)
             owned = {}
             for account in accounts:
                 if account["kind"] != "personal":
                     continue
-                if account["urn"] in known:
-                    owned[account["urn"]] = known[account["urn"]]
-                elif account["urn"] not in before:
-                    owned[account["urn"]] = clerk_user_id
+                urn = account["urn"]
+                if urn in known:
+                    owned[urn] = known[urn]
+                elif urn not in before or (
+                    before[urn] is not None and account.get("token_expires_at") != before[urn]
+                ):
+                    owned[urn] = clerk_user_id
             connection = await self.db.upsert_integration_connection(
                 project_id=attempt.project_id,
                 provider_key=LINKEDIN_POSTING_PROVIDER,

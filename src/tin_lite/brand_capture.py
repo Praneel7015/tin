@@ -127,10 +127,7 @@ class BrandCaptureSources:
                 "bytes": len(entry[1]) if entry else 0,
             }
         if require_source and all(d["present"] for d in documents.values()):
-            raise ValueError(
-                "Both brand/BRAND.md and DESIGN.md already exist. Use Files for small "
-                "changes; automatic refresh is not part of first capture."
-            )
+            raise ValueError(contract.CAPTURE_COMPLETE)
         packet = None
         if path := inputs.get("source_path"):
             if (

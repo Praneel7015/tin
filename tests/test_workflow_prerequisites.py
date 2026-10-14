@@ -21,6 +21,7 @@ from tin_lite.catalog import BUILTIN_WORKFLOWS, BuiltinWorkflow, sync_builtin_wo
 from tin_lite.domain import Workflow, WorkflowStatus
 from tin_lite.mcp_server import _short_workflow_view, create_mcp_app
 from tin_lite.private_workflows import authoring_guide, validate_private_definition
+from tin_lite.public_workflows import load_public_workflows
 from tin_lite.run_service import WorkflowExecutorUnavailableError, start_workflow_run
 from tin_lite.system_wiki import SystemWikiRef
 from tin_lite.workflow_packages import decode_workflow_source
@@ -758,6 +759,57 @@ def catalog_workflow(key):
         definition=builtin.definition,
         status=WorkflowStatus.ACTIVE,
     )
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize(
+    "paths, expected",
+    [
+        ([], "ready"),
+        (["brand/BRAND.md"], "ready"),
+        (["DESIGN.md"], "ready"),
+        (["brand/BRAND.md", "DESIGN.md"], "blocked"),
+        (["brand/proposals/run/BRAND.md", "brand/proposals/run/DESIGN.md"], "ready"),
+    ],
+)
+async def test_brand_capture_readiness_checks_active_documents(paths, expected, private):
+    package = next(p for p in await load_public_workflows() if p.key == "brand.capture")
+    workflow = Workflow(
+        id=package.id,
+        project_id=uuid4() if private else None,
+        key=package.key,
+        title=package.definition["title"],
+        description=package.definition["description"],
+        executor="codex.procedure",
+        definition_repo_id="registry/workflows",
+        definition_path=package.definition_path,
+        current_commit_sha=A,
+        version_label=package.definition["version"],
+        definition=package.definition,
+        status=WorkflowStatus.ACTIVE,
+    )
+    database = SimpleNamespace(
+        get_project=AsyncMock(
+            return_value=SimpleNamespace(state_repo_id="projects/x", canonical_branch="main")
+        ),
+    )
+    storage = FakeStorage({path: b"document" for path in paths})
+    readiness = await project_readiness(
+        database=database, storage=storage, project_id=uuid4(), workflows=[workflow]
+    )
+    assert readiness[workflow.id]["state"] == ("ready" if private else expected)
+    if not private and expected == "blocked":
+        assert "Use Files" in readiness[workflow.id]["note"]
+        assert (
+            _short_workflow_view(workflow, readiness[workflow.id])["blocked_because"]
+            == (readiness[workflow.id]["note"])
+        )
+    assert storage.lists == (0 if private else 1)
+    assert storage.reads == 0
+    if private:
+        database.get_project.assert_not_awaited()
+    else:
+        database.get_project.assert_awaited_once()
 
 
 async def test_listing_readiness_is_input_free_and_bounded():

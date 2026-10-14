@@ -474,7 +474,8 @@ def markdown(document: dict[str, Any]) -> str:
         if latest and latest["checkpoint"] not in post["readings"]:
             rows.append((f"latest:{latest['checkpoint']}", latest))
         if not rows:
-            lines += ["No reading yet.", ""]
+            if not post["removed_at"]:
+                lines += ["No reading yet.", ""]
             continue
         extra = "Clicks" if account["kind"] == "organization" else "Saves"
         lines += [

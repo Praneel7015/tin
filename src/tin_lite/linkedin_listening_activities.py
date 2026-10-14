@@ -552,16 +552,20 @@ def listen_summary(outcomes: dict[str, dict]) -> str:
 
 
 def results_summary(notes: dict) -> str:
-    read = notes["read"]
-    parts = [
-        f"Read {read} LinkedIn post{'s' if read != 1 else ''} from the last 30 days."
-        if read
-        else "No LinkedIn posts from the last 30 days to read."
-    ]
+    read, removed = notes["read"], notes["removed"]
+    parts = []
+    if read:
+        parts.append(f"Read {read} LinkedIn post{'s' if read != 1 else ''} from the last 30 days.")
+    elif not (removed or notes["skipped"] or notes["unanswered"]):
+        parts.append("No LinkedIn posts from the last 30 days to read.")
     if notes["new"]:
         parts.append(f"Found {notes['new']} new page post{'s' if notes['new'] != 1 else ''}.")
-    if notes["removed"]:
-        parts.append(f"{notes['removed']} removed from LinkedIn.")
+    if removed:
+        parts.append(
+            f"{removed} {'was' if removed == 1 else 'were'} removed from LinkedIn, "
+            "so Tin stopped reading "
+            f"{'it' if removed == 1 else 'them'}."
+        )
     if notes.get("followers"):
         parts.append(
             "Followers: "

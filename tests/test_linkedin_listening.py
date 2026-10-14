@@ -240,7 +240,7 @@ async def test_an_unanswered_reading_is_skipped_and_a_removed_post_ends_listenin
     assert await w.read({"run_id": run_id, "checkpoint": "4h"}) == "removed"
     document, text = files(storage)
     assert document["posts"][0]["removed_at"] is not None
-    assert "so Tin stopped reading it" in text and "No reading yet." in text
+    assert "so Tin stopped reading it" in text and "No reading yet." not in text
     await w.finish(run_id)
     row = await run_state(db, UUID(run_id))
     assert row["status"] == "succeeded"
@@ -420,7 +420,10 @@ async def test_the_daily_run_reads_the_window_finds_page_posts_and_counts_follow
     # A second run the same day keeps that day's latest numbers.
     posting.zernio.analytics = {URN: [numbers(950, 14)], PAGE_URN: [None]}
     second = await daily(db, storage, posting, publish.project_id)
-    assert "1 removed from LinkedIn" in (await run_state(db, UUID(second)))["result_summary"]
+    assert (await run_state(db, UUID(second)))["result_summary"].startswith(
+        "Read 1 LinkedIn post from the last 30 days. "
+        "1 was removed from LinkedIn, so Tin stopped reading it."
+    )
     metrics = await db.pool.fetchval(
         "SELECT metrics FROM linkedin_post_readings WHERE urn=$1 AND checkpoint='d2'", URN
     )
@@ -490,6 +493,17 @@ async def test_results_stay_in_their_project_and_go_with_it(publication_db):
     for table in ("linkedin_posts", "linkedin_post_readings", "linkedin_follower_counts"):
         rows = await db.pool.fetch(f"SELECT project_id FROM {table}")  # noqa: S608 — fixed names
         assert [row["project_id"] for row in rows] == [projects[1].id]
+
+
+def test_the_daily_summary_says_what_happened():
+    from tin_lite.linkedin_listening_activities import results_summary
+
+    quiet = {"read": 0, "new": 0, "removed": 0, "skipped": 0, "unanswered": 0}
+    assert results_summary(quiet) == "No LinkedIn posts from the last 30 days to read."
+    followers = [{"name": "Tin Computer", "followers": 1897}]
+    assert results_summary({**quiet, "removed": 1, "followers": followers}) == (
+        "1 was removed from LinkedIn, so Tin stopped reading it. Followers: Tin Computer 1,897."
+    )
 
 
 def test_an_empty_record_says_what_comes_next():

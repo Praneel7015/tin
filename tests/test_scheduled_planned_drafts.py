@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
+import pytest
 from test_content_draft import fixture as draft_fixture
 from test_content_draft import start
 from test_private_workflows import ACTOR
@@ -92,6 +93,24 @@ async def test_weekly_occurrence_drafts_the_next_article_in_plan_order(publicati
     # A retried dispatch reuses its occurrence instead of selecting again.
     assert await common.dispatch_scheduled_workflow(payload) == dispatched
     assert await runs(f, configured) == 1
+    # The occurrence has no starter of its own; it drafts for the schedule's author.
+    assert run.started_by_clerk_user_id is None
+    prepared = await f.service.prepare(run)
+    assert prepared["item"]["id"] == f.inputs["item_id"]
+
+
+async def test_weekly_occurrence_stops_when_the_schedule_author_left(publication_db, monkeypatch):
+    f = await draft_fixture(publication_db, monkeypatch, clean=True)
+    configured, common, _ = await weekly(f)
+    dispatched = await common.dispatch_scheduled_workflow(occurrence(configured))
+    run = await f.db.get_run(UUID(dispatched["run_id"]))
+    await f.db.pool.execute(
+        "DELETE FROM project_memberships WHERE project_id=$1 AND clerk_user_id=$2",
+        f.project.id,
+        ACTOR,
+    )
+    with pytest.raises(LookupError, match="saved this schedule no longer has project access"):
+        await f.service.prepare(run)
 
 
 async def test_weekly_occurrence_holds_while_a_draft_waits_for_review(publication_db, monkeypatch):

@@ -8,8 +8,8 @@ description: Draft one answer page for a buyer question AI answers missed the si
    `content_draft.evidence`; it says which sampled AI answers left the site out.
 2. Read the positioning files in `content_draft.positioning` and the writing guide. They decide
    how the product is described; the question decides what the page answers.
-3. Search the site's own pages for the question first. When one already answers it directly
-   and plainly, record `already_covered` instead of writing a competing page.
+3. Search the site's own pages for the question first. When one already answers it, still
+   write this page: answer the question directly and link to that page for depth.
 4. Research the question on the public web. Open the official page of every product, tool or
    vendor the page names. Use at least three distinct credible sources, primary sources first,
    and cite each claim inline. Never invent capabilities, prices, customers or results.

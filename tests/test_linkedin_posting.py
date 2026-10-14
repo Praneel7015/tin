@@ -154,7 +154,11 @@ def state_from(api) -> str:
 def test_registry_declares_linkedin_posting_separately_from_collection() -> None:
     definitions = {item.key: item for item in registered_integrations()}
     posting = definitions[LINKEDIN_POSTING_PROVIDER]
-    assert posting.capabilities == ("linkedin.posts.publish", "linkedin.media.upload")
+    assert posting.capabilities == (
+        "linkedin.posts.publish",
+        "linkedin.media.upload",
+        "linkedin.results.read",
+    )
     assert definitions["network.linkedin"].capabilities == ("connections.read",)
 
 

@@ -91,7 +91,12 @@ STRIPE_CAPABILITIES = (
 # Read-only PostHog capabilities for the one project the founder selects.
 POSTHOG_CAPABILITIES = ("query.read", "definitions.read", "insights.read")
 X_CAPABILITIES = ("x.posts.read", "x.posts.publish", "x.media.upload")
-LINKEDIN_POSTING_CAPABILITIES = ("linkedin.posts.publish", "linkedin.media.upload")
+# Zernio's connect already asks LinkedIn for analytics, so reading results needs no new consent.
+LINKEDIN_POSTING_CAPABILITIES = (
+    "linkedin.posts.publish",
+    "linkedin.media.upload",
+    "linkedin.results.read",
+)
 ADS_CAPABILITIES = ("account.read", "campaigns.read", "campaigns.write")
 # Only what an approved list submission needs; nothing on the founder's own repositories.
 GITHUB_USER_CAPABILITIES = ("forks.write", "public_pull_requests.write", "public_issues.write")
@@ -502,7 +507,7 @@ def registered_integrations() -> tuple[IntegrationDefinition, ...]:
             ),
             access_label="Approved posts · as the accounts you pick",
             capabilities=LINKEDIN_POSTING_CAPABILITIES,
-            unlocks=("Approved LinkedIn posts",),
+            unlocks=("Approved LinkedIn posts", "LinkedIn results"),
         ),
         IntegrationDefinition(
             key=GITHUB_USER_PROVIDER,
@@ -883,6 +888,12 @@ class IntegrationService:
 
                 if not enabled(self._settings, project_id):
                     raise IntegrationNotConfiguredError("Connection collection is unavailable.")
+                continue
+            if requirement.provider_key == LINKEDIN_POSTING_PROVIDER:
+                from tin_lite import linkedin_posting
+
+                if not linkedin_posting.enabled(self._settings, project_id):
+                    raise IntegrationNotConfiguredError("LinkedIn posting is unavailable.")
                 continue
             if requirement.provider_key == X_PROVIDER:
                 if connection.credential_ciphertext is None or set(

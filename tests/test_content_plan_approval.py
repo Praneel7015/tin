@@ -130,6 +130,7 @@ async def test_the_first_plan_waits_in_decisions_and_nothing_drafts_until_approv
     assert discovery["next"]["reason"] == (
         "Approve the content plan in Decisions before drafting from it."
     )
+    assert not any(item["available"] for item in discovery["items"])
     with pytest.raises(ValueError, match="Approve the content plan in Decisions"):
         await sources.select(
             project_id=f.project.id,

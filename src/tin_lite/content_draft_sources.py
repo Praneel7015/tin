@@ -91,6 +91,8 @@ class ContentDraftSources:
         progress = await history(self.db.pool, project_id=project_id, program_id=program_id)
         kinds = tuple(kinds or KINDS)
         waiting = await self.waiting(project_id, read["plan"])
+        # A first plan waiting for approval, or declined, holds every item (content.plan 1.1.0).
+        hold = await self.programs.approval_hold(program_id)
         items = []
         for batch in sorted(read["plan"]["batches"], key=lambda b: b["due_date"]):
             for item in batch["items"]:
@@ -107,6 +109,7 @@ class ContentDraftSources:
                 )
                 eligible = (
                     item["readiness"] != "deferred"
+                    and not hold
                     and batch["id"] not in held
                     and configured.status == "active"
                     and passed_over is None
@@ -155,7 +158,6 @@ class ContentDraftSources:
                 )
         upcoming = next_item(items)
         active = next((p for p in progress.values() if p["stage"] == "drafting"), None)
-        hold = await self.programs.approval_hold(program_id)
         ready = bool(upcoming and upcoming["available"] and not active and not hold)
         reason = (
             "Resume this content program before drafting."

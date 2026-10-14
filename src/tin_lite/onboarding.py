@@ -4,7 +4,8 @@ A Codex procedure cannot call the MCP, so the switchboard computes which workflo
 project can consider, using the shared project prerequisite readiness and provider gates, and hands
 that to the plan run as the `tin_state` input. Each blocked workflow also says who unblocks
 it: `tin_operator` (service availability; never a founder credential task),
-`connect_integration` (the founder connects a provider), or `prior_runs`.
+`connect_integration` (the founder connects a provider), `prior_runs`, or
+`edit_project_files` (existing project guidance needs editing instead of another capture).
 """
 
 from __future__ import annotations
@@ -113,8 +114,12 @@ def tin_state(
             }
         prerequisite_state = (readiness or {}).get(workflow.id)
         if reason is None and prerequisite_state and prerequisite_state["state"] == "blocked":
-            reason = "Required project context is missing; see readiness.unmet."
-            unblock = {"kind": "prior_runs", "detail": reason}
+            if prerequisite_state["unmet"]:
+                reason = "Required project context is missing; see readiness.unmet."
+                unblock = {"kind": "prior_runs", "detail": reason}
+            else:
+                reason = prerequisite_state["note"]
+                unblock = {"kind": "edit_project_files", "detail": reason}
         billing = (billing_restrictions or {}).get(workflow.id)
         if billing:
             reason = billing["message"]

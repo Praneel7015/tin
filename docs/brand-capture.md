@@ -7,7 +7,8 @@ website, create a PR or generate an asset kit.
 
 This slice fills missing guidance. An existing compatible document is carried forward
 byte-for-byte, including member annotations and its own section layout. If both files
-already exist, starting capture fails before compute; use Files for small edits. Existing
+already exist, project workflow listings mark capture blocked and starting fails before compute;
+use Files for small edits. Proposals do not count as active documents. Existing
 BRAND.md needs valid `tin-brand.v1` tokens, and both files must fit the documented bounds.
 Refresh and partial replacement are deferred. `content.design_md` remains available;
 this change does not archive its saved configurations or remove code-backed capture.

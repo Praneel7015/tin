@@ -186,7 +186,8 @@ The same image also reads who engaged with the member's own posts (#435), in
 - `search`, the default: one people-search page, as above, within 90 seconds;
 - `linkedin_posts`: the member's own posts from their share feed
   (`/voyager/api/identity/profileUpdatesV2`, `q=memberShareFeed`), newest first, within a
-  window and a limit. Reposts and other people's updates are left out. Each post keeps its
+  window and a limit. A plain repost names the original author, so it's left out; a repost
+  with the member's own words is their post. Each post keeps its
   activity URN, the thread URN its reactions hang off, its date (from the activity ID), an
   excerpt and its counts;
 - `linkedin_reactions`: one post's reactions (`/voyager/api/voyagerSocialDashReactions`

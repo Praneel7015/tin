@@ -119,7 +119,7 @@ async def no_wait(_seconds):
     return None
 
 
-def test_own_posts_leave_out_reposts_and_other_people():
+def test_own_posts_leave_out_plain_reposts():
     pinned = NOW - timedelta(days=200)
     page = feed(
         [
@@ -132,13 +132,22 @@ def test_own_posts_leave_out_reposts_and_other_people():
     )
     posts, cursor, seen = engagement.own_posts(page, OWNER)
     assert cursor == "next-page" and seen == 5
-    assert [p["thread_urn"].split(":")[2] for p in posts] == ["ugcPost", "share", "ugcPost"]
+    # A repost with the owner's words is theirs; a plain repost names its original author.
+    assert [p["thread_urn"].split(":")[2] for p in posts] == [
+        "ugcPost",
+        "ugcPost",
+        "share",
+        "ugcPost",
+    ]
     first = posts[0]
     assert first["excerpt"] == "A post about A with spacing"
     assert first["reactions"] == 12 and first["comments"] == 3
     assert datetime.fromisoformat(first["published_at"]).date() == (NOW - timedelta(days=2)).date()
+    # Past the last page LinkedIn answers with paging and no elements.
+    end = {"data": {"paging": {"count": 20, "start": 40}, "metadata": {}}, "included": []}
+    assert engagement.own_posts(end, OWNER) == ([], None, 0)
     with pytest.raises(CollectionError, match="unsupported_contract"):
-        engagement.own_posts({"data": {}}, OWNER)
+        engagement.own_posts({"data": {}, "included": []}, OWNER)
 
 
 async def test_reads_posts_in_the_window_through_pages():

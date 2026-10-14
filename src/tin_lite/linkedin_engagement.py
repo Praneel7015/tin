@@ -2,8 +2,8 @@
 
 Two reads, both GET-only JSON on www.linkedin.com, each starting with the same /me check the
 collection reader makes:
-- the member's own posts, newest first, from their share feed; reposts and other people's
-  updates are left out;
+- the member's own posts, newest first, from their share feed; plain reposts of other
+  people's posts are left out;
 - one post's reactions, a page of ten at a time, with each person's name, headline, LinkedIn
   profile ID and connection degree.
 
@@ -94,11 +94,12 @@ def _index(payload) -> tuple[dict, dict]:
 
 def own_posts(payload, profile_id: str) -> tuple[list[dict], str | None, int]:
     """One share-feed page: the member's own posts, the next page's token, and how many
-    updates the page held (reposts and others' updates count, so an empty page ends the feed).
+    updates the page held (plain reposts count, so only an empty page ends the feed).
     """
 
     data, by_urn = _index(payload)
-    refs = data.get("*elements")
+    # The page after the last one comes back with paging and no elements at all.
+    refs = data.get("*elements", [] if isinstance(data.get("paging"), dict) else None)
     if not isinstance(refs, list):
         raise CollectionError("unsupported_contract")
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
@@ -112,8 +113,8 @@ def own_posts(payload, profile_id: str) -> tuple[list[dict], str | None, int]:
         activity = meta.get("urn") if isinstance(meta, dict) else None
         if not isinstance(activity, str) or not ACTIVITY.fullmatch(activity):
             continue
-        if update.get("*resharedUpdate") or update.get("resharedUpdate"):
-            continue
+        # A plain repost names the original author as its actor, so it fails this check; a
+        # repost with the member's own words is their post, with its own reactions.
         actor = update.get("actor") if isinstance(update.get("actor"), dict) else {}
         name = actor.get("name") if isinstance(actor.get("name"), dict) else {}
         minis = {

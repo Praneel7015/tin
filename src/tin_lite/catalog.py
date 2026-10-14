@@ -1591,9 +1591,10 @@ BUILTIN_WORKFLOWS = (
         system=LINKEDIN_SYSTEM,
         agent_only=True,
         input_schema=linkedin_listening.LISTEN_INPUT_SCHEMA,
+        # Listening reads through the posting connection, whose consent covers analytics.
         integration_requirements=(
             IntegrationRequirement(
-                LINKEDIN_POSTING_PROVIDER, ("linkedin.results.read",), required=True
+                LINKEDIN_POSTING_PROVIDER, ("linkedin.posts.publish",), required=True
             ),
         ),
     ),
@@ -1653,9 +1654,10 @@ BUILTIN_WORKFLOWS = (
         default_schedule={"cadence": "daily", "local_time": "08:00"},
         system=LINKEDIN_SYSTEM,
         input_schema=linkedin_listening.RESULTS_INPUT_SCHEMA,
+        # Listening reads through the posting connection, whose consent covers analytics.
         integration_requirements=(
             IntegrationRequirement(
-                LINKEDIN_POSTING_PROVIDER, ("linkedin.results.read",), required=True
+                LINKEDIN_POSTING_PROVIDER, ("linkedin.posts.publish",), required=True
             ),
         ),
     ),

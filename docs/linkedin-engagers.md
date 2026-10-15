@@ -22,9 +22,10 @@ sends nothing.
    - Checks the session, the owner and the runtime.
    - Reads the ICP file at the project's head: `strategy/ICP.md`, else
      `context/linkedin/ICP.md`, first 8 KB.
-   - Each `##` heading names a profile. The scores' definition is the file's path and a
-     hash of its text, so editing the ICP marks old scores stale and a run rescores them.
-     Other commits don't.
+   - Each `##` heading names a profile. The scores' definition is the file's path, a hash of
+     its text and the scorer's version (`strategy/ICP.md@<hash>:v2`), so editing the ICP or
+     changing how Tin scores marks old scores stale and a run rescores them. Other commits
+     don't.
 2. **Posts.** One sandbox read (`linkedin_posts`) finds the member's own posts from the last
    90 days, up to 60. A failure here ends the run with its reason, such as an expired
    session or LinkedIn asking to verify the account.
@@ -45,6 +46,13 @@ sends nothing.
      names and headlines only, as data.
    - Each answer sets `icp` and `icp_fit` with a reason, or "unknown" with a reason when the
      headline is too thin.
+   - The score ranks whom the founder looks at first; it is not a decision to contact anyone.
+     A headline rarely states stage, size or needs, so what it leaves out is unknown, not a
+     mismatch. The instructions anchor the scale:
+     - 0.8 to 1: the profile's buyer role at its kind of company;
+     - 0.6 to 0.79: the buyer role at a company that may be its kind, the rest unknown;
+     - 0.3 to 0.59: a partial match, such as a role next to the buyer's;
+     - below 0.3: a mismatch the headline shows, and `none` when no profile does better.
    - An answer outside the contract leaves the person unscored with a reason. A batch whose
      call failed is left for a later run.
    - At most 600 people are scored per run.

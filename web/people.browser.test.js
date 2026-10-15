@@ -72,7 +72,7 @@ test("the grid lists people best fit first, by segment, with the reason behind a
     await page.locator('td[data-fit="p-sofia"]').hover();
     const hover = page.locator(".people-hover.is-visible");
     await hover.waitFor();
-    assert.match(await hover.innerText(), /no marketing lead[\s\S]*0\.66 · ICP 1 · oct 15[\s\S]*Scored before strategy\/ICP\.md changed\. The next run rescores it\./);
+    assert.match(await hover.innerText(), /no marketing lead[\s\S]*0\.66 · ICP 1 · oct 15[\s\S]*Scored before strategy\/ICP\.md or Tin’s scoring changed\. The next run rescores it\./);
 
     await page.getByRole("tab", {name: "Not connected yet 3"}).click();
     assert.deepEqual(await names(), ["Daniel Okafor", "Lea Fischer", "Hannah Kim"]);

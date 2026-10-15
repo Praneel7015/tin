@@ -6,6 +6,7 @@ API is called as a project member.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -27,6 +28,7 @@ from test_linkedin_engagers import (
 )
 from test_linkedin_per_member import TEAMMATE, add_teammate
 
+from tin_lite import linkedin_engagers as engagers
 from tin_lite import people_records as records
 from tin_lite.auth import AuthContext, require_user
 from tin_lite.people_api import router
@@ -89,6 +91,36 @@ async def test_the_list_shows_each_value_with_who_set_it_and_the_last_touch(coll
     assert people["Person 1"]["fields"]["icp_fit"]["stale"] is True
     assert people["Person 1"]["fields"]["icp"]["stale"] is True
     assert people["Person 1"]["fields"]["linkedin_relationship"]["stale"] is False
+
+
+async def test_a_change_in_how_tin_scores_marks_scores_old_until_a_run_rescores_them(
+    collection_db, monkeypatch
+):
+    f = await fixture(collection_db)
+    monkeypatch.setattr(engagers, "SCORER", engagers.SCORER - 1)
+    await ran(f, [person(1), person(2, headline="Designer")])
+    monkeypatch.undo()
+    path = f"/api/projects/{f.project.id}/people"
+    async with client(f) as http:
+        people = by_name((await http.get(path)).json())
+    assert people["Person 1"]["fields"]["icp_fit"]["stale"] is True
+    assert people["Person 2"]["fields"]["icp"]["stale"] is True
+    # The view still names only the file.
+    assert people["Person 1"]["fields"]["icp_fit"]["definition"] == "strategy/ICP.md"
+
+    router = Router()
+    item = post(1, 3)
+    cloud = Cloud([item], {item["thread_urn"]: [person(1), person(2, headline="Designer")]})
+    await run_through(work(f, cloud, router), await engagers_run(f))
+    assert len(router.requests) == 1
+    assert len(json.loads(router.requests[0].messages[0].content)["people"]) == 2
+    kept = await records.people(f.db.pool, f.project.id)
+    assert {p["fields"]["icp_fit"]["definition"].rsplit(":", 1)[1] for p in kept} == {
+        f"v{engagers.SCORER}"
+    }
+    async with client(f) as http:
+        people = by_name((await http.get(path)).json())
+    assert not any(p["fields"]["icp_fit"]["stale"] for p in people.values())
 
 
 async def test_a_person_shows_their_timeline_and_whose_post_it_was(collection_db):

@@ -63,6 +63,8 @@ your own accounts before use; ordinary contributor tests need no production cred
   [managed model steps](code-model-workflows.md) and [code schedules](code-workflow-schedules.md).
 - [Connection collection](connection-collection.md): project-bound Tin extension, local collection,
   candidate cloud runtime and fenced local backup.
+- [People records](people-records.md): one lasting record per person, identifiers, values with
+  lineage, the event timeline and forgetting.
 - [Project API connections](project-api-connections.md): secure credentials and external requests.
 - [Stripe and PostHog connections](stripe-and-posthog-connections.md): the first-party read-only
   connections, their operations, projected records and offline test fakes.

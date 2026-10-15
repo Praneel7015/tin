@@ -68,8 +68,8 @@ segments and pages them.
     on the post's date.
   - The segments are all people, ICP fit (0.6 or more) and not connected yet.
 - **Score hover:** the reason, the score, the ICP and when it was set.
-  - A score computed under an earlier `strategy/ICP.md` reads "old": the view compares each
-    value's `definition` with the ICP file at the project's head
+  - A score computed under an earlier `strategy/ICP.md`, or by an earlier version of the
+    scoring, reads "old": the view compares each value's `definition` with the current one
     (`linkedin_engagers.read_icp`), and the next engagers run rescores it.
 - **Person panel:** `GET …/people/{person_id}` adds the timeline. The address keeps the person
   (`?person=`), so a reload opens them again.

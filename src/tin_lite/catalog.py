@@ -1687,7 +1687,7 @@ BUILTIN_WORKFLOWS = (
             "nothing."
         ),
         executor=linkedin_engagers.KEY,
-        version_label="1.0.0",
+        version_label="1.1.0",
         presentation=WorkflowDiagram(
             direction="TD",
             nodes=(

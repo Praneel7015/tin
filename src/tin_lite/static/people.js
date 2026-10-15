@@ -60,7 +60,7 @@ window.TinPeople = (() => {
   }
 
   function staleNote(value) {
-    return `Scored before ${value.definition || "the ICP file"} changed. The next run rescores it.`;
+    return `Scored before ${value.definition || "the ICP file"} or Tin’s scoring changed. The next run rescores it.`;
   }
 
   function mount(main, options) {

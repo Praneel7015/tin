@@ -16,7 +16,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 from uuid import UUID, uuid4
@@ -696,6 +696,7 @@ async def directory(
 
     listed = await people(conn, project_id, limit=limit, only=only)
     touches: dict[UUID, dict] = {}
+    invited: dict[UUID, datetime] = {}
     for row in await conn.fetch(
         """SELECT COALESCE(r.merged_into, r.id) AS person, e.kind, e.occurred_at,
                e.recorded_at, e.detail->>'posted_at' AS posted_at
@@ -707,6 +708,9 @@ async def directory(
         at = _when(row)
         if row["person"] not in touches or at > touches[row["person"]]["at"]:
             touches[row["person"]] = {"kind": row["kind"], "at": at}
+        # When a connection request last went out, for "Invited oct 16".
+        if row["kind"] == "invited" and at > invited.get(row["person"], at - timedelta(1)):
+            invited[row["person"]] = at
     runs = await _run_writers(
         conn,
         {
@@ -735,6 +739,7 @@ async def directory(
                     noted=max((n["updated_at"] for n in written), default=None),
                 ),
                 "last_touch": touches.get(person["id"]),
+                "invited_at": invited.get(person["id"]),
                 "added": {"at": person["created_at"], "by": writer(person["source"])},
                 # The newest note for the grid, and every note's words for search.
                 "note": (

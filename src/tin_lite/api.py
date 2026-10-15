@@ -476,6 +476,8 @@ ASSET_VERSION = hashlib.sha256(
             "output-comparison.js",
             "people.css",
             "people.js",
+            "linkedin-requests.css",
+            "linkedin-requests.js",
             "pierre-trees.js",
             "system-week.js",
             "theme.js",

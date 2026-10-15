@@ -88,7 +88,7 @@ function noted(person) {
   }
 }
 
-export async function serveApp({decisionCount = 4, people = syntheticPeople(), engagers = false, integrations = [], removed = []} = {}) {
+export async function serveApp({decisionCount = 4, people = syntheticPeople(), engagers = false, integrations = [], removed = [], requests = null, requestWrites = []} = {}) {
   const project = {id: "project", name: "Example Co", workspace_id: "ws", workspace_name: "Example", member_count: 1, hidden: false};
   const catalog = [{id: "wf-answer", key: "content.answer_page", title: "Draft an answer page", description: "Draft one answer page for review.", definition: {schedule_modes: ["weekly", "on_demand"]}}];
   // The workflow that finds people is offered only to some projects; People shows with it.
@@ -189,6 +189,28 @@ export async function serveApp({decisionCount = 4, people = syntheticPeople(), e
       const workflow = catalog.find(item => item.id === projectWorkflows.find(saved => saved.id === startPath[1])?.workflow_id);
       return send({id: "run-started", workflow_id: workflow.id, workflow_name: workflow.key, status: "running", created_at: "2026-10-15T10:00:00Z"});
     }
+    // Connection requests (#450): the member's sending and their waiting batch.
+    const requestsPath = url.pathname.match(/^\/api\/projects\/[^/]+\/linkedin-requests(\/.*)?$/);
+    if (requestsPath && requests) {
+      const rest = requestsPath[1] || "";
+      if (request.method === "GET" && !rest) return send(requests);
+      const body = request.method === "GET" ? {} : await read();
+      requestWrites.push({method: request.method, path: rest, body});
+      if (rest === "/sending") {
+        if (body.enabled && body.consent_version !== 1) return refuse(422, "Tick the box to agree to sending first.");
+        Object.assign(requests.sending, {on: body.enabled, ...(body.limits || {})});
+        return send(requests);
+      }
+      if (rest === "/sending/resume") {
+        Object.assign(requests.sending, {paused: false, held: false, paused_reason: null});
+        return send(requests);
+      }
+      const decided = rest.match(/^\/batches\/([^/]+)\/(approve|discard)$/);
+      if (decided) {
+        requests.batches = requests.batches.filter(batch => batch.id !== decided[1]);
+        return send({status: decided[2] === "approve" ? "approved" : "discarded", queued: body.people?.length || 0});
+      }
+    }
     // Disconnecting marks the connection gone, as the API does, and records which.
     const integrationPath = url.pathname.match(/^\/api\/projects\/[^/]+\/integrations\/([^/]+)$/);
     if (request.method === "DELETE" && integrationPath) {
@@ -228,7 +250,7 @@ export async function serveApp({decisionCount = 4, people = syntheticPeople(), e
     response.writeHead(404).end();
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  return {server, people, integrations, removed, base: `http://127.0.0.1:${server.address().port}`};
+  return {server, people, integrations, removed, requests, requestWrites, base: `http://127.0.0.1:${server.address().port}`};
 }
 
 export async function openApp(browser, base, {viewport = {width: 1440, height: 900}, url = "/system", theme = "light"} = {}) {

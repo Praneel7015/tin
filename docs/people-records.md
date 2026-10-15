@@ -88,7 +88,9 @@ tools share `people_service.People`.
     how many notes there are. Search covers every note.
   - Last touch is the latest event. LinkedIn gives no time for a reaction, so a reaction counts
     on the post's date.
-  - The segments are all people, ICP fit (0.6 or more) and not connected yet.
+  - The segments are all people, ICP fit (0.6 or more) and not connected yet, plus Invited
+    once a [connection request](linkedin-requests.md) went out. The LinkedIn column reads
+    "Invited oct 16" for a request Tin sent.
 - **Score hover:** the reason, the score, the ICP and when it was set.
   - A score computed under an earlier `strategy/ICP.md`, or by an earlier version of the
     scoring, reads "old": the view compares each value's `definition` with the current one

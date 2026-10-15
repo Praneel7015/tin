@@ -1,6 +1,5 @@
 """HTTP and MCP share these delivery settings and durable retry operations."""
 
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -43,13 +42,6 @@ def page_url_service(runtime, settings=None):
         integrations=getattr(runtime, "integrations", None),
         settings=settings,
     )
-
-
-def adapt_on_approval(settings, run):
-    """Whether an approval's repository pick for this run starts website.change."""
-    from tin_lite.content_delivery import adaptable
-
-    return adaptable(settings, run)
 
 
 async def delivery_cost(*, runtime, settings, run, actor, repository):
@@ -99,8 +91,8 @@ def cost_about(cost):
 async def publish_preview(*, runtime, settings, run, actor):
     """What Publish does for a page Tin adapts to the site, before the founder presses it.
 
-    `adapt` is False where approval keeps today's choices: no selected repository, a page
-    refresh, or an answer page or public article without Codex API execution. `mode` is
+    `adapt` is False where approval keeps today's choices: no selected repository, or a page
+    refresh. `mode` is
     the delivery the founder saved (commit to main, else a pull request); `footer` is the
     card's one line, with the configured cost preview when billing is on.
     """
@@ -120,13 +112,8 @@ async def publish_preview(*, runtime, settings, run, actor):
 
     kind = await delivery_service(runtime).plan_kind(run)
     generated = run.workflow_id == DRAFT_WORKFLOW_ID and kind != "refresh"
-    if not repository or not (generated or adapt_on_approval(settings, run)):
+    if not repository or not generated:
         return {"adapt": False}
-    from tin_lite.page_routes import PageRouteService, ask_the_founder, page_type
-
-    # Answer pages and public articles live at a route the founder chooses; a planned
-    # article names its own address in the plan.
-    page = "answer_page" if kind == "answer" else None if generated else page_type(run)
     mode = await delivery_service(runtime).saved_mode(run)
     cost = await delivery_cost(
         runtime=runtime,
@@ -135,30 +122,20 @@ async def publish_preview(*, runtime, settings, run, actor):
         actor=actor,
         repository=repository,
     )
-    route = (
-        await PageRouteService(database=runtime.database, storage=runtime.storage).route_for(
-            run, page_type=page
-        )
-        if page
-        else None
-    )
-    sentence = publish_sentence(mode, route_missing=page is not None and route is None)
+    sentence = publish_sentence(mode)
     about = cost_about(cost)
+    # The address the plan gave the page; website.change publishes it there.
+    address = await page_url_service(runtime, settings).view(run, None)
     preview = {
         "adapt": True,
         "label": "Publish",
         "mode": mode,
         "repository": repository,
-        "route": route,
+        "url": address["url"] if address else None,
         "sentence": sentence,
         "cost": cost,
         "footer": f"{sentence} · {about}" if about else sentence,
     }
-    if page and route is None:
-        # Before the first page of this type publishes, the coding agent asks the founder.
-        address = await page_url_service(runtime, settings).view(run, None)
-        host = urlsplit(address["url"]).hostname if address and address.get("url") else None
-        preview["ask_the_founder"] = ask_the_founder(page, host)
     return preview
 
 
@@ -213,14 +190,6 @@ async def get_settings(
         return await service.settings(project_id=project_id, program_id=program_id)
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=public_error_text(exc)) from exc
-
-
-@router.get("/content-drafts/delivery-sources")
-async def delivery_sources(project_id: UUID, request: Request, user: AuthContext = USER):
-    await authorized(request, project_id, user)
-    from tin_lite.content_repository_delivery import discover
-
-    return await discover(request.app.state.runtime.database, project_id)
 
 
 @router.put("/content-programs/{program_id}/delivery")

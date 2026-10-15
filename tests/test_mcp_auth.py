@@ -127,8 +127,9 @@ async def test_mcp_exposes_personal_project_bootstrap_explicitly() -> None:
         "list_technical_fix_sources",
         "get_technical_fix_source",
         "preflight_technical_fix",
+        "stop_technical_fix",
     } & {tool.name for tool in tools}
-    assert {"stop_organic_system", "stop_technical_fix"} <= {tool.name for tool in tools}
+    assert "stop_organic_system" in {tool.name for tool in tools}
     assert "stop_procedure" in {tool.name for tool in tools}
     assert "delete_project" in {tool.name for tool in tools}
     deletion = next(tool for tool in tools if tool.name == "delete_project")
@@ -148,10 +149,11 @@ async def test_mcp_exposes_personal_project_bootstrap_explicitly() -> None:
     assert "get_writing_style_guide" in {tool.name for tool in tools}
     assert "get_content_draft_sources" in {tool.name for tool in tools}
     assert "send_project_task_message" in {tool.name for tool in tools}
+    # A page's address comes from its plan; nobody saves a route for a kind of page.
+    assert "save_page_route" not in {tool.name for tool in tools}
     assert {
         "get_content_delivery_settings",
         "save_content_delivery_settings",
-        "save_page_route",
         "retry_content_delivery",
     } <= {tool.name for tool in tools}
     assert {"get_workflow_review", "request_workflow_changes"} <= {tool.name for tool in tools}
@@ -214,7 +216,7 @@ async def test_mcp_exposes_personal_project_bootstrap_explicitly() -> None:
     assert "confirm_name" in forget.input_schema["required"]
     approve = next(tool for tool in tools if tool.name == "approve_connection_requests")
     assert {"batch_id", "person_ids", "request_id"} <= set(approve.input_schema["required"])
-    assert len(tools) == 116
+    assert len(tools) == 114
     assert "refund_billing_payment" not in {tool.name for tool in tools}
     start = next(tool for tool in tools if tool.name == "start_workflow")
     assert "instruction and title are only for project.task" in start.description

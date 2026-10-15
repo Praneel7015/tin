@@ -2,17 +2,13 @@
 
 The page is immutable input, not an invitation to draft again. Admission, usage,
 execution isolation, checkpoints and GitHub effects remain the existing contracts.
-Sources are approved planned articles (content.generate), answer pages and public
-articles. An approval used to start this procedure itself (see ContentDelivery.adapt); when
-the founder's delivery setting commits to main, Tin then merges the pull request, but
-only one that adds nothing except the approved page, once GitHub reports it clean.
+Sources are approved content.generate drafts: planned articles and answer pages.
 
-website.change (website_change.py) adapts pages with this same machinery: source pinning,
+website.change (website_change.py) adapts pages with this machinery: source pinning,
 the page check, the saved patch, recovery and the merge loop. Its runs keep their pinned
 source under the same receipt key, and their own policy decides whether Tin merges (see
 publish_after_pull_request): website.change merges once the repository's required checks
-pass. content.deliver's own rules are unchanged; it is retired for new work, and every new
-approval starts website.change. Its existing runs, retries and saved schedules keep it.
+pass. Every approval that publishes a page starts website.change.
 """
 
 import asyncio
@@ -22,28 +18,24 @@ import json
 import re
 from dataclasses import asdict
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from tin_lite import approved_article, approved_document, content_draft
+from tin_lite import approved_article
 from tin_lite.content_delivery import (
     ADAPTED_PATH,
     ADAPTER,
-    ContentDelivery,
     adaptation_start_key,
-    adapted,
     chosen_mode,
 )
 from tin_lite.domain import RunStatus
 from tin_lite.integrations import GitHubFileChange, GitHubRepositoryBinding
 
-KEY = "content.deliver"
-WORKFLOW_ID = UUID("00000000-0000-4000-8000-000000000036")
-OPERATION = "content_repository_delivery_source_v1"
 # website.change, which puts approved changes on a founder's website, reuses this machinery.
 WEBSITE_CHANGE_ID = UUID("00000000-0000-4000-8000-000000000045")
 WEBSITE_CHANGE_OPERATION = "website_change_source_v1"
-ADAPTER_WORKFLOW_IDS = frozenset({WORKFLOW_ID, WEBSITE_CHANGE_ID})
-SOURCE_OPERATIONS = {WORKFLOW_ID: OPERATION, WEBSITE_CHANGE_ID: WEBSITE_CHANGE_OPERATION}
+ADAPTER_WORKFLOW_IDS = frozenset({WEBSITE_CHANGE_ID})
+SOURCE_OPERATIONS = {WEBSITE_CHANGE_ID: WEBSITE_CHANGE_OPERATION}
 CHECK_COMMAND = "git diff --check"
 RECOVERY_OPERATION = "content_repository_delivery_recovery_v1"
 MERGE_OPERATION = "content_repository_delivery_merge_v1"
@@ -59,7 +51,7 @@ BUILD_WAIT_SECONDS = 600
 # a deploy preview posts its status a few seconds to a minute after the PR opens.
 NO_CHECKS_GRACE_SECONDS = 90
 # GitHub's mergeable_state values that let Tin merge. `clean`: every check passed.
-# `has_hooks`: the same, with pre-receive hooks. content.deliver merges only on these.
+# `has_hooks`: the same, with pre-receive hooks.
 MERGE_READY = frozenset({"clean", "has_hooks"})
 # website.change merges once the checks the repository requires pass (Emre, 10/1). GitHub
 # reports `unstable` for a pull request that can merge while a check the repository does not
@@ -113,7 +105,7 @@ def applies_plan(run):
 
 
 def adapts(run):
-    """Whether this run adapts an approved page to the site: content.deliver or website.change."""
+    """Whether this run adapts an approved page to the site (website.change)."""
     return (
         getattr(run, "workflow_id", None) in ADAPTER_WORKFLOW_IDS
         and not repairs_site(run)
@@ -180,7 +172,7 @@ def binding_from(source):
 
 
 async def adaptation_facts(database, run_ids):
-    """Saved receipts of adaptation runs (website.change, content.deliver), keyed by run; one
+    """Saved receipts of adaptation runs (website.change), keyed by run; one
     Postgres read."""
     if not run_ids:
         return {}
@@ -274,20 +266,13 @@ async def adapted_status(database, run, intent, start):
 
 
 async def discover(database, project_id):
+    """The approved drafts website.change can put on the site, and the selected repository."""
     articles = await approved_article.discover(database, project_id)
-    rows = await database.pool.fetch(
-        "SELECT id, COALESCE(artifact_title, 'Approved page') AS title FROM workflow_runs "
-        "WHERE project_id=$1 AND workflow_id = ANY($2::uuid[]) "
-        "AND status='succeeded' AND review_decision='approved' "
-        "ORDER BY created_at DESC, id DESC LIMIT 100",
-        project_id,
-        list(approved_document.KINDS),
-    )
     connection = await database.get_integration_connection(
         project_id=project_id, provider_key="infra.github"
     )
     return {
-        "articles": articles + [{"run_id": str(row["id"]), "title": row["title"]} for row in rows],
+        "articles": articles,
         "repository": connection.configuration.get("selected_repository")
         if connection and connection.status == "connected"
         else None,
@@ -295,16 +280,8 @@ async def discover(database, project_id):
 
 
 async def page_source(*, database, storage, project_id, source_run_id):
-    """The approved page's exact copy and provenance: a planned article, answer page or
-    public article. Refuses anything not approved in this project."""
-    candidate = await database.get_run(UUID(str(source_run_id)))
-    if approved_document.kind_for(candidate):
-        return await approved_document.select(
-            database=database,
-            storage=storage,
-            project_id=project_id,
-            source_run_id=source_run_id,
-        )
+    """The approved page's exact copy and provenance: a planned article or answer page.
+    Refuses anything not approved in this project."""
     return {
         "source_kind": "article",
         **await approved_article.select(
@@ -316,74 +293,15 @@ async def page_source(*, database, storage, project_id, source_run_id):
     }
 
 
-async def select_source(*, database, storage, integrations, project_id, inputs, approval=False):
-    """Pin the approved page and repository; `approval` marks a start by the page's approval.
-
-    Only that start carries the founder's delivery (a pull request, or commit to main) into
-    the run. Prepare PR and agent starts always leave their pull request open.
-    """
-    source = await page_source(
-        database=database,
-        storage=storage,
-        project_id=project_id,
-        source_run_id=inputs["source_run_id"],
-    )
-    run = await database.get_run(UUID(source["source_run_id"]))
-    selected = await database.get_effect(content_draft.selection_key(run.id))
-    # The approval-time choice, else the pinned intent: the one the exact publisher uses.
-    # A choice to adapt the page is this workflow's own and does not block it.
-    intent = await ContentDelivery(database=database).intent(run)
-    if intent and not adapted(intent):
-        raise ValueError(
-            "This article already has automatic delivery. Use its existing delivery action."
-        )
-    binding = await integrations.github_repository_binding(
-        project_id=project_id, expected_repository=inputs["expected_repository"]
-    )
-    system_delivery = (selected.result or {}).get("system_delivery") if selected else None
-    if system_delivery and system_delivery["mode"] == "github_pr":
-        from tin_lite.organic_content import check_destination
-
-        check_destination(system_delivery, binding)
-    pinned = {
-        **source,
-        "binding": {**asdict(binding), "connection_id": str(binding.connection_id)},
-    }
-    if approval:
-        if not adapted(intent):
-            raise ValueError("This page's approval did not ask Tin to publish it.")
-        if str(intent["repository_id"]) != str(binding.repository_id) or str(
-            intent["connection_id"]
-        ) != str(binding.connection_id):
-            raise ValueError("The GitHub connection changed after this page was approved.")
-        pinned["approval"] = {
-            "mode": chosen_mode(intent),
-            "requested_by": intent.get("chosen_by"),
-            **({"route": intent["route"]} if intent.get("route") else {}),
-        }
-    return pinned
-
-
 async def guard_page(conn, *, project_id, source):
     """Recheck the pinned page's approval under the project lock. A planned item (it carries
     its brief) is a content.generate run, whatever kind of page it drafted."""
-    if source.get("source_kind") in {"answer_page", "public_article"} and "item" not in source:
-        await approved_document.guard(conn, project_id=project_id, source=source)
-    else:
-        await approved_article.guard(conn, project_id=project_id, source=source)
-
-
-async def guard_source(conn, *, project_id, inputs, source):
-    """Called under create_run's project lock, in the run/budget/receipt transaction."""
-    if inputs["source_run_id"] != source["source_run_id"]:
-        raise ValueError("The selected article is not approved for delivery.")
-    await guard_page(conn, project_id=project_id, source=source)
-    await guard_attempts(conn, project_id=project_id, inputs=inputs, source=source)
+    await approved_article.guard(conn, project_id=project_id, source=source)
 
 
 async def guard_attempts(conn, *, project_id, inputs, source):
-    """One adaptation per page and repository, whether content.deliver or website.change
-    made it, so the two can never open two pull requests for the same page."""
+    """One adaptation per page and repository, so two runs can never open two pull requests
+    for the same page."""
     duplicate = await conn.fetchval(
         "SELECT r.id FROM workflow_runs r JOIN effect_receipts s "
         "ON s.execution_key='content-delivery:' || r.id::text || ':source' "
@@ -552,41 +470,15 @@ async def recover_delivery(*, database, storage, integrations, run):
 async def start_approved_adaptation(*, runtime, settings, run, intent):
     """Admit and dispatch the adaptation an approval asked for, as the approver.
 
-    Every approved page goes to the site through website.change; content.deliver is retired
-    for new work. The ordinary run service does the rest: source pinning, one metered
-    procedure session charged on its actual usage, and an idempotent Temporal start under
-    one start key.
+    Every approved page goes to the site through website.change. The ordinary run service
+    does the rest: source pinning, one metered procedure session charged on its actual
+    usage, and an idempotent Temporal start under one start key.
     """
-    from tin_lite.page_routes import direction
     from tin_lite.run_service import start_workflow_run
 
     key = adaptation_start_key(run.id)
     started_by = intent.get("chosen_by") or run.started_by_clerk_user_id
     trigger_source = intent.get("trigger_source") or "manual"
-    existing = await runtime.database.get_run_by_start_key(
-        project_id=run.project_id, start_idempotency_key=key
-    )
-    if existing is not None and existing.workflow_id == WORKFLOW_ID:
-        # A start that content.deliver admitted before its retirement, retried: return it.
-        workflow = await runtime.database.get_workflow(WORKFLOW_ID)
-        if workflow is None:
-            raise LookupError("Page adaptation is not installed on this Tin.")
-        route = intent.get("route")
-        return await start_workflow_run(
-            runtime=runtime,
-            settings=settings,
-            workflow=workflow,
-            project_id=run.project_id,
-            started_by_clerk_user_id=started_by,
-            start_idempotency_key=key,
-            input_payload={
-                "source_run_id": str(run.id),
-                "expected_repository": intent["settings"]["repository"],
-                "direction": direction(route) if route else "",
-            },
-            trigger_source=trigger_source,
-            _approval_delivery=True,
-        )
     workflow = await runtime.database.get_workflow(WEBSITE_CHANGE_ID)
     if workflow is None:
         raise LookupError("website.change is not installed on this Tin.")
@@ -699,7 +591,7 @@ FRAMEWORK_ENTRY_STEMS = frozenset(
         "root",
     }
 )
-# Source folders frameworks route from. A chosen route named after one (`/app/{slug}`,
+# Source folders frameworks route from. An address in a folder named after one (`/app/{slug}`,
 # `/pages/{slug}`) can't tell the route's folder from the framework's, so it merges nothing
 # but the page itself.
 FRAMEWORK_ROOT_FOLDERS = frozenset(
@@ -707,16 +599,66 @@ FRAMEWORK_ROOT_FOLDERS = frozenset(
 )
 
 
-def outside_route(manifest, proof, route):
-    """The patch's files besides the page that don't sit in the chosen route's own folder.
+# A slug in an older run's route pattern (/blog/{slug}).
+ROUTE_SLUG = r"[a-z0-9][a-z0-9-]{0,119}"
 
-    For `/guides/{slug}` a file serves the route only when its directories include `guides`
-    (`src/app/guides/[slug]/page.tsx`, `content/guides/...`). Root layouts, middleware, host and
-    build settings, shared components and dotfiles reach other pages, so they stay a PR, as do
-    framework entry files (a layout or _document) anywhere. A route named after a framework's
-    own source folder (`/app/{slug}`) can't be told apart from it, so only the page merges.
+
+def at_address(route, address):
+    """Whether a page's public address (a path or full URL) is its approved one.
+
+    `route` is the page's path (/alternatives/zapier). A run approved before pages had planned
+    addresses may pin a route pattern instead (/blog/{slug}), which any one slug satisfies.
     """
-    folders = [part for part in route.split("{slug}", 1)[0].strip("/").split("/") if part]
+    if not route or not isinstance(address, str):
+        return False
+    path = urlsplit(address).path if "://" in address else address
+    path = path.rstrip("/") or "/"
+    if "{slug}" in route:
+        prefix, _, suffix = route.partition("{slug}")
+        return bool(re.fullmatch(re.escape(prefix) + ROUTE_SLUG + re.escape(suffix), path))
+    return path == (route.rstrip("/") or "/")
+
+
+def route_folders(route):
+    """The folders a page's address sits in: /guides/setup and /guides/{slug} give [guides]."""
+    if "{slug}" in route:
+        parent = route.split("{slug}", 1)[0]
+    else:
+        parent = route.rstrip("/").rsplit("/", 1)[0]
+    return [part for part in parent.strip("/").split("/") if part]
+
+
+# Folders sites build pages from: framework route folders, content folders and static roots.
+PAGE_ROOTS = frozenset({"app", "pages", "routes", "content", "public", "static", "posts"})
+
+
+def served_from(parents):
+    """Whether a folder under these parent directories is one the site serves pages from: its
+    parent is a page root, or a route group or dynamic segment ((marketing), [lang]) that sits
+    under one."""
+    for parent in reversed(parents):
+        if parent in PAGE_ROOTS:
+            return True
+        if not (parent.startswith("(") and parent.endswith(")")) and not (
+            parent.startswith("[") and parent.endswith("]")
+        ):
+            return False
+    return False
+
+
+def outside_route(manifest, proof, route):
+    """The patch's files besides the page that don't sit in its address's own folder.
+
+    For `/guides/setup` a file serves the page only when its directories include `guides`
+    right under a folder the site builds pages from (`src/app/guides/[slug]/page.tsx`,
+    `content/guides/...`), so `scripts/guides/` or `config/guides/` never merge with a page.
+    Root layouts, middleware, host and build settings, shared components and dotfiles reach
+    other pages, so they stay a PR, as do
+    framework entry files (a layout or _document) anywhere. A route named after a framework's
+    own source folder (`/app/setup`) can't be told apart from it, so only the page merges. A
+    page at the site root has no folder of its own, so only the page merges there too.
+    """
+    folders = route_folders(route)
     if FRAMEWORK_ROOT_FOLDERS.intersection(folders):
         folders = []
     outside = []
@@ -729,7 +671,8 @@ def outside_route(manifest, proof, route):
         directories = parts[:-1]
         inside = bool(folders) and any(
             directories[index : index + len(folders)] == folders
-            for index in range(len(directories) - len(folders) + 1)
+            and served_from(directories[:index])
+            for index in range(1, len(directories) - len(folders) + 1)
         )
         if (
             not inside
@@ -746,20 +689,18 @@ def merge_rule(manifest, proof, route):
     """Which rule lets Tin merge this patch under a commit-to-main setting, else None.
 
     `page_only`: the approved page alone, the change the Markdown publisher commits today.
-    `chosen_route`: the page plus the site code that serves it, when the founder chose where
-    these pages live, the PR puts the page at that route and every other file sits in that
-    route's own folder. Neither applies when Tin can't confirm the page keeps the approved
-    wording; any other site change stays a PR.
+    `chosen_route`: the page plus the site code that serves it, when the PR puts the page at
+    its approved address and every other file sits in that address's own folder. Neither
+    applies when Tin can't confirm the page keeps the approved wording; any other site change
+    stays a PR.
     """
-    from tin_lite.page_routes import matches
-
     if "not_confirmed" in {proof.get("copy_check"), proof.get("figure_check")}:
         return None
     if page_only(manifest, proof):
         return "page_only"
     if (
         route
-        and matches(route, proof.get("public_route"))
+        and at_address(route, proof.get("public_route"))
         and not outside_route(manifest, proof, route)
     ):
         return "chosen_route"
@@ -823,16 +764,21 @@ async def publish_after_pull_request(
             if website:
                 from tin_lite import website_change
 
-                route = source.get("route")
                 hold = await website_change.hold_reason(database, run, source, manifest, proof)
+                # Site code beside the page merges only for a new page at the address the
+                # founder approved; an update to an existing page merges nothing but the page.
+                from tin_lite.content_plan import NEW_PAGE_PATH
+
+                new_page = (source.get("item") or {}).get("action") != "update_page"
+                route = source.get("route")
+                if not new_page or not (route and NEW_PAGE_PATH.fullmatch(route)):
+                    route = None
             else:
                 route = (source.get("approval") or {}).get("route")
             rule = merge_rule(manifest, proof, route)
-            from tin_lite.page_routes import matches
-
             outside = (
                 outside_route(manifest, proof, route)
-                if route and matches(route, proof.get("public_route"))
+                if route and at_address(route, proof.get("public_route"))
                 else []
             )
             if hold:
@@ -856,11 +802,11 @@ async def publish_after_pull_request(
                     **base,
                     "status": "left_open",
                     "reason": (
-                        f"It also changes {', '.join(outside[:3])}, outside your chosen route "
-                        f"{route}, so it waits for your review."
+                        f"It also changes {', '.join(outside[:3])}, outside the folder of its "
+                        f"address {route}, so it waits for your review."
                         if outside
                         else f"It changes site files besides the page and does not put the page "
-                        f"at your chosen route {route}, so it waits for your review."
+                        f"at its approved address {route}, so it waits for your review."
                         if route
                         else "It changes site files besides the page, so it waits for your review."
                     ),
@@ -1301,14 +1247,13 @@ def blocking_paths(proof):
 
 
 def validate_patch(manifest, source):
-    """The page check for content.deliver and website.change alike. The procedure's own file
+    """The page check for website.change. The procedure's own file
     and byte caps bound the patch; website_change.hold_reason decides a website merge."""
     return validate_copy(manifest, source)
 
 
 async def delivery_history(executor, *, project_id, source_ids):
-    """Each page's latest adaptation, by website.change or (before its retirement)
-    content.deliver."""
+    """Each page's latest adaptation by website.change."""
     if not source_ids:
         return {}
     rows = await executor.fetch(

@@ -87,6 +87,7 @@ from tin_lite.linkedin_posts import LinkedInPosts
 from tin_lite.linkedin_requests_api import router as linkedin_requests_router
 from tin_lite.luna import LunaProtocolError, LunaSafetyError, LunaUpstreamError
 from tin_lite.organic_audit_control import stop_organic_audit as stop_organic_audit_service
+from tin_lite.organic_system_api import router as organic_system_router
 from tin_lite.output_resolution import OutputResolutionError, OutputResolutionRequest
 from tin_lite.paid_ads_control import (
     stop_paid_ads_assessment as stop_paid_ads_assessment_service,
@@ -134,8 +135,6 @@ from tin_lite.run_service import (
 )
 from tin_lite.schedules import WorkflowSchedule, next_run_after
 from tin_lite.system_week import upcoming_occurrences, week_window
-from tin_lite.technical_fix_api import router as technical_fix_router
-from tin_lite.technical_fix_api import system_router as organic_system_router
 from tin_lite.website_change_api import router as website_change_router
 from tin_lite.website_change_api import settings_router as protected_paths_router
 from tin_lite.workflow_inputs import client_input_schema, normalize_workflow_inputs
@@ -167,7 +166,6 @@ router.include_router(private_workflow_router)
 router.include_router(content_program_router)
 router.include_router(content_draft_router)
 router.include_router(content_delivery_router)
-router.include_router(technical_fix_router)
 router.include_router(organic_system_router)
 router.include_router(project_connections_router)
 router.include_router(project_authors_router)
@@ -5203,7 +5201,7 @@ async def _choose_content_delivery(
     run: WorkflowRun, payload: WorkflowReviewApproval, request: Request, user: AuthContext
 ) -> None:
     from tin_lite.content_delivery import CHOICE_WORKFLOW_IDS
-    from tin_lite.content_delivery_api import adapt_on_approval, delivery_service
+    from tin_lite.content_delivery_api import delivery_service
     from tin_lite.project_files import ProjectFileError
 
     if run.workflow_id not in CHOICE_WORKFLOW_IDS:
@@ -5217,8 +5215,6 @@ async def _choose_content_delivery(
             mode=payload.delivery,
             remember=payload.remember,
             actor=user.clerk_user_id,
-            # An answer page or public article is adapted to the site (a metered run).
-            adapt=adapt_on_approval(getattr(request.app.state, "settings", None), run),
         )
     except (
         LookupError,

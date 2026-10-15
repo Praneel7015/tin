@@ -161,30 +161,6 @@ class LinkedInEngagersActivities:
             raise IntegrationAuthorizationError(SAYS["session_expired"])
         return sealed["session"], sealed["actor"]
 
-    async def _icp(self, project) -> dict:
-        """The ICP file at the project's head: its path, revision and profiles."""
-
-        repo = await self.storage.get_repo(project.state_repo_id)
-        revision = await self.storage.head_sha(repo, project.canonical_branch)
-        if revision:
-            for path in engagers.ICP_PATHS:
-                raw = await self.storage.read_canonical_artifact_if_exists(
-                    repo_id=project.state_repo_id, commit_sha=revision, path=path
-                )
-                if raw:
-                    text = raw[: engagers.ICP_BYTES].decode("utf-8", "replace")
-                    profiles = engagers.icp_profiles(text)
-                    if profiles:
-                        # Scores go stale when the ICP's words change, not on every commit.
-                        digest = hashlib.sha256(text.encode()).hexdigest()[:12]
-                        return {
-                            "path": path,
-                            "revision": revision,
-                            "profiles": profiles,
-                            "definition": f"{path}@{digest}",
-                        }
-        return {}
-
     @activity.defn(name="linkedin_engagers_prepare")
     async def prepare(self, run_id: str) -> None:
         run = await self._active(run_id)
@@ -195,7 +171,7 @@ class LinkedInEngagersActivities:
             if not (receipt and receipt.status == "completed"):
                 await self.db.start_effect(conn, execution_key=key, operation=KEY)
                 await self.db.complete_effect(
-                    conn, execution_key=key, result=await self._icp(project)
+                    conn, execution_key=key, result=await engagers.read_icp(self.storage, project)
                 )
             await records.ensure_fields(conn, run.project_id)
         await self.db.mark_run_running(run.id)
@@ -432,31 +408,33 @@ class LinkedInEngagersActivities:
             output = await self._score_batch(
                 run, batch, text=text, profiles=icp["profiles"], definition=icp["definition"]
             )
+            if output is None:
+                # Left without this definition, so a later run scores them.
+                unscored = [Value("icp", None, UNSCORED), Value("icp_fit", None, UNSCORED)]
+                written = [(person, unscored, "") for person in batch]
+            else:
+                written = [
+                    (person, values, icp["definition"])
+                    for person, values in zip(
+                        batch, engagers.scores(output, batch, icp["profiles"]), strict=True
+                    )
+                ]
             async with self.db.pool.acquire() as conn:
-                if output is None:
-                    # Left without this definition, so a later run scores them.
-                    for person in batch:
+                for person, values, definition in written:
+                    try:
                         await records.set_values(
                             conn,
                             run.project_id,
                             person["id"],
-                            [Value("icp", None, UNSCORED), Value("icp_fit", None, UNSCORED)],
+                            values,
                             set_by_kind="run",
                             set_by=str(run.id),
+                            definition=definition,
                         )
-                    continue
-                for person, values in zip(
-                    batch, engagers.scores(output, batch, icp["profiles"]), strict=True
-                ):
-                    await records.set_values(
-                        conn,
-                        run.project_id,
-                        person["id"],
-                        values,
-                        set_by_kind="run",
-                        set_by=str(run.id),
-                        definition=icp["definition"],
-                    )
+                    except records.RecordError as error:
+                        # The founder forgot this person while the model scored them.
+                        if error.code != "record_gone":
+                            raise
             _heartbeat({"scored": len(tried)})
 
     @activity.defn(name="linkedin_engagers_publish")

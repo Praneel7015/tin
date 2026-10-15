@@ -36,9 +36,33 @@ const documentHtml = [
   ...Array.from({length: 4}, () => `<p>${paragraph}</p>`),
 ].join("");
 
-export async function serveApp({decisionCount = 4} = {}) {
+// People as the People API returns them: a fit, an old score, and someone not scored.
+export function syntheticPeople() {
+  const at = "2026-10-15T09:00:00Z";
+  const person = (id, name, headline, icp, fit, relationship, {stale = false, reason = "Runs a small B2B team with no marketing lead."} = {}) => ({
+    id, name, headline, profile_url: `https://www.linkedin.com/in/${id}`,
+    fields: {
+      icp: {value: icp, reason, by: "engagers", at, stale, definition: "strategy/ICP.md"},
+      icp_fit: {value: fit, reason, by: "engagers", at, stale, definition: "strategy/ICP.md"},
+      linkedin_relationship: {value: relationship, reason: "", by: "engagers", at, stale: false, definition: ""},
+    },
+    last_touch: {kind: "reacted", at: "2026-10-13T08:00:00Z"},
+    added: {at, by: "engagers"},
+  });
+  return [
+    person("p-maya", "Maya Lindqvist", "Founder, payroll for remote teams", "ICP 1: founders who need growth done", 0.84, "connected"),
+    person("p-daniel", "Daniel Okafor", "Co-founder, Fieldline", "ICP 2: technical founders running their own marketing", 0.78, "none"),
+    person("p-sofia", "Sofia Marchetti", "Founder & CEO, Patchbay", "ICP 1: founders who need growth done", 0.66, "connected", {stale: true}),
+    person("p-lea", "Lea Fischer", "Head of Marketing, Quanta Labs", "none", 0.15, "none"),
+    person("p-hannah", "Hannah Kim", "Building something new", null, null, "none", {reason: "Tin couldn't score this person this time; the next run tries again."}),
+  ];
+}
+
+export async function serveApp({decisionCount = 4, people = syntheticPeople(), engagers = false} = {}) {
   const project = {id: "project", name: "Example Co", workspace_id: "ws", workspace_name: "Example", member_count: 1, hidden: false};
   const catalog = [{id: "wf-answer", key: "content.answer_page", title: "Draft an answer page", description: "Draft one answer page for review.", definition: {schedule_modes: ["weekly", "on_demand"]}}];
+  // The workflow that finds people is offered only to some projects; People shows with it.
+  if (engagers) catalog.push({id: "wf-engagers", key: "social.linkedin_engagers", title: "People who engaged with your LinkedIn posts", description: "Who reacted to your LinkedIn posts.", definition: {schedule_modes: ["daily", "on_demand"]}});
   const projectWorkflows = [{id: "cfg-1", workflow_id: "wf-answer", name: "Draft an answer page", status: "active", schedule: {cadence: "weekly", weekdays: ["tuesday"], local_time: "10:00", timezone: "UTC"}, inputs: {}, created_at: "2026-09-20T00:00:00Z"}];
   const runs = Array.from({length: decisionCount}, (_, index) => ({id: `run-${index}`, workflow_id: "wf-answer", workflow_name: "content.answer_page", status: "needs_input", created_at: `2026-09-2${index}T10:00:00Z`, artifact_path: "reports/answers/page-1.md", canonical_commit_sha: revision}));
   const decisions = runs.map((run, index) => ({
@@ -49,7 +73,7 @@ export async function serveApp({decisionCount = 4} = {}) {
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
     const send = value => {response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value));};
-    if (/^\/(?:system|chat|activity|decisions|files|file|integrations)?$/.test(url.pathname)) {
+    if (/^\/(?:system|chat|activity|decisions|people|files|file|integrations)?$/.test(url.pathname)) {
       const html = (await fs.readFile(path.join(assets, "index.html"), "utf8"))
         .replaceAll("{{ASSET_VERSION}}", "test").replaceAll("{{CLERK_PUBLISHABLE_KEY}}", "")
         .replaceAll("{{BROWSER_LOCK_ENABLED}}", "false").replaceAll("{{MCP_URL}}", "https://app.tin.test/mcp")
@@ -65,7 +89,24 @@ export async function serveApp({decisionCount = 4} = {}) {
         return response.end(body);
       } catch {response.writeHead(404).end(); return;}
     }
+    const personPath = url.pathname.match(/^\/api\/projects\/[^/]+\/people\/([^/]+)$/);
+    if (request.method === "DELETE" && personPath) {
+      const index = people.findIndex(item => item.id === personPath[1]);
+      if (index < 0) {response.statusCode = 404; return send({detail: "This person is no longer in this project."});}
+      people.splice(index, 1);
+      response.statusCode = 204;
+      return response.end();
+    }
     if (request.method !== "GET") {response.statusCode = 204; return response.end();}
+    if (/^\/api\/projects\/[^/]+\/people$/.test(url.pathname)) return send({people, truncated: false, fit_shown: 0.6});
+    if (personPath) {
+      const found = people.find(item => item.id === personPath[1]);
+      if (!found) {response.statusCode = 404; return send({detail: "This person is no longer in this project."});}
+      return send({...found, events: [
+        {kind: "reacted", at: "2026-10-13T08:00:00Z", reaction: "INTEREST", post_url: "https://www.linkedin.com/feed/update/urn:li:activity:1/", yours: true},
+        {kind: "reacted", at: "2026-09-30T08:00:00Z", reaction: "LIKE", post_url: "https://www.linkedin.com/feed/update/urn:li:activity:2/", yours: false},
+      ]});
+    }
     if (url.pathname === "/api/projects") return send([project]);
     if (url.pathname === "/api/workflows") return send(catalog);
     if (/\/api\/projects\/[^/]+\/workflows$/.test(url.pathname)) return send(projectWorkflows);
@@ -88,7 +129,7 @@ export async function serveApp({decisionCount = 4} = {}) {
     response.writeHead(404).end();
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  return {server, base: `http://127.0.0.1:${server.address().port}`};
+  return {server, people, base: `http://127.0.0.1:${server.address().port}`};
 }
 
 export async function openApp(browser, base, {viewport = {width: 1440, height: 900}, url = "/system", theme = "light"} = {}) {

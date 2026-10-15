@@ -6943,6 +6943,9 @@ class Database:
             # People records: other people's names and headlines, the timeline, members' notes
             # and who was forgotten. Children first; merged records point at others in the same
             # project.
+            "DELETE FROM linkedin_requests WHERE project_id = $1",
+            "DELETE FROM linkedin_request_batches WHERE project_id = $1",
+            "DELETE FROM linkedin_sending WHERE project_id = $1",
             "DELETE FROM record_events WHERE project_id = $1",
             "DELETE FROM record_notes WHERE project_id = $1",
             "DELETE FROM record_values WHERE project_id = $1",
@@ -6952,7 +6955,7 @@ class Database:
             "DELETE FROM record_suppressions WHERE project_id = $1",
             "DELETE FROM effect_receipts WHERE operation IN "
             "('social.linkedin_listen', 'social.linkedin_results', 'social.linkedin_engagers', "
-            "'linkedin_engagement_v1') AND "
+            "'social.linkedin_requests', 'linkedin_engagement_v1', 'linkedin_request_v1') AND "
             "split_part(execution_key, ':', 1) IN (SELECT id::text FROM workflow_runs "
             "WHERE project_id = $1)",
             # LinkedIn collection holds other people's names, headlines and page text. Jobs (and
@@ -7317,6 +7320,10 @@ class Database:
             "social.linkedin_engagers": (
                 "linkedin_engagers_ready",
                 "Your list of people who engaged on LinkedIn is ready.",
+            ),
+            "social.linkedin_requests": (
+                "linkedin_requests_ready",
+                "Tin finished your approved connection requests.",
             ),
             "social.linkedin_results": (
                 "linkedin_results_ready",

@@ -143,6 +143,7 @@ async def start_workflow_run(
     _x_publication: bool = False,
     _linkedin_publication: bool = False,
     _linkedin_listen: bool = False,
+    _linkedin_requests: bool = False,
     _x_feedback: bool = False,
 ) -> WorkflowRun:
     implementation = registered_workflow_implementations().get(workflow.executor)
@@ -232,6 +233,16 @@ async def start_workflow_run(
         if not getattr(settings, "luna_api_key", None):
             raise WorkflowExecutorUnavailableError(
                 "Scoring LinkedIn engagers requires the native model service."
+            )
+    if workflow.executor == "social.linkedin_requests":
+        from tin_lite.connection_collection import enabled
+
+        if not _linkedin_requests:
+            # Approving requests in Decisions starts it, for exactly that batch.
+            raise WorkflowInputError("Approve connection requests in Decisions to send them.")
+        if not enabled(settings, project_id):
+            raise WorkflowExecutorUnavailableError(
+                "Reading LinkedIn isn't turned on for this project yet."
             )
     if workflow.executor == "social.x_revise" and not _x_feedback:
         raise WorkflowInputError("Read the X draft and use request_workflow_changes to revise it.")

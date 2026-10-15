@@ -572,7 +572,7 @@ async def people(
 # What the People view reads: each person's fields with who set them, and their timeline.
 
 # Short names for the workflows that write records, shown beside a value as who set it.
-WRITERS = {"social.linkedin_engagers": "engagers"}
+WRITERS = {"social.linkedin_engagers": "engagers", "social.linkedin_requests": "requests"}
 VIEW_FIELDS = ("icp", "icp_fit", "linkedin_relationship", "customer")
 # Values computed under a definition, such as the ICP file, go stale when it changes.
 DEFINED_FIELDS = ("icp", "icp_fit")

@@ -19,6 +19,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from tin_lite import linkedin_engagers as engagers
+from tin_lite import linkedin_requests as requests
 from tin_lite import people_records as records
 from tin_lite.connection_collection import (
     PROVIDER,
@@ -98,6 +99,52 @@ def refusal(code: str) -> Exception:
     return IntegrationUpstreamError("Tin's LinkedIn reader didn't finish. Try again later.")
 
 
+async def saved_session(db, settings, cipher, project_id, member) -> tuple[dict, dict]:
+    """A member's saved session and LinkedIn account, under the collection's own checks: cloud
+    reading allowed, a live session from a paired browser, and the member's own connection."""
+
+    if not enabled(settings, project_id):
+        raise WorkflowInputError("Reading LinkedIn isn't turned on for this project yet.")
+    if not cloud_ready(settings) or cipher is None:
+        raise IntegrationUpstreamError("Tin's LinkedIn reader isn't available right now.")
+    # Each member has their own LinkedIn connection; a run reads its starter's posts.
+    connection = await db.pool.fetchrow(
+        """SELECT * FROM integration_connections
+           WHERE project_id = $1 AND provider_key = $2 AND status = 'connected'
+             AND connected_by_clerk_user_id = $3""",
+        project_id,
+        PROVIDER,
+        member,
+    )
+    if connection is None:
+        raise IntegrationAuthorizationError(
+            "Connect your own LinkedIn under Integrations, with Tin for Chrome, first."
+        )
+    config = document(connection["configuration"])
+    if not permission(config) or not usable(config) or not connection["credential_ciphertext"]:
+        raise IntegrationAuthorizationError(
+            "Turn on cloud reading on the LinkedIn card, then open Chrome so Tin for "
+            "Chrome can save your session."
+        )
+    if not await db.pool.fetchval(
+        """SELECT EXISTS (SELECT 1 FROM connection_extension_devices
+           WHERE connection_id = $1 AND revoked_at IS NULL AND expires_at > now())""",
+        connection["id"],
+    ):
+        raise IntegrationAuthorizationError(SAYS["session_expired"])
+    sealed = json.loads(
+        cipher.decrypt(
+            connection["credential_ciphertext"],
+            context=f"credential:{project_id}:{PROVIDER}",
+        )
+    )
+    if sealed.get("version") != 2 or not isinstance(sealed.get("actor"), dict):
+        raise IntegrationAuthorizationError(SAYS["session_expired"])
+    if datetime.fromisoformat(sealed["expires_at"]) <= datetime.now(UTC):
+        raise IntegrationAuthorizationError(SAYS["session_expired"])
+    return sealed["session"], sealed["actor"]
+
+
 class LinkedInEngagersActivities:
     def __init__(self, *, database, storage, settings, cipher, cloud, router):
         self.db, self.storage, self.settings = database, storage, settings
@@ -116,50 +163,9 @@ class LinkedInEngagersActivities:
         _heartbeat({"step": step})
 
     async def _session(self, run) -> tuple[dict, dict]:
-        """The founder's saved session and LinkedIn account, under the collection's own checks:
-        cloud reading allowed, a live session from a paired browser, and the run's starter is
-        the member whose LinkedIn it is."""
-
-        if not enabled(self.settings, run.project_id):
-            raise WorkflowInputError("Reading LinkedIn isn't turned on for this project yet.")
-        if not cloud_ready(self.settings) or self.cipher is None:
-            raise IntegrationUpstreamError("Tin's LinkedIn reader isn't available right now.")
-        # Each member has their own LinkedIn connection; a run reads its starter's posts.
-        connection = await self.db.pool.fetchrow(
-            """SELECT * FROM integration_connections
-               WHERE project_id = $1 AND provider_key = $2 AND status = 'connected'
-                 AND connected_by_clerk_user_id = $3""",
-            run.project_id,
-            PROVIDER,
-            run.started_by_clerk_user_id,
+        return await saved_session(
+            self.db, self.settings, self.cipher, run.project_id, run.started_by_clerk_user_id
         )
-        if connection is None:
-            raise IntegrationAuthorizationError(
-                "Connect your own LinkedIn under Integrations, with Tin for Chrome, first."
-            )
-        config = document(connection["configuration"])
-        if not permission(config) or not usable(config) or not connection["credential_ciphertext"]:
-            raise IntegrationAuthorizationError(
-                "Turn on cloud reading on the LinkedIn card, then open Chrome so Tin for "
-                "Chrome can save your session."
-            )
-        if not await self.db.pool.fetchval(
-            """SELECT EXISTS (SELECT 1 FROM connection_extension_devices
-               WHERE connection_id = $1 AND revoked_at IS NULL AND expires_at > now())""",
-            connection["id"],
-        ):
-            raise IntegrationAuthorizationError(SAYS["session_expired"])
-        sealed = json.loads(
-            self.cipher.decrypt(
-                connection["credential_ciphertext"],
-                context=f"credential:{run.project_id}:{PROVIDER}",
-            )
-        )
-        if sealed.get("version") != 2 or not isinstance(sealed.get("actor"), dict):
-            raise IntegrationAuthorizationError(SAYS["session_expired"])
-        if datetime.fromisoformat(sealed["expires_at"]) <= datetime.now(UTC):
-            raise IntegrationAuthorizationError(SAYS["session_expired"])
-        return sealed["session"], sealed["actor"]
 
     @activity.defn(name="linkedin_engagers_prepare")
     async def prepare(self, run_id: str) -> None:
@@ -450,6 +456,19 @@ class LinkedInEngagersActivities:
             "SELECT count(*) FROM records WHERE project_id = $1 AND source_run_id = $2",
             run.project_id,
             run.id,
+        )
+        # The people who fit and engaged with the starter's posts wait for their approval.
+        async with self.db.pool.acquire() as conn, conn.transaction():
+            await requests.propose(
+                conn, run.project_id, run.started_by_clerk_user_id, run_id=run.id
+            )
+        notes["proposed"] = await self.db.pool.fetchval(
+            """SELECT count(*) FROM linkedin_requests q
+               JOIN linkedin_request_batches b ON b.id = q.batch_id
+               WHERE b.project_id = $1 AND b.member = $2 AND b.status = 'open'
+                 AND q.status = 'proposed'""",
+            run.project_id,
+            run.started_by_clerk_user_id,
         )
         await self._progress(run.id, "publish", 3, 4, "Writing the list")
         project = await self.db.get_project(run.project_id)

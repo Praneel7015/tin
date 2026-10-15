@@ -35,6 +35,9 @@ COLLECTION_ACTIVITIES = frozenset(
         # Engagement reads use the same LinkedIn sandbox, so they share its bounded lane.
         "linkedin_engagers_posts",
         "linkedin_engagers_reactions",
+        # A connection request and the reads of who accepted use the same sandbox.
+        "linkedin_requests_send",
+        "linkedin_requests_check",
     }
 )
 
@@ -70,6 +73,10 @@ TRUSTED_ACTIVITIES = frozenset(
         "linkedin_engagers_score",
         "linkedin_engagers_publish",
         "linkedin_engagers_failure",
+        "linkedin_requests_prepare",
+        "linkedin_requests_next",
+        "linkedin_requests_finish",
+        "linkedin_requests_failure",
         "ai_answers_measure",
         "apply_project_task_changes",
         "awesome_submit_apply",

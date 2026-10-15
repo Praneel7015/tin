@@ -1,0 +1,775 @@
+"""Connection requests a member approves, sent one at a time on Tin's schedule (#450).
+
+After an engagers run, the people who fit an ICP, engaged with the member's own posts and
+aren't connected, invited before or a customer are proposed together in Decisions. Approving
+queues them; nothing is sent then. A `social.linkedin_requests` run sends them one at a time
+from the member's saved session:
+
+- on weekdays, inside the member's window in the project's time zone;
+- at least 15 minutes after the member's last request, from any project, plus a wait of up to
+  25 minutes that each request draws once;
+- under a daily and a weekly cap, halved in the member's first week of sending;
+- only after a fresh read shows the person neither connected nor already invited.
+
+A request that may have gone out is never sent again. LinkedIn's warning, a signed-out session
+or a refusal pauses the member's sending until they resume; LinkedIn's weekly limit holds it
+until the next week. Approvals not sent within 14 days lapse. After sending, the run reads each
+weekday who accepted, for three weeks.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
+from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
+
+from tin_lite import people_records as records
+
+KEY = "social.linkedin_requests"
+WORKFLOW_ID = UUID("9b3f6d2a-41c7-4e8b-a5d2-6c1e8f4b7a90")
+INPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "project_id": {"type": "string", "format": "uuid"},
+        "batch_id": {"type": "string", "format": "uuid"},
+    },
+    "required": ["project_id", "batch_id"],
+}
+CONSENT_VERSION = 1
+FIT = 0.6
+QUEUE_DAYS = 14
+CHECK_DAYS = 21
+GAP = timedelta(minutes=15)
+JITTER_SECONDS = 25 * 60
+DEFAULTS = {
+    "enabled": False,
+    "consent_version": None,
+    "daily_cap": 15,
+    "weekly_cap": 60,
+    "start_minute": 9 * 60,
+    "end_minute": 17 * 60,
+    "paused_reason": None,
+    "paused_until": None,
+}
+# Requests that count against the member's caps: every one Tin tried to send.
+ATTEMPTED = ("sending", "sent", "accepted", "not_pending", "uncertain", "not_sent", "refused")
+# Reasons sending pauses until the member resumes it.
+PAUSES = {
+    "challenge": "LinkedIn asked to verify your account",
+    "session_expired": "your saved LinkedIn session expired",
+    "account_changed": "a different LinkedIn account is signed in to Chrome",
+    "access_denied": "LinkedIn refused a request",
+    "rate_limited": "LinkedIn asked Tin to slow down",
+    "refused": "LinkedIn refused a request",
+}
+
+
+class RequestError(ValueError):
+    """A change Tin refuses, with the sentence the member reads."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code, self.message = code, message
+
+
+# Settings.
+
+
+async def sending(conn, project_id: UUID, member: str) -> dict[str, Any]:
+    """The member's sending on this project, with the project's time zone."""
+
+    row = await conn.fetchrow(
+        """SELECT s.*, p.timezone FROM projects p
+           LEFT JOIN linkedin_sending s ON s.project_id = p.id AND s.member = $2
+           WHERE p.id = $1""",
+        project_id,
+        member,
+    )
+    if row is None:
+        raise RequestError("not_found", "project not found")
+    result = dict(DEFAULTS)
+    if row["member"] is not None:
+        result.update({key: row[key] for key in DEFAULTS})
+    result["timezone"] = row["timezone"] or "UTC"
+    result["on"] = bool(result["enabled"] and result["consent_version"] == CONSENT_VERSION)
+    until = result["paused_until"]
+    # LinkedIn's weekly limit holds sending until a time; anything else until the member resumes.
+    result["paused"] = bool(
+        result["paused_reason"] and (until is None or until > datetime.now(UTC))
+    )
+    result["held"] = bool(result["paused"] and until is None)
+    return result
+
+
+async def set_sending(
+    conn,
+    project_id: UUID,
+    member: str,
+    *,
+    enabled: bool,
+    consent_version: int | None = None,
+    limits: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Turn sending on (only with the current consent) or off, or change its limits."""
+
+    if enabled and consent_version != CONSENT_VERSION:
+        raise RequestError("consent_required", "Tick the box to agree to sending first.")
+    limits = dict(limits or {})
+    if set(limits) - {"daily_cap", "weekly_cap", "start_minute", "end_minute"}:
+        raise RequestError("invalid", "Unknown sending limit.")
+    current = await sending(conn, project_id, member)
+    merged = {key: limits.get(key, current[key]) for key in limits or {}}
+    values = {**{k: current[k] for k in ("daily_cap", "weekly_cap", "start_minute", "end_minute")}}
+    values.update(merged)
+    if not (
+        1 <= values["daily_cap"] <= 25
+        and 1 <= values["weekly_cap"] <= 100
+        and 0 <= values["start_minute"] < values["end_minute"] <= 1440
+    ):
+        raise RequestError("invalid", "Choose limits within 1–25 a day, 1–100 a week.")
+    await conn.execute(
+        """INSERT INTO linkedin_sending (project_id, member, enabled, consent_version,
+               consented_at, daily_cap, weekly_cap, start_minute, end_minute)
+           VALUES ($1, $2, $3, $4, CASE WHEN $3 THEN now() END, $5, $6, $7, $8)
+           ON CONFLICT (project_id, member) DO UPDATE SET
+               enabled = EXCLUDED.enabled,
+               consent_version = CASE WHEN EXCLUDED.enabled THEN EXCLUDED.consent_version
+                                      ELSE linkedin_sending.consent_version END,
+               consented_at = CASE WHEN EXCLUDED.enabled AND NOT linkedin_sending.enabled
+                                   THEN now() ELSE linkedin_sending.consented_at END,
+               daily_cap = EXCLUDED.daily_cap, weekly_cap = EXCLUDED.weekly_cap,
+               start_minute = EXCLUDED.start_minute, end_minute = EXCLUDED.end_minute,
+               updated_at = now()""",
+        project_id,
+        member,
+        enabled,
+        consent_version if enabled else current["consent_version"],
+        values["daily_cap"],
+        values["weekly_cap"],
+        values["start_minute"],
+        values["end_minute"],
+    )
+    return await sending(conn, project_id, member)
+
+
+async def pause(conn, member: str, reason: str, *, until: datetime | None = None) -> None:
+    """Hold the member's sending on every project: until they resume, or until `until`."""
+
+    await conn.execute(
+        """UPDATE linkedin_sending SET paused_reason = $2, paused_at = now(), paused_until = $3,
+               updated_at = now()
+           WHERE member = $1""",
+        member,
+        reason[:60],
+        until,
+    )
+
+
+async def resume(conn, project_id: UUID, member: str) -> dict[str, Any]:
+    await conn.execute(
+        """UPDATE linkedin_sending SET paused_reason = NULL, paused_at = NULL,
+               paused_until = NULL, updated_at = now()
+           WHERE member = $1""",
+        member,
+    )
+    return await sending(conn, project_id, member)
+
+
+# Pacing.
+
+
+def jitter(request_id: UUID | str) -> timedelta:
+    """The extra wait one request draws, the same every time it is asked."""
+
+    digest = hashlib.sha256(str(request_id).encode()).digest()
+    return timedelta(seconds=int.from_bytes(digest[:4], "big") % (JITTER_SECONDS + 1))
+
+
+def _at(day: date, minute: int, zone: ZoneInfo) -> datetime:
+    moment = datetime.combine(day, time(), tzinfo=zone) + timedelta(minutes=minute)
+    return moment.astimezone(UTC)
+
+
+def _caps(settings: dict, first: datetime | None, moment: datetime) -> tuple[int, int]:
+    daily, weekly = settings["daily_cap"], settings["weekly_cap"]
+    if first is None or moment - first < timedelta(days=7):
+        return math.ceil(daily / 2), math.ceil(weekly / 2)
+    return daily, weekly
+
+
+def next_slot(
+    now: datetime,
+    settings: dict,
+    attempts: list[datetime],
+    request_id: UUID | str,
+    *,
+    first: datetime | None = None,
+) -> datetime | None:
+    """The earliest moment this request may be sent: after the gap since the member's last
+    request, inside a weekday window, under the caps. None past a few weeks of searching."""
+
+    zone = ZoneInfo(settings["timezone"])
+    moment = now
+    if attempts:
+        moment = max(moment, max(attempts) + GAP + jitter(request_id))
+    paused_until = settings.get("paused_until")
+    if paused_until and moment < paused_until:
+        moment = paused_until
+    for _ in range(80):
+        local = moment.astimezone(zone)
+        day = local.date()
+        start = _at(day, settings["start_minute"], zone)
+        end = _at(day, settings["end_minute"], zone)
+        if local.weekday() >= 5 or moment >= end:
+            following = day + timedelta(days=1)
+            while following.weekday() >= 5:
+                following += timedelta(days=1)
+            moment = _at(following, settings["start_minute"], zone)
+            continue
+        if moment < start:
+            moment = start
+            continue
+        daily, weekly = _caps(settings, first, moment)
+        local_days = [a.astimezone(zone).date() for a in attempts]
+        week = day.isocalendar()[:2]
+        if sum(1 for d in local_days if d.isocalendar()[:2] == week) >= weekly:
+            monday = day + timedelta(days=7 - local.weekday())
+            moment = _at(monday, settings["start_minute"], zone)
+            continue
+        if sum(1 for d in local_days if d == day) >= daily:
+            moment = end
+            continue
+        return moment
+    return None
+
+
+def projection(
+    now: datetime,
+    settings: dict,
+    attempts: list[datetime],
+    request_ids: list,
+    *,
+    first: datetime | None = None,
+) -> list[datetime]:
+    """When each queued request would go, in order, if each were sent at its slot."""
+
+    planned, sent, moment = [], list(attempts), now
+    for request_id in request_ids:
+        earliest = first or (min(sent) if sent else None)
+        slot = next_slot(moment, settings, sent, request_id, first=earliest)
+        if slot is None:
+            break
+        planned.append(slot)
+        sent.append(slot)
+        moment = slot
+    return planned
+
+
+async def member_attempts(
+    conn, member: str, now: datetime
+) -> tuple[list[datetime], datetime | None]:
+    """The member's requests from every project over the last eight days, and their first."""
+
+    rows = await conn.fetch(
+        """SELECT attempted_at FROM linkedin_requests
+           WHERE member = $1 AND attempted_at > $2 ORDER BY attempted_at""",
+        member,
+        now - timedelta(days=8),
+    )
+    first = await conn.fetchval(
+        "SELECT min(attempted_at) FROM linkedin_requests WHERE member = $1", member
+    )
+    return [row["attempted_at"] for row in rows], first
+
+
+# Proposals.
+
+
+async def propose(conn, project_id: UUID, member: str, *, run_id: UUID | None = None) -> int:
+    """Add everyone newly eligible to the member's open batch; returns how many were added."""
+
+    rows = await conn.fetch(
+        """SELECT r.id, i.value AS target FROM records r
+           JOIN record_identifiers i ON i.record_id = r.id AND i.kind = 'linkedin_member'
+           WHERE r.project_id = $1 AND r.merged_into IS NULL
+             -- They engaged with this member's own posts.
+             AND EXISTS (
+                 SELECT 1 FROM record_events e
+                 JOIN records m ON m.id = e.record_id
+                 JOIN workflow_runs w ON w.id = e.run_id
+                 WHERE e.project_id = $1 AND COALESCE(m.merged_into, m.id) = r.id
+                   AND e.kind IN ('reacted', 'commented')
+                   AND w.started_by_clerk_user_id = $2)
+             AND EXISTS (SELECT 1 FROM record_values v WHERE v.record_id = r.id
+                         AND v.field = 'icp_fit' AND v.value_number >= $3)
+             AND EXISTS (SELECT 1 FROM record_values v WHERE v.record_id = r.id
+                         AND v.field = 'linkedin_relationship' AND v.value_text = 'none')
+             AND NOT EXISTS (SELECT 1 FROM record_values v WHERE v.record_id = r.id
+                             AND v.field = 'customer' AND v.value_text = 'yes')
+             AND NOT EXISTS (SELECT 1 FROM linkedin_requests q
+                             WHERE q.project_id = $1 AND q.record_id = r.id AND q.member = $2)
+           ORDER BY r.created_at, r.id""",
+        project_id,
+        member,
+        FIT,
+    )
+    if not rows:
+        return 0
+    batch = await conn.fetchval(
+        """SELECT id FROM linkedin_request_batches
+           WHERE project_id = $1 AND member = $2 AND status = 'open'""",
+        project_id,
+        member,
+    )
+    if batch is None:
+        batch = await conn.fetchval(
+            """INSERT INTO linkedin_request_batches (id, project_id, member, source_run_id)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (project_id, member) WHERE status = 'open' DO NOTHING
+               RETURNING id""",
+            uuid4(),
+            project_id,
+            member,
+            run_id,
+        ) or await conn.fetchval(
+            """SELECT id FROM linkedin_request_batches
+               WHERE project_id = $1 AND member = $2 AND status = 'open'""",
+            project_id,
+            member,
+        )
+    added = 0
+    for row in rows:
+        added += bool(
+            await conn.fetchval(
+                """INSERT INTO linkedin_requests (id, project_id, batch_id, record_id, member,
+                       target)
+                   VALUES ($1, $2, $3, $4, $5, $6)
+                   ON CONFLICT (batch_id, record_id) DO NOTHING RETURNING true""",
+                uuid4(),
+                project_id,
+                batch,
+                row["id"],
+                member,
+                row["target"],
+            )
+        )
+    return added
+
+
+async def open_batches(conn, project_id: UUID, member: str, now: datetime) -> list[dict]:
+    """The member's batch waiting in Decisions, best fit first, with when each would go."""
+
+    batch = await conn.fetchrow(
+        """SELECT id, created_at FROM linkedin_request_batches
+           WHERE project_id = $1 AND member = $2 AND status = 'open'""",
+        project_id,
+        member,
+    )
+    if batch is None:
+        return []
+    people = [
+        dict(row)
+        for row in await conn.fetch(
+            """SELECT q.id AS request_id, q.record_id,
+                   (SELECT value_text FROM record_values v
+                    WHERE v.record_id = q.record_id AND v.field = 'name') AS name,
+                   (SELECT value_text FROM record_values v
+                    WHERE v.record_id = q.record_id AND v.field = 'headline') AS headline,
+                   (SELECT value_text FROM record_values v
+                    WHERE v.record_id = q.record_id AND v.field = 'icp') AS icp,
+                   (SELECT value_number FROM record_values v
+                    WHERE v.record_id = q.record_id AND v.field = 'icp_fit') AS fit
+               FROM linkedin_requests q
+               WHERE q.batch_id = $1 AND q.status = 'proposed'
+               ORDER BY fit DESC NULLS LAST, name""",
+            batch["id"],
+        )
+    ]
+    if not people:
+        return []
+    # What each engaged with last: the post's date stands in, as in People.
+    engaged: dict = {}
+    for row in await conn.fetch(
+        """SELECT COALESCE(r.merged_into, r.id) AS person, e.kind, e.occurred_at,
+               e.recorded_at, e.detail->>'posted_at' AS posted_at
+           FROM record_events e JOIN records r ON r.id = e.record_id
+           WHERE e.project_id = $1 AND e.kind IN ('reacted', 'commented')
+             AND COALESCE(r.merged_into, r.id) = ANY($2::uuid[])""",
+        project_id,
+        [p["record_id"] for p in people],
+    ):
+        at = records._when(row)
+        if row["person"] not in engaged or at > engaged[row["person"]]["at"]:
+            engaged[row["person"]] = {"kind": row["kind"], "at": at}
+    settings = await sending(conn, project_id, member)
+    attempts, first = await member_attempts(conn, member, now)
+    queued = await conn.fetch(
+        "SELECT id FROM linkedin_requests WHERE member = $1 AND status = 'queued' "
+        "ORDER BY queued_at, id",
+        member,
+    )
+    ahead = [row["id"] for row in queued]
+    plan = projection(
+        now,
+        settings,
+        attempts,
+        [*ahead, *[p["request_id"] for p in people]],
+        first=first,
+    )[len(ahead) :]
+    return [
+        {
+            "id": batch["id"],
+            "created_at": batch["created_at"],
+            "people": [{**p, "engaged": engaged.get(p["record_id"])} for p in people],
+            "first_send": plan[0] if plan else None,
+            "last_send": plan[-1] if plan else None,
+        }
+    ]
+
+
+async def decide(
+    conn,
+    project_id: UUID,
+    batch_id: UUID,
+    member: str,
+    *,
+    request_id: UUID,
+    approve: bool,
+    people: list[UUID] | None = None,
+) -> dict:
+    """Approve the chosen people (queued, sent later) or discard the batch. Only the member
+    whose LinkedIn would send decides; the same request ID repeats the same decision."""
+
+    async with conn.transaction():
+        batch = await conn.fetchrow(
+            "SELECT * FROM linkedin_request_batches WHERE id = $1 AND project_id = $2 FOR UPDATE",
+            batch_id,
+            project_id,
+        )
+        if batch is None or batch["member"] != member:
+            raise RequestError("not_found", "These requests are no longer waiting.")
+        if batch["status"] != "open":
+            if batch["decision_request_id"] == request_id:
+                return {"status": batch["status"], "batch_id": batch_id, "repeated": True}
+            raise RequestError("conflict", "These requests were already decided.")
+        proposed = {
+            row["record_id"]
+            for row in await conn.fetch(
+                "SELECT record_id FROM linkedin_requests WHERE batch_id = $1 AND status = "
+                "'proposed'",
+                batch_id,
+            )
+        }
+        chosen = set(people or []) if approve else set()
+        if approve:
+            if not chosen:
+                raise RequestError("invalid", "Choose at least one person.")
+            if chosen - proposed:
+                raise RequestError("invalid", "Someone you chose is no longer in this batch.")
+            if not (await sending(conn, project_id, member))["on"]:
+                raise RequestError("sending_off", "Turn on sending on the LinkedIn card first.")
+        await conn.execute(
+            """UPDATE linkedin_requests SET status = 'queued', queued_at = now()
+               WHERE batch_id = $1 AND status = 'proposed' AND record_id = ANY($2::uuid[])""",
+            batch_id,
+            list(chosen),
+        )
+        await conn.execute(
+            """UPDATE linkedin_requests SET status = 'declined', settled_at = now()
+               WHERE batch_id = $1 AND status = 'proposed'""",
+            batch_id,
+        )
+        status = "approved" if approve else "discarded"
+        await conn.execute(
+            """UPDATE linkedin_request_batches SET status = $2, decided_at = now(),
+                   decision_request_id = $3
+               WHERE id = $1""",
+            batch_id,
+            status,
+            request_id,
+        )
+    return {"status": status, "batch_id": batch_id, "queued": len(chosen), "repeated": False}
+
+
+# What the member sees: this week, and what waits.
+
+
+async def week(conn, project_id: UUID, member: str, now: datetime) -> dict:
+    settings = await sending(conn, project_id, member)
+    zone = ZoneInfo(settings["timezone"])
+    local = now.astimezone(zone)
+    monday = _at(local.date() - timedelta(days=local.weekday()), 0, zone)
+    row = await conn.fetchrow(
+        """SELECT
+               count(*) FILTER (WHERE status IN ('sent', 'accepted', 'not_pending')
+                                AND sent_at >= $3) AS sent,
+               count(*) FILTER (WHERE status = 'accepted' AND settled_at >= $3) AS accepted,
+               count(*) FILTER (WHERE status = 'queued') AS queued,
+               count(*) FILTER (WHERE status = 'sent' AND settled_at IS NULL) AS pending
+           FROM linkedin_requests WHERE project_id = $1 AND member = $2""",
+        project_id,
+        member,
+        monday,
+    )
+    queued = [
+        r["id"]
+        for r in await conn.fetch(
+            "SELECT id FROM linkedin_requests WHERE member = $1 AND status = 'queued' "
+            "ORDER BY queued_at, id LIMIT 1",
+            member,
+        )
+    ]
+    next_send = None
+    if queued and settings["on"] and not settings["held"]:
+        attempts, first = await member_attempts(conn, member, now)
+        next_send = next_slot(now, settings, attempts, queued[0], first=first)
+    return {
+        **{key: row[key] for key in ("sent", "accepted", "queued", "pending")},
+        "next_send": next_send,
+    }
+
+
+# What a sending run does next.
+
+
+async def lapse(conn, batch_id: UUID, now: datetime) -> int:
+    result = await conn.execute(
+        """UPDATE linkedin_requests SET status = 'lapsed', settled_at = now()
+           WHERE batch_id = $1 AND status = 'queued' AND queued_at < $2""",
+        batch_id,
+        now - timedelta(days=QUEUE_DAYS),
+    )
+    return int(result.split()[-1])
+
+
+async def next_step(conn, batch_id: UUID, now: datetime) -> dict:
+    """Send the batch's next request, wait, read who accepted, or finish.
+
+    Returns {"action": "send", "request_id"}, {"action": "check"}, {"action": "wait",
+    "seconds"} or {"action": "done"}. Sending waits while the member's sending is off or
+    paused; a wait is never longer than six hours, so a change is noticed.
+    """
+
+    batch = await conn.fetchrow("SELECT * FROM linkedin_request_batches WHERE id = $1", batch_id)
+    if batch is None:
+        return {"action": "done"}
+    await lapse(conn, batch_id, now)
+    queued = await conn.fetchrow(
+        """SELECT id FROM linkedin_requests WHERE batch_id = $1 AND status = 'queued'
+           ORDER BY queued_at, id LIMIT 1""",
+        batch_id,
+    )
+    # Who accepted is read about a day after the newest request, then about daily.
+    check_after = None
+    newest = await conn.fetchval(
+        """SELECT max(attempted_at) FROM linkedin_requests WHERE batch_id = $1
+           AND status IN ('sent', 'uncertain') AND settled_at IS NULL""",
+        batch_id,
+    )
+    if newest is not None:
+        last = batch["checked_at"]
+        check_after = max(newest, last or newest) + timedelta(hours=20)
+        if check_after <= now:
+            return {"action": "check"}
+    if queued is not None:
+        settings = await sending(conn, batch["project_id"], batch["member"])
+        if not settings["on"] or settings["held"]:
+            return {"action": "wait", "seconds": 6 * 3600}
+        attempts, first = await member_attempts(conn, batch["member"], now)
+        slot = next_slot(now, settings, attempts, queued["id"], first=first)
+        if slot is None:
+            return {"action": "wait", "seconds": 6 * 3600}
+        if slot <= now + timedelta(seconds=30):
+            return {"action": "send", "request_id": str(queued["id"])}
+        until = min(slot, check_after) if check_after else slot
+        return {"action": "wait", "seconds": _seconds(until - now)}
+    if check_after is not None:
+        return {"action": "wait", "seconds": _seconds(check_after - now)}
+    return {"action": "done"}
+
+
+def _seconds(delta: timedelta) -> int:
+    return max(30, min(6 * 3600, math.ceil(delta.total_seconds())))
+
+
+async def reserve(conn, request_id: UUID, now: datetime) -> dict:
+    """Under the member's lock: the request's turn has come, so mark it attempted before the
+    send, or say how long to wait. Returns {"go": True, ...} or {"wait": seconds}."""
+
+    request = await conn.fetchrow("SELECT * FROM linkedin_requests WHERE id = $1", request_id)
+    if request is None or request["status"] not in {"queued", "sending"}:
+        return {"skip": True}
+    details = {
+        "go": True,
+        "project_id": request["project_id"],
+        "record_id": request["record_id"],
+        "member": request["member"],
+        "target": request["target"],
+        "batch_id": request["batch_id"],
+    }
+    if request["status"] == "sending":
+        # Reserved before an interruption: its turn was already taken and counted.
+        return details
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"linkedin-requests:{request['member']}",
+    )
+    settings = await sending(conn, request["project_id"], request["member"])
+    if not settings["on"] or settings["held"]:
+        return {"wait": 6 * 3600}
+    attempts, first = await member_attempts(conn, request["member"], now)
+    slot = next_slot(now, settings, attempts, request_id, first=first)
+    if slot is None or slot > now + timedelta(seconds=60):
+        return {"wait": _seconds((slot or now + timedelta(hours=6)) - now)}
+    await conn.execute(
+        "UPDATE linkedin_requests SET status = 'sending', attempted_at = $2 WHERE id = $1",
+        request_id,
+        now,
+    )
+    return details
+
+
+async def settle(
+    conn, request_id: UUID, outcome: str, *, run_id: UUID, invitation: str | None = None
+) -> str:
+    """Record what one send came to on the request and on the person. Returns its status."""
+
+    request = await conn.fetchrow("SELECT * FROM linkedin_requests WHERE id = $1", request_id)
+    status = {
+        "sent": "sent",
+        "connected": "connected",
+        "invited": "invited",
+        "unknown_person": "unknown_person",
+        "refused": "refused",
+        "uncertain": "uncertain",
+    }.get(outcome)
+    if outcome == "limit" or (outcome in PAUSES and outcome != "refused"):
+        # Nothing went out: the request waits its turn again.
+        await conn.execute(
+            "UPDATE linkedin_requests SET status = 'queued', attempted_at = NULL WHERE id = $1",
+            request_id,
+        )
+        return "queued"
+    if status is None:
+        status = "uncertain"
+    now = datetime.now(UTC)
+    await conn.execute(
+        """UPDATE linkedin_requests SET status = $2::text, invitation = $3::text,
+               sent_at = CASE WHEN $2::text = 'sent' THEN $4::timestamptz END,
+               settled_at = CASE WHEN $2::text IN ('connected', 'invited', 'unknown_person',
+                                                    'refused')
+                                 THEN $4::timestamptz END
+           WHERE id = $1""",
+        request_id,
+        status,
+        invitation,
+        now,
+    )
+    relationship = {"sent": "pending", "invited": "pending", "connected": "connected"}.get(status)
+    if relationship:
+        await _relationship(conn, request, relationship, run_id)
+    if status == "sent":
+        await records.add_event(
+            conn,
+            request["project_id"],
+            request["record_id"],
+            kind="invited",
+            event_key=f"linkedin:invited:{request['id']}",
+            occurred_at=now,
+            detail={"member": request["member"]},
+            run_id=run_id,
+        )
+    return status
+
+
+async def _relationship(conn, request, value: str, run_id: UUID) -> None:
+    try:
+        await records.set_values(
+            conn,
+            request["project_id"],
+            request["record_id"],
+            [records.Value("linkedin_relationship", value, "")],
+            set_by_kind="run",
+            set_by=str(run_id),
+        )
+    except records.RecordError as error:
+        if error.code != "record_gone":
+            raise
+
+
+async def checking(conn, batch_id: UUID, now: datetime) -> list[dict]:
+    """The batch's requests still waiting for an answer, at most 20, oldest first; those past
+    three weeks stop being read."""
+
+    await conn.execute(
+        """UPDATE linkedin_requests SET settled_at = now()
+           WHERE batch_id = $1 AND status IN ('sent', 'uncertain') AND settled_at IS NULL
+             AND attempted_at < $2""",
+        batch_id,
+        now - timedelta(days=CHECK_DAYS),
+    )
+    rows = await conn.fetch(
+        """SELECT id, target, status FROM linkedin_requests
+           WHERE batch_id = $1 AND status IN ('sent', 'uncertain') AND settled_at IS NULL
+           ORDER BY attempted_at, id LIMIT 20""",
+        batch_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def checked(conn, batch_id: UUID, states: dict[str, str], *, run_id: UUID) -> dict:
+    """Record a relationship read: accepted, still pending, or no longer pending."""
+
+    counts = {"accepted": 0, "pending": 0, "ended": 0}
+    for row in await checking(conn, batch_id, datetime.now(UTC)):
+        state = states.get(row["target"])
+        request = await conn.fetchrow("SELECT * FROM linkedin_requests WHERE id = $1", row["id"])
+        if state == "connected":
+            await conn.execute(
+                "UPDATE linkedin_requests SET status = 'accepted', settled_at = now(), "
+                "sent_at = COALESCE(sent_at, attempted_at) WHERE id = $1",
+                row["id"],
+            )
+            await _relationship(conn, request, "connected", run_id)
+            try:
+                await records.add_event(
+                    conn,
+                    request["project_id"],
+                    request["record_id"],
+                    kind="accepted",
+                    event_key=f"linkedin:accepted:{request['id']}",
+                    occurred_at=datetime.now(UTC),
+                    detail={"member": request["member"]},
+                    run_id=run_id,
+                )
+            except records.RecordError as error:
+                if error.code != "record_gone":
+                    raise
+            counts["accepted"] += 1
+        elif state == "invited":
+            if row["status"] == "uncertain":
+                # It went out after all.
+                await conn.execute(
+                    "UPDATE linkedin_requests SET status = 'sent', sent_at = attempted_at "
+                    "WHERE id = $1",
+                    row["id"],
+                )
+                await _relationship(conn, request, "pending", run_id)
+            counts["pending"] += 1
+        elif state == "none":
+            # Sent and no longer pending (declined or withdrawn), or uncertain and never sent.
+            await conn.execute(
+                "UPDATE linkedin_requests SET status = $2, settled_at = now() WHERE id = $1",
+                row["id"],
+                "not_pending" if row["status"] == "sent" else "not_sent",
+            )
+            await _relationship(conn, request, "none", run_id)
+            counts["ended"] += 1
+    await conn.execute(
+        "UPDATE linkedin_request_batches SET checked_at = now() WHERE id = $1", batch_id
+    )
+    return counts

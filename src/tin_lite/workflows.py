@@ -29,6 +29,8 @@ from tin_lite.domain import (
     LINKEDIN_LISTEN_CHECKPOINTS,
     LINKEDIN_LISTEN_READ_ATTEMPTS,
     LINKEDIN_LISTEN_WORKFLOW_NAME,
+    LINKEDIN_REQUESTS_STEPS,
+    LINKEDIN_REQUESTS_WORKFLOW_NAME,
     LINKEDIN_RESULTS_WORKFLOW_NAME,
     PAID_ADS_ASSESSMENT_WORKFLOW_NAME,
     PAID_ADS_LAUNCH_WORKFLOW_NAME,
@@ -1889,6 +1891,54 @@ class LinkedInEngagersWorkflow:
             raise
 
 
+@workflow.defn(name=LINKEDIN_REQUESTS_WORKFLOW_NAME)
+class LinkedInRequestsWorkflow:
+    """Send one approved batch of connection requests one at a time, then read who accepted.
+    Each step asks an activity what comes next, so every decision about time is made from
+    Postgres; history holds request IDs, waits and outcomes."""
+
+    @workflow.run
+    async def run(self, run_id: str) -> None:
+        async def call(name, argument=run_id, *, minutes=5):
+            return await workflow.execute_activity(
+                name,
+                argument,
+                start_to_close_timeout=timedelta(minutes=minutes),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=30),
+                    maximum_attempts=3,
+                    non_retryable_error_types=[
+                        "IntegrationAuthorizationError",
+                        "WorkflowInputError",
+                        "BillingError",
+                    ],
+                ),
+            )
+
+        try:
+            await call("linkedin_requests_prepare")
+            for _ in range(LINKEDIN_REQUESTS_STEPS):
+                step = await call("linkedin_requests_next")
+                if step["action"] == "done":
+                    break
+                if step["action"] == "wait":
+                    await workflow.sleep(timedelta(seconds=step["seconds"]))
+                elif step["action"] == "send":
+                    sent = await call(
+                        "linkedin_requests_send",
+                        {"run_id": run_id, "request_id": step["request_id"]},
+                        minutes=6,
+                    )
+                    if sent.get("outcome") == "wait":
+                        await workflow.sleep(timedelta(seconds=sent.get("wait") or 60))
+                elif step["action"] == "check":
+                    await call("linkedin_requests_check", minutes=8)
+            await call("linkedin_requests_finish")
+        except BaseException as exc:
+            await call("linkedin_requests_failure", failure_input(run_id, exc))
+            raise
+
+
 @workflow.defn(name="growth.onboarding_plan")
 class GrowthOnboardingPlanWorkflow:
     """Read, write, save. Only the run identifier enters history; activities hold every result."""
@@ -2026,6 +2076,7 @@ def registered_workflows() -> list[type]:
         LinkedInListenWorkflow,
         LinkedInResultsWorkflow,
         LinkedInEngagersWorkflow,
+        LinkedInRequestsWorkflow,
         OrganicTrafficSystemWorkflow,
         GrowthOnboardingWorkflow,
         GrowthOnboardingPlanWorkflow,
@@ -2068,6 +2119,7 @@ def registered_workflow_implementations() -> dict[str, type]:
         LINKEDIN_LISTEN_WORKFLOW_NAME: LinkedInListenWorkflow,
         LINKEDIN_RESULTS_WORKFLOW_NAME: LinkedInResultsWorkflow,
         LINKEDIN_ENGAGERS_WORKFLOW_NAME: LinkedInEngagersWorkflow,
+        LINKEDIN_REQUESTS_WORKFLOW_NAME: LinkedInRequestsWorkflow,
         "organic.traffic_system": OrganicTrafficSystemWorkflow,
         "growth.onboarding": GrowthOnboardingWorkflow,
         "growth.onboarding_plan": GrowthOnboardingPlanWorkflow,

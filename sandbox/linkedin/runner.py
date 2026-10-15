@@ -1,4 +1,5 @@
-"""Trusted, fixed read-only program. No agent or user-authored code runs in this image."""
+"""Trusted, fixed program. No agent or user-authored code runs in this image. It reads, and
+sends one connection request a member approved, to one fixed LinkedIn path."""
 
 import asyncio
 import json
@@ -13,16 +14,32 @@ sys.path.insert(0, "/opt/tin-collection")
 from tin_lite.connection_collection import CollectionError
 from tin_lite.linkedin_session import read_page
 
-# A search page answers within 90 seconds; a paced engagement read takes up to five minutes.
-SECONDS = {"search": 90, "linkedin_posts": 300, "linkedin_reactions": 300}
+# A search page answers within 90 seconds; a paced engagement read takes up to five minutes,
+# a relationship read of a few people as long, and one connection request two minutes.
+SECONDS = {
+    "search": 90,
+    "linkedin_posts": 300,
+    "linkedin_reactions": 300,
+    "linkedin_relationships": 300,
+    "linkedin_invite": 120,
+}
 
 
 async def engagement(packet):
     import httpx
 
     from tin_lite.linkedin_engagement import read_posts, read_reactions
+    from tin_lite.linkedin_invitations import read_relationships, send_invitation
 
     async with httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client:
+        if packet["kind"] == "linkedin_relationships":
+            return await read_relationships(
+                packet["session"], packet["actor"], client=client, members=packet["members"]
+            )
+        if packet["kind"] == "linkedin_invite":
+            return await send_invitation(
+                packet["session"], packet["actor"], client=client, member=packet["member"]
+            )
         if packet["kind"] == "linkedin_posts":
             return await read_posts(
                 packet["session"],
@@ -32,6 +49,8 @@ async def engagement(packet):
                 window_days=packet["window_days"],
                 limit=packet["limit"],
             )
+        if packet["kind"] != "linkedin_reactions":
+            raise ValueError
         return await read_reactions(
             packet["session"],
             packet["actor"],

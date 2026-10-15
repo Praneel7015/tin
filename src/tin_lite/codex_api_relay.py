@@ -14,7 +14,6 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from starlette.background import BackgroundTask
 
 from tin_lite.billing_contracts import BillingError
 from tin_lite.codex_api import (
@@ -30,6 +29,7 @@ from tin_lite.codex_api import (
     is_api_contract,
     is_procedure_contract,
     is_session_contract,
+    parallel_requests,
     record_relay_rejection,
     token_hash,
 )
@@ -61,6 +61,38 @@ class RelayRejected(HTTPException):
 
 
 CONTRACT_REJECTION = "This API request exceeds its reserved execution contract"
+# Refusals of one parallel request while others hold the run's room; never a run's cause.
+PARALLEL_REJECTIONS = frozenset({"parallel_limit", "parallel_reservation"})
+TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
+# Runaway guards for one provider stream, whether or not its client stays: how long it may be
+# read, and how many bytes may wait for a slow client.
+STREAM_SECONDS = 1200
+MAX_STREAM_BYTES = 64 * 1024 * 1024
+
+
+# How long a parallel request waits for a slot before it is refused: a subagent's response with
+# several searches can stream for minutes. Admission and the upstream connect must finish
+# inside relay_codex_api's 200-second bound; streaming follows.
+PARALLEL_WAIT_SECONDS = 170
+PARALLEL_WAIT_STEP_SECONDS = 1.0
+# Spending refusals that requests in flight can cause by holding their reservations.
+HELD_ROOM_CODES = frozenset({"run_limit", "project_limit", "insufficient_funds"})
+
+
+def request_tokens(contract):
+    """The most tokens one request can add: a full context and a maximum response."""
+    return contract.get("context_window", 0) + contract.get("max_output_tokens", 0)
+
+
+def reservation_refusal(exc, in_flight, stopped):
+    """What a refused reservation does. With other requests in flight, a refusal for room they
+    hold is temporary (it returns when they settle), so only this request is refused; with none
+    in flight it is the run's real spending stop."""
+    if in_flight and exc.code in HELD_ROOM_CODES:
+        return RelayRejected(409, exc.diagnostic(), reason="parallel_reservation")
+    return stopped(exc)
+
+
 # Historical v1/v2 observations count every web_search_call as one search.
 MULTI_TOOL_PROTOCOLS = frozenset(contract["protocol"] for contract in MULTI_TOOL_CONTRACTS)
 
@@ -241,8 +273,13 @@ class CodexAPIRelay:
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(180, connect=15), follow_redirects=False, trust_env=False
         )
+        # Provider streams being read and settled, whether or not their client is still there.
+        self._readers: set[asyncio.Task] = set()
 
     async def close(self):
+        for task in list(self._readers):
+            task.cancel()
+        await asyncio.gather(*self._readers, return_exceptions=True)
         await self.client.aclose()
 
     async def note_rejection(self, run_id, grant, **facts):
@@ -255,6 +292,23 @@ class CodexAPIRelay:
             logger.warning("Codex API rejection cause was not recorded run=%s", run_id)
 
     async def admit(self, run_id, grant, fingerprint, operation, *, request_bytes=0, raw=None):
+        waited = 0.0
+        while True:
+            try:
+                return await self._admit_once(
+                    run_id, grant, fingerprint, operation, request_bytes=request_bytes, raw=raw
+                )
+            except RelayRejected as exc:
+                # A parallel request waits here for one in flight to settle, instead of
+                # failing the Codex turn that sent it (the controller does not retry).
+                if exc.reason not in PARALLEL_REJECTIONS or waited >= PARALLEL_WAIT_SECONDS:
+                    raise
+                await asyncio.sleep(PARALLEL_WAIT_STEP_SECONDS)
+                waited += PARALLEL_WAIT_STEP_SECONDS
+
+    async def _admit_once(
+        self, run_id, grant, fingerprint, operation, *, request_bytes=0, raw=None
+    ):
         try:
             return await self._admit(
                 run_id, grant, fingerprint, operation, request_bytes=request_bytes, raw=raw
@@ -399,8 +453,19 @@ class CodexAPIRelay:
                     str(run_id),
                     contract["max_requests"] + 1,
                 )
-                if any(item["status"] != "completed" for item in rows):
+                # One request at a time, unless the contract lets subagents run beside the
+                # lead; each in-flight request already holds its own reservation.
+                if sum(item["status"] != "completed" for item in rows) >= parallel_requests(
+                    contract
+                ):
+                    if parallel_requests(contract) > 1:
+                        raise RelayRejected(
+                            409,
+                            "Too many API requests are active at once",
+                            reason="parallel_limit",
+                        )
                     raise HTTPException(409, "A prior API request is active or unconfirmed")
+                in_flight = sum(item["status"] != "completed" for item in rows)
                 if len(rows) >= contract["max_requests"]:
                     raise stopped(
                         BillingError("request_limit", "Codex API request limit reached", 429)
@@ -411,8 +476,20 @@ class CodexAPIRelay:
                 )
                 if tokens >= contract["max_observed_tokens"]:
                     raise stopped(BillingError("token_limit", "Codex API token limit reached", 429))
+                if (
+                    in_flight
+                    and tokens + in_flight * request_tokens(contract)
+                    >= (contract["max_observed_tokens"])
+                ):
+                    # Requests in flight could carry the run past its token stop; wait for
+                    # them to settle rather than admit one more beside them.
+                    raise RelayRejected(
+                        409, "Too many API requests are active at once", reason="parallel_limit"
+                    )
                 if enrolled:
                     for item in rows:
+                        if item["status"] != "completed":
+                            continue  # In flight beside this one (parallel contracts only).
                         previous = decode_record(item["result"])
                         priced = price_response(budget["pricing"], previous)
                         if priced is None or priced[0] > budget["request_maximum_nanos"]:
@@ -428,7 +505,7 @@ class CodexAPIRelay:
                             maximum=lambda terms: terms["request_maximum_nanos"],
                         )
                     except BillingError as exc:
-                        raise stopped(exc) from None
+                        raise reservation_refusal(exc, in_flight, stopped) from None
                 request_number = len(rows) + 1
             observation = {
                 "version": 1,
@@ -574,88 +651,129 @@ class CodexAPIRelay:
             finally:
                 await upstream.aclose()
 
-        async def stream():
-            buffer = b""
-            observed = False
-            evidence = WebEvidence() if contract in MULTI_TOOL_CONTRACTS else None
-            inserted = 0
-            sequence = 0
+        # One task reads the provider stream and settles the request; the response only
+        # forwards its events. With subagents, Codex drops the lead's in-flight stream when a
+        # subagent reports back; cancelling the response then stops only the forwarding, and
+        # the reader still settles the request with its verified usage instead of leaving it
+        # unconfirmed. The response is already being generated; reading it buys nothing more.
+        events: asyncio.Queue = asyncio.Queue()
+        failed = object()
+        forwarding = {"open": True, "queued": 0}
+
+        def forward(item, size=0):
+            # Nothing piles up for a client that left; a slow one is bounded in total bytes.
+            if not forwarding["open"]:
+                return
+            forwarding["queued"] += size
+            if forwarding["queued"] > MAX_STREAM_BYTES:
+                raise RuntimeError("Codex API stream exceeds its bound")
+            events.put_nowait(item)
+
+        async def read():
+            ended = False
             try:
-                async for chunk in upstream.aiter_bytes():
-                    buffer += chunk
-                    if len(buffer) > MAX_EVENT_BYTES:
-                        raise RuntimeError("Codex API event exceeds its bound")
-                    while boundary := re.search(rb"\r?\n\r?\n", buffer):
-                        event, buffer = buffer[: boundary.start()], buffer[boundary.end() :]
-                        data = b"\n".join(
-                            line[5:].lstrip()
-                            for line in event.splitlines()
-                            if line.startswith(b"data:")
-                        )
-                        if data and data != b"[DONE]":
-                            message = json.loads(data)
-                            if not isinstance(message, dict):
-                                raise ValueError("Invalid Codex stream event")
-                            if message.get("type") in {
-                                "response.completed",
-                                "response.incomplete",
-                                "response.failed",
-                            }:
-                                response = message.get("response")
-                                if isinstance(response, dict) and not observed:
-                                    await self.observe(
-                                        key,
-                                        record,
-                                        response,
-                                        request_id=upstream.headers.get("x-request-id"),
-                                    )
-                                    observed = True
-                                    if response.get("status") == "failed":
-                                        # OpenAI can fail a response inside a 200 stream; name
-                                        # the cause by code only, never the provider's text.
-                                        await self.note_rejection(
-                                            run_id,
-                                            grant,
-                                            **failed_response_cause(response),
-                                            operation=operation,
-                                        )
-                            if evidence is not None:
-                                original_index = message.get("output_index")
-                                if type(original_index) is int:
-                                    message["output_index"] = original_index + inserted
-                                for adapted in evidence.events(message):
-                                    if (
-                                        adapted is not message
-                                        and adapted.get("type") == "response.output_item.done"
-                                        and "output_index" not in adapted
-                                    ):
-                                        inserted += 1
-                                        adapted["output_index"] = (original_index or 0) + inserted
-                                    adapted["sequence_number"] = sequence
-                                    sequence += 1
-                                    yield b"data: " + json.dumps(adapted).encode() + b"\n\n"
-                                continue
-                        # Persist final usage BEFORE returning the completed event to Codex.
-                        yield event + b"\n\n"
-                if buffer.strip() or not observed:
-                    raise RuntimeError("Codex API stream ended without a terminal response")
-            except (httpx.HTTPError, ValueError, RuntimeError, RecursionError):
+                async with asyncio.timeout(STREAM_SECONDS):
+                    await read_events()
+                ended = True
+            except (TimeoutError, httpx.HTTPError, ValueError, RuntimeError, RecursionError):
                 # Never expose provider exception text, partial private body, or credentials.
                 await self.note_rejection(
                     run_id, grant, status=502, reason="stream_unconfirmed", operation=operation
                 )
-                yield (
-                    b'data: {"type":"error",'
-                    b'"message":"Codex API stream outcome is unconfirmed"}\n\n'
-                )
+            except Exception:  # noqa: BLE001 — e.g. settling failed; the receipt stays unconfirmed
+                logger.warning("Codex API stream was not settled run=%s", run_id)
             finally:
+                # The response always learns how the stream ended, even if this task is
+                # cancelled or settling raised, so it never waits on the queue forever.
+                events.put_nowait(None if ended else failed)
                 await upstream.aclose()
 
+        async def read_events():
+            buffer = b""
+            observed = False
+            async for chunk in upstream.aiter_bytes():
+                buffer += chunk
+                if len(buffer) > MAX_EVENT_BYTES:
+                    raise RuntimeError("Codex API event exceeds its bound")
+                while boundary := re.search(rb"\r?\n\r?\n", buffer):
+                    event, buffer = buffer[: boundary.start()], buffer[boundary.end() :]
+                    data = b"\n".join(
+                        line[5:].lstrip()
+                        for line in event.splitlines()
+                        if line.startswith(b"data:")
+                    )
+                    message = None
+                    if data and data != b"[DONE]":
+                        message = json.loads(data)
+                        if not isinstance(message, dict):
+                            raise ValueError("Invalid Codex stream event")
+                        if message.get("type") in TERMINAL_EVENTS:
+                            response = message.get("response")
+                            if isinstance(response, dict) and not observed:
+                                await self.observe(
+                                    key,
+                                    record,
+                                    response,
+                                    request_id=upstream.headers.get("x-request-id"),
+                                )
+                                observed = True
+                                if response.get("status") == "failed":
+                                    # OpenAI can fail a response inside a 200 stream; name
+                                    # the cause by code only, never the provider's text.
+                                    await self.note_rejection(
+                                        run_id,
+                                        grant,
+                                        **failed_response_cause(response),
+                                        operation=operation,
+                                    )
+                    # Final usage is persisted BEFORE the completed event reaches Codex.
+                    forward((event, message), len(event))
+            if buffer.strip() or not observed:
+                raise RuntimeError("Codex API stream ended without a terminal response")
+
+        reader = asyncio.create_task(read())
+        self._readers.add(reader)
+        reader.add_done_callback(self._readers.discard)
+
+        async def stream():
+            try:
+                async for chunk in forward_events():
+                    yield chunk
+            finally:
+                forwarding["open"] = False  # The client left or the stream ended.
+
+        async def forward_events():
+            evidence = WebEvidence() if contract in MULTI_TOOL_CONTRACTS else None
+            inserted = 0
+            sequence = 0
+            while (item := await events.get()) is not None:
+                if item is failed:
+                    yield (
+                        b'data: {"type":"error",'
+                        b'"message":"Codex API stream outcome is unconfirmed"}\n\n'
+                    )
+                    return
+                event, message = item
+                if evidence is not None and message is not None:
+                    original_index = message.get("output_index")
+                    if type(original_index) is int:
+                        message["output_index"] = original_index + inserted
+                    for adapted in evidence.events(message):
+                        if (
+                            adapted is not message
+                            and adapted.get("type") == "response.output_item.done"
+                            and "output_index" not in adapted
+                        ):
+                            inserted += 1
+                            adapted["output_index"] = (original_index or 0) + inserted
+                        adapted["sequence_number"] = sequence
+                        sequence += 1
+                        yield b"data: " + json.dumps(adapted).encode() + b"\n\n"
+                    continue
+                yield event + b"\n\n"
+
         return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-store"},
-            background=BackgroundTask(upstream.aclose),
+            stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
         )
 
 
@@ -697,6 +815,8 @@ async def relay_codex_api(run_id: UUID, operation: str, request: Request):
     except HTTPException as exc:
         reason = getattr(exc, "reason", None)
         _log_rejection(run_id, operation, exc.status_code, exc.detail, reason)
+        if reason in PARALLEL_REJECTIONS:
+            raise  # A subagent's request waits on the others; not the run's cause.
         await relay.note_rejection(
             run_id,
             grant,

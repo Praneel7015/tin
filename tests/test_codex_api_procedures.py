@@ -1,5 +1,6 @@
 """The ordinary-procedure extension must not upgrade historical pilot contracts."""
 
+import asyncio
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -765,6 +766,299 @@ async def test_unbilled_remote_compaction_is_unknown_not_free_or_guessed(publica
             )
         ).status_code == 409
         assert len(sent) == 1
+    finally:
+        await client.aclose()
+        await relay.close()
+
+
+def test_the_content_planner_pins_the_parallel_contract_and_nothing_else_does():
+    from tin_lite.catalog import BUILTIN_WORKFLOWS
+    from tin_lite.codex_api import (
+        MULTI_TOOL_CONTRACTS,
+        PARALLEL_PROCEDURE_CONTRACT,
+        parallel_requests,
+        procedure_contract,
+    )
+    from tin_lite.codex_api_pricing import request_maximum
+
+    research = next(w for w in BUILTIN_WORKFLOWS if w.key == "content.plan_research")
+    terms = api_terms(research.definition, child=True)
+    assert terms["codex_contract"] == PARALLEL_PROCEDURE_CONTRACT
+    # Same per-request reservation; five may be held at once inside the $12 ceiling.
+    assert terms["request_maximum_nanos"] == request_maximum(PROCEDURE_CONTRACT_V5)
+    assert terms["maximum_nanos"] == 12_000_000_000
+    assert 5 * terms["request_maximum_nanos"] < terms["maximum_nanos"]
+    assert PARALLEL_PROCEDURE_CONTRACT in MULTI_TOOL_CONTRACTS
+    assert procedure_contract(None) == PROCEDURE_CONTRACT_V5
+    assert procedure_contract("content-refresh.v1") == PROCEDURE_CONTRACT_V5
+    assert [parallel_requests(c) for c in (PROCEDURE_CONTRACT_V5, PARALLEL_PROCEDURE_CONTRACT)] == [
+        1,
+        5,
+    ]
+    assert parallel_requests({"parallel_requests": 99}) == parallel_requests(None) == 1
+
+
+async def in_flight(db, run, count, *, first=0):
+    """Requests the relay admitted and has not settled yet."""
+    async with db.pool.acquire() as conn:
+        for index in range(first, first + count):
+            key = f"{run.id}:codex-api:in-flight-{index}"
+            await db.start_effect(conn, execution_key=key, operation=USAGE)
+            await db.save_effect_progress(conn, execution_key=key, result={"run_id": str(run.id)})
+
+
+async def test_a_parallel_contract_admits_requests_beside_those_in_flight(
+    publication_db, monkeypatch
+):
+    from tin_lite import codex_api_relay
+    from tin_lite.codex_api import PARALLEL_PROCEDURE_CONTRACT
+
+    monkeypatch.setattr(codex_api_relay, "PARALLEL_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(codex_api_relay, "PARALLEL_WAIT_STEP_SECONDS", 0.1)
+    run, relay, client, sent = await setup_relay(publication_db)
+    try:
+        await upgrade_attempt(publication_db, run, PARALLEL_PROCEDURE_CONTRACT)
+        await in_flight(publication_db, run, 3)
+        assert (await post(client, run)).status_code == 200
+        assert (await post(client, run, {**BODY, "instructions": "second"})).status_code == 200
+        # Both settled; with five unsettled the contract is full: a sixth waits, then is
+        # refused when no slot frees within the wait.
+        await in_flight(publication_db, run, 2, first=3)
+        response = await post(client, run, {**BODY, "instructions": "too many"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Too many API requests are active at once"
+        assert len(sent) == 2
+        # Waiting on the others is not the run's failure cause.
+        attempt = await publication_db.get_effect(attempt_key(run.id))
+        assert "relay_rejection" not in attempt.result
+    finally:
+        await client.aclose()
+        await relay.close()
+
+
+async def test_a_waiting_parallel_request_goes_once_a_slot_frees(publication_db, monkeypatch):
+    import asyncio
+
+    from tin_lite import codex_api_relay
+    from tin_lite.codex_api import PARALLEL_PROCEDURE_CONTRACT
+
+    monkeypatch.setattr(codex_api_relay, "PARALLEL_WAIT_STEP_SECONDS", 0.05)
+    run, relay, client, sent = await setup_relay(publication_db)
+    try:
+        await upgrade_attempt(publication_db, run, PARALLEL_PROCEDURE_CONTRACT)
+        await in_flight(publication_db, run, 5)
+        waiting = asyncio.create_task(post(client, run))
+        await asyncio.sleep(0.3)
+        assert not waiting.done() and not sent
+        async with publication_db.pool.acquire() as conn:
+            await publication_db.complete_effect(
+                conn,
+                execution_key=f"{run.id}:codex-api:in-flight-0",
+                result={"run_id": str(run.id), "usage": {"total_tokens": 10}},
+            )
+        assert (await asyncio.wait_for(waiting, 5)).status_code == 200
+        assert len(sent) == 1
+    finally:
+        await client.aclose()
+        await relay.close()
+
+
+async def test_an_ordinary_contract_still_waits_for_the_request_in_flight(publication_db):
+    run, relay, client, sent = await setup_relay(publication_db)
+    try:
+        await upgrade_attempt(publication_db, run, PROCEDURE_CONTRACT_V5)
+        await in_flight(publication_db, run, 1)
+        response = await post(client, run)
+        assert response.status_code == 409
+        assert response.json()["detail"] == "A prior API request is active or unconfirmed"
+        assert not sent
+    finally:
+        await client.aclose()
+        await relay.close()
+
+
+def test_a_reservation_refused_for_room_others_hold_does_not_stop_the_run():
+    from tin_lite.billing_contracts import BillingError
+    from tin_lite.codex_api_relay import RelayRejected, reservation_refusal
+
+    def stopped(exc):
+        return RuntimeError(f"stopped:{exc.code}")
+
+    limit = BillingError("run_limit", "This step has reached its quoted spending maximum.", 402)
+    held = reservation_refusal(limit, 2, stopped)
+    assert isinstance(held, RelayRejected) and held.status_code == 409
+    assert held.reason == "parallel_reservation"
+    # Nothing in flight: the ceiling is real and stops the run, as before.
+    assert str(reservation_refusal(limit, 0, stopped)) == "stopped:run_limit"
+    # A refusal in-flight requests cannot cause still stops it.
+    halted = BillingError("spending_stopped", "No additional paid work is authorized.")
+    assert str(reservation_refusal(halted, 3, stopped)) == "stopped:spending_stopped"
+
+
+def test_the_controller_enables_subagents_only_under_a_parallel_contract():
+    from tin_lite.codex_api import PARALLEL_PROCEDURE_CONTRACT
+
+    module = load_sandbox_module("procedure_app_server")
+    api = {"TIN_CODEX_API_URL": "https://tin.test/internal/codex-api/r/v1"}
+    assert module._subagent_policy(
+        {**api, "TIN_CODEX_API_CONTRACT": json.dumps(PARALLEL_PROCEDURE_CONTRACT)}
+    ) == (
+        "features.multi_agent=true",
+        "agents.max_concurrent_threads_per_session=4",
+        "agents.max_depth=1",
+    )
+    off = ("features.multi_agent=false", "agents.enabled=false")
+    assert (
+        module._subagent_policy(
+            {**api, "TIN_CODEX_API_CONTRACT": json.dumps(PROCEDURE_CONTRACT_V5)}
+        )
+        == off
+    )
+    assert module._subagent_policy({**api, "TIN_CODEX_API_CONTRACT": "not json"}) == off
+    # No API controller (a legacy route), no subagents, whatever the contract says.
+    assert (
+        module._subagent_policy({"TIN_CODEX_API_CONTRACT": json.dumps(PARALLEL_PROCEDURE_CONTRACT)})
+        == off
+    )
+    # Only the lead thread's messages and turn end count; subagents run on their own threads.
+    assert module._own_thread({"threadId": "lead"}, "lead")
+    assert not module._own_thread({"threadId": "sub"}, "lead")
+    assert module._own_thread({}, "lead")
+
+
+async def test_requests_in_flight_cannot_carry_a_run_past_its_token_stop(publication_db):
+    from tin_lite.codex_api import PARALLEL_PROCEDURE_CONTRACT
+
+    run, relay, client, sent = await setup_relay(publication_db)
+    try:
+        await upgrade_attempt(publication_db, run, PARALLEL_PROCEDURE_CONTRACT)
+        # Settled usage close to the stop: one full request in flight could pass it.
+        async with publication_db.pool.acquire() as conn:
+            key = f"{run.id}:codex-api:settled"
+            await publication_db.start_effect(conn, execution_key=key, operation=USAGE)
+            await publication_db.complete_effect(
+                conn,
+                execution_key=key,
+                result={"run_id": str(run.id), "usage": {"total_tokens": 7_700_000}},
+            )
+        await in_flight(publication_db, run, 1)
+        response = await post(client, run)
+        assert response.status_code == 409 and not sent
+        attempt = await publication_db.get_effect(attempt_key(run.id))
+        assert "relay_rejection" not in attempt.result and "stop_reason" not in attempt.result
+    finally:
+        await client.aclose()
+        await relay.close()
+
+
+def test_subagent_tokens_count_toward_the_controllers_stop():
+    module = load_sandbox_module("codex_usage")
+    usage = module.CodexUsage(thread_id="lead", turn_id="turn", limit=1_000)
+
+    def update(thread, total, turn="turn"):
+        return {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": thread,
+                "turnId": turn,
+                "tokenUsage": {
+                    "total": {
+                        "totalTokens": total,
+                        "inputTokens": total - 10,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 10,
+                        "reasoningOutputTokens": 0,
+                    }
+                },
+            },
+        }
+
+    assert usage.observe(update("lead", 400)) and not usage.limit_reached
+    assert not usage.observe_subagent(update("lead", 500))  # The lead counts once.
+    assert usage.observe_subagent(update("sub-1", 300)) and not usage.limit_reached
+    assert not usage.observe_subagent(update("sub-1", 200))  # Totals only grow.
+    assert usage.observe_subagent(update("sub-2", 350, turn="other")) and usage.limit_reached
+    assert usage.record()["subagent_tokens"] == 650
+
+
+async def test_a_stream_its_client_left_is_read_on_and_settled(publication_db):
+    """Codex drops a lead's in-flight stream when a subagent reports back, while the relay
+    waits on the provider. The reader settles the request with its verified usage."""
+    from starlette.datastructures import Headers
+    from test_codex_api import HEADERS
+
+    from tin_lite.codex_api import PARALLEL_PROCEDURE_CONTRACT
+
+    created = (
+        b"data: "
+        + json.dumps({"type": "response.created", "response": {"id": "resp_test"}}).encode()
+        + b"\n\n"
+    )
+    gate = asyncio.Event()
+
+    async def body():
+        yield created
+        await gate.wait()  # The provider is still generating when the client leaves.
+        yield result_event()
+
+    async def upstream(request):
+        return httpx.Response(200, content=body())
+
+    run, relay, client, sent = await setup_relay(publication_db, upstream)
+    try:
+        await upgrade_attempt(publication_db, run, PARALLEL_PROCEDURE_CONTRACT)
+        response = await relay.relay(
+            run.id,
+            "synthetic-run-bound-grant-only-for-tests",
+            json.dumps(BODY).encode(),
+            "responses",
+            Headers(HEADERS),
+        )
+        forwarding = response.body_iterator
+        assert (await forwarding.__anext__()).startswith(b"data: ")
+        waiting = asyncio.ensure_future(forwarding.__anext__())
+        await asyncio.sleep(0.05)
+        waiting.cancel()  # Starlette cancels the response when the client goes away.
+        await asyncio.gather(waiting, return_exceptions=True)
+        gate.set()
+        await asyncio.gather(*relay._readers)
+        [row] = await publication_db.pool.fetch(
+            "SELECT status, result FROM effect_receipts WHERE operation=$1", USAGE
+        )
+        assert row["status"] == "completed"
+        assert json.loads(row["result"])["usage"]["total_tokens"] == 110
+    finally:
+        await client.aclose()
+        await relay.close()
+
+
+async def test_a_stream_whose_settlement_fails_ends_instead_of_hanging(publication_db):
+    from starlette.datastructures import Headers
+    from test_codex_api import HEADERS
+
+    from tin_lite.codex_api import PARALLEL_PROCEDURE_CONTRACT
+
+    run, relay, client, sent = await setup_relay(publication_db)
+
+    async def broken(*args, **kwargs):
+        raise KeyError("settlement failed")
+
+    relay.observe = broken
+    try:
+        await upgrade_attempt(publication_db, run, PARALLEL_PROCEDURE_CONTRACT)
+        response = await relay.relay(
+            run.id,
+            "synthetic-run-bound-grant-only-for-tests",
+            json.dumps(BODY).encode(),
+            "responses",
+            Headers(HEADERS),
+        )
+
+        async def collect():
+            return [chunk async for chunk in response.body_iterator]
+
+        chunks = await asyncio.wait_for(collect(), 5)
+        assert chunks[-1].startswith(b'data: {"type":"error"')
     finally:
         await client.aclose()
         await relay.close()

@@ -567,7 +567,7 @@ class BuiltinWorkflow:
         if self.key == content_plan_agent.RESEARCH_KEY:
             # Only content.plan starts it, as its planning step.
             definition["public_discovery"] = False
-            definition["portfolio_schema"] = content_plan_agent.PORTFOLIO_JSON_SCHEMA
+            definition["portfolio_schema"] = content_plan_agent.PORTFOLIO_JSON_SCHEMA_V2
         if self.key == content_plan.KEY:
             definition["content_policy"] = dict(content_plan_editorial.POLICY)
             definition["content_instructions"] = content_plan_editorial.INSTRUCTIONS
@@ -1681,7 +1681,7 @@ BUILTIN_WORKFLOWS = (
             "Decisions before anything is drafted. Does not write or publish anything."
         ),
         executor=content_plan.KEY,
-        version_label="1.2.0",
+        version_label="1.3.0",
         review_policy=CONTENT_PLAN_REVIEW_POLICY,
         presentation=WorkflowDiagram(
             direction="TD",
@@ -1710,8 +1710,8 @@ BUILTIN_WORKFLOWS = (
                 DiagramNode(
                     "model",
                     "step",
-                    "Plan the portfolio",
-                    "a planning agent reads the files and searches",
+                    "Research competitors and plan",
+                    "a planning agent checks rivals, then plans",
                 ),
                 DiagramNode(
                     "allocate",
@@ -1723,7 +1723,7 @@ BUILTIN_WORKFLOWS = (
                     "files",
                     "store",
                     "Plan in project Files",
-                    "one commit: PLAN.md, plan.json, evidence",
+                    "PLAN.md, plan.json, evidence, competitors",
                 ),
                 DiagramNode(
                     "approve",
@@ -1774,16 +1774,18 @@ BUILTIN_WORKFLOWS = (
         key=content_plan_agent.RESEARCH_KEY,
         title="Research the content plan",
         description="The planning agent inside Plan upcoming content: reads the brief Tin "
-        "prepared, the audit, keyword research, competitors, Code map and brand files, "
-        "searches where a choice depends on what ranks, and proposes a prioritized portfolio "
-        "of pages for every week. Started by Plan upcoming content, never on its own.",
+        "prepared, the audit, keyword research, Code map and brand files, settles the "
+        "competitive set by searching four channels in parallel and checking every candidate "
+        "on its own site, searches where a choice depends on what ranks, and proposes a "
+        "prioritized portfolio of pages for every week. Started by Plan upcoming content, "
+        "never on its own.",
         executor=CODEX_PROCEDURE_EXECUTOR,
-        version_label="1.2.0",
+        version_label="1.3.0",
         presentation=WorkflowDiagram(
             direction="TD",
             nodes=(
                 DiagramNode(
-                    "brief", "store", "Tin's planning brief", "program, competitors, pages read"
+                    "brief", "store", "Tin's planning brief", "program, competitor leads, pages"
                 ),
                 DiagramNode(
                     "read",
@@ -1791,7 +1793,19 @@ BUILTIN_WORKFLOWS = (
                     "Read the project",
                     "audit, keywords, Code map, brand, Page decisions",
                 ),
-                DiagramNode("web", "surface", "Search results", "what ranks, what rivals publish"),
+                DiagramNode(
+                    "channels",
+                    "surface",
+                    "Four competitor searches",
+                    "roundups, job and stack, launches, compare pages",
+                ),
+                DiagramNode(
+                    "check",
+                    "step",
+                    "Check each competitor",
+                    "its own site: direct, adjacent, diy or drift",
+                ),
+                DiagramNode("web", "surface", "Search results", "what ranks for each page"),
                 DiagramNode(
                     "choose",
                     "step",
@@ -1810,7 +1824,9 @@ BUILTIN_WORKFLOWS = (
             ),
             edges=(
                 DiagramEdge("brief", "read"),
-                DiagramEdge("read", "web"),
+                DiagramEdge("read", "channels", "call", "subagents in parallel"),
+                DiagramEdge("channels", "check"),
+                DiagramEdge("check", "web"),
                 DiagramEdge("web", "choose"),
                 DiagramEdge("read", "choose"),
                 DiagramEdge("choose", "portfolio"),

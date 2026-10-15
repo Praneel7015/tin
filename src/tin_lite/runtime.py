@@ -47,6 +47,7 @@ from tin_lite.keyword_plan_activities import KeywordPlanActivities
 from tin_lite.linkedin_engagers_activities import LinkedInEngagersActivities
 from tin_lite.linkedin_listening_activities import LinkedInListeningActivities
 from tin_lite.linkedin_publish_activities import LinkedInPublishActivities
+from tin_lite.linkedin_requests_activities import LinkedInRequestsActivities
 from tin_lite.luna import LunaService, OpenAIResponsesClient, TinWorkflowApiClient
 from tin_lite.memory import MemoryGardener
 from tin_lite.model_providers import (
@@ -359,6 +360,13 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         cipher=integrations._cipher,
         router=model_router if settings.luna_api_key is not None else None,
     )
+    requests_activities = LinkedInRequestsActivities(
+        database=database,
+        storage=storage,
+        settings=settings,
+        cloud=LinkedInCloud(database, settings),
+        cipher=integrations._cipher,
+    )
     code = CodeActivities(common=activity_instance, model_router=model_router)
     activities = [
         collection.prepare,
@@ -410,6 +418,12 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         engagers_activities.score,
         engagers_activities.publish,
         engagers_activities.failure,
+        requests_activities.prepare,
+        requests_activities.next,
+        requests_activities.send,
+        requests_activities.check,
+        requests_activities.finish,
+        requests_activities.failure,
         plan_activities.prepare,
         plan_activities.write,
         plan_activities.publish,

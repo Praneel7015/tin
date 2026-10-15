@@ -17,6 +17,8 @@ window.TinPeople = (() => {
     { key: "all", label: "All people" },
     { key: "fit", label: "ICP fit" },
     { key: "new", label: "Not connected yet" },
+    // Shown once someone has been sent a connection request (#450).
+    { key: "invited", label: "Invited" },
   ];
   const SORTS = {
     name: (a, b) => a.name.localeCompare(b.name),
@@ -62,6 +64,12 @@ window.TinPeople = (() => {
     if (value === NOT_A_FIT) return { text: "None", short: "None", muted: true };
     const numbered = value.match(/^(ICP\s*\d+)\s*[:–—-]/i);
     return { text: value, short: numbered ? numbered[1] : value, muted: false };
+  }
+
+  // A request Tin sent and not yet answered reads with its day: "Invited oct 16".
+  function relationshipLabel(person, relationship) {
+    if (relationship === "pending" && person.invited_at) return `Invited ${day(person.invited_at)}`;
+    return RELATIONSHIP[relationship] || "—";
   }
 
   // A value a member set, rather than a run: no run replaces it.
@@ -135,6 +143,7 @@ window.TinPeople = (() => {
     const people = view.people || [];
     if (key === "fit") return people.filter((person) => fitOf(person) >= view.fitShown);
     if (key === "new") return people.filter((person) => field(person, "linkedin_relationship")?.value === "none");
+    if (key === "invited") return people.filter((person) => field(person, "linkedin_relationship")?.value === "pending");
     return people;
   }
 
@@ -217,7 +226,7 @@ window.TinPeople = (() => {
     const visible = people.slice(start, start + PAGE);
     body.innerHTML = `
       <div class="workflow-sections system-sections people-sections" role="tablist" aria-label="People segments">
-        ${SEGMENTS.map((segment) => `<button class="workflow-section ${view.segment === segment.key ? "is-active" : ""}" type="button" role="tab" aria-selected="${view.segment === segment.key}" data-people-segment="${segment.key}">${segment.label} <span>${segmentPeople(segment.key).length}</span></button>`).join("")}
+        ${SEGMENTS.filter((segment) => segment.key !== "invited" || view.segment === "invited" || segmentPeople("invited").length).map((segment) => `<button class="workflow-section ${view.segment === segment.key ? "is-active" : ""}" type="button" role="tab" aria-selected="${view.segment === segment.key}" data-people-segment="${segment.key}">${segment.label} <span>${segmentPeople(segment.key).length}</span></button>`).join("")}
       </div>
       <div class="people-grid">
         <table class="tin-table people-table">
@@ -270,7 +279,7 @@ window.TinPeople = (() => {
       <td class="is-icp ${icpLabel.muted ? "is-muted" : ""}" title="${escape(icpLabel.muted ? "" : icpLabel.text)}"><span class="is-short">${escape(icpLabel.short)}</span><span class="is-full">${escape(icpLabel.text)}</span></td>
       <td class="is-fit ${fitClass}" ${fit ? `data-fit="${escape(person.id)}"` : ""}>${mark ? `<small>${mark}</small>` : ""}<span>${fitValue === null ? "—" : fitValue.toFixed(2)}</span></td>
       <td class="is-notes" ${note ? `data-note="${escape(person.id)}"` : ""}><span>${note ? escape(note.body.split("\n")[0]) : ""}</span></td>
-      <td class="is-linkedin"><span>${escape(RELATIONSHIP[relationship] || "—")}</span></td>
+      <td class="is-linkedin"><span>${escape(relationshipLabel(person, relationship))}</span></td>
       <td class="is-touch"><span>${touch ? `${escape(day(touch.at))} · ${escape(touch.kind)}` : "—"}</span></td>
     </tr>`;
   }
@@ -455,7 +464,7 @@ window.TinPeople = (() => {
       rows.push(fieldRow("ICP fit", value, lineage(fit), lines.length ? `<div class="person-field-notes">${lines.join("")}</div>` : ""));
     }
     if (relationship) {
-      rows.push(fieldRow("LinkedIn", `<strong>${escape(RELATIONSHIP[relationship.value] || "—")}</strong>`, lineage(relationship)));
+      rows.push(fieldRow("LinkedIn", `<strong>${escape(relationshipLabel(person, relationship.value))}</strong>`, lineage(relationship)));
     }
     const isCustomer = customer?.value === "yes";
     rows.push(fieldRow(
@@ -516,9 +525,9 @@ window.TinPeople = (() => {
       return `Reacted to ${whose}${reaction ? ` with ${reaction}` : ""}`;
     }
     if (event.kind === "commented") return `Commented on ${whose}`;
-    if (event.kind === "invited") return "Invited to connect";
-    if (event.kind === "accepted") return "Accepted the invitation";
-    if (event.kind === "withdrawn") return "Invitation withdrawn";
+    if (event.kind === "invited") return "Connection request sent";
+    if (event.kind === "accepted") return "Accepted your connection request";
+    if (event.kind === "withdrawn") return "Connection request withdrawn";
     return event.kind;
   }
 

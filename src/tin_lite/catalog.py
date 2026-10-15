@@ -20,6 +20,7 @@ from tin_lite import (
     linkedin_engagers,
     linkedin_listening,
     linkedin_posts,
+    linkedin_requests,
     organic_system,
     paid_ads,
     paid_ads_launch,
@@ -518,8 +519,8 @@ class BuiltinWorkflow:
             definition["proposal_revision"] = AGENT_REVISION
         if self.key == x_draft.KEY:
             definition["x_draft_policy"] = dict(x_draft.POLICY)
-        if self.key == linkedin_listening.LISTEN_KEY:
-            # Tin starts it when it publishes a post; nobody else can.
+        if self.key in {linkedin_listening.LISTEN_KEY, linkedin_requests.KEY}:
+            # Tin starts these: when it publishes a post, or when requests are approved.
             definition["public_discovery"] = False
         if self.key == x_feedback.KEY:
             definition["public_discovery"] = False
@@ -1596,6 +1597,66 @@ BUILTIN_WORKFLOWS = (
         system=LINKEDIN_SYSTEM,
         input_schema=linkedin_engagers.INPUT_SCHEMA,
         model_route=linkedin_engagers.ROUTE,
+        integration_requirements=(
+            IntegrationRequirement(
+                provider_key=connection_collection.PROVIDER,
+                capabilities=(connection_collection.CAPABILITY,),
+            ),
+        ),
+    ),
+    BuiltinWorkflow(
+        id=linkedin_requests.WORKFLOW_ID,
+        key=linkedin_requests.KEY,
+        title="Send the connection requests you approve",
+        description=(
+            "Send the LinkedIn connection requests you approved in Decisions, one at a time "
+            "from your saved session: weekdays in your hours, at least 15 minutes apart, under "
+            "a daily and weekly cap, each only after a fresh check that you aren't connected "
+            "or already invited. Then read who accepted for three weeks. Tin starts it when "
+            "you approve."
+        ),
+        executor=linkedin_requests.KEY,
+        version_label="1.0.0",
+        presentation=WorkflowDiagram(
+            direction="TD",
+            nodes=(
+                DiagramNode(
+                    "approval", "gate", "Your approval in Decisions", "only the people you ticked"
+                ),
+                DiagramNode(
+                    "wait",
+                    "wait",
+                    "Wait for the next turn",
+                    "weekdays, in your hours, 15+ min apart",
+                ),
+                DiagramNode(
+                    "check",
+                    "step",
+                    "Check before sending",
+                    "skip anyone connected or already invited",
+                ),
+                DiagramNode("send", "surface", "Send one request", "from your session, no note"),
+                DiagramNode("people", "store", "People records", "invited, then accepted"),
+                DiagramNode(
+                    "files",
+                    "receipt",
+                    "What happened, in Files",
+                    "people/connection-requests.md",
+                ),
+            ),
+            edges=(
+                DiagramEdge("approval", "wait", "signal", "approved"),
+                DiagramEdge("wait", "check"),
+                DiagramEdge("check", "send"),
+                DiagramEdge("send", "people"),
+                DiagramEdge("people", "wait", label="next request"),
+                DiagramEdge("people", "files"),
+            ),
+        ),
+        schedule_modes=("on_demand",),
+        system=LINKEDIN_SYSTEM,
+        agent_only=True,
+        input_schema=linkedin_requests.INPUT_SCHEMA,
         integration_requirements=(
             IntegrationRequirement(
                 provider_key=connection_collection.PROVIDER,

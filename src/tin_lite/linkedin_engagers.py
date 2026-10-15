@@ -460,4 +460,11 @@ def sentence(notes: dict) -> str:
         text += f"; {notes['unread']} post{'s' if notes['unread'] != 1 else ''} couldn't be read"
     if notes.get("capped"):
         text += "; very large posts were read to their first 1,000 reactions"
-    return text + "."
+    text += "."
+    if notes.get("proposed"):
+        count = notes["proposed"]
+        text += (
+            f" {count} {'people' if count != 1 else 'person'} who fit and aren't connected "
+            "wait in Decisions for your connection requests."
+        )
+    return text

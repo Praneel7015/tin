@@ -32,6 +32,10 @@ PAYMENT_RECOVERY_DECISION_DAYS = 6
 LINKEDIN_LISTEN_WORKFLOW_NAME = "social.linkedin_listen"
 LINKEDIN_RESULTS_WORKFLOW_NAME = "social.linkedin_results"
 LINKEDIN_ENGAGERS_WORKFLOW_NAME = "social.linkedin_engagers"
+LINKEDIN_REQUESTS_WORKFLOW_NAME = "social.linkedin_requests"
+# A sending run's steps (send, wait, read who accepted): a runaway guard far above a batch
+# sent over days and read for three weeks.
+LINKEDIN_REQUESTS_STEPS = 1500
 # When Tin reads a post it published, in hours after posting; see linkedin_listening.py.
 LINKEDIN_LISTEN_CHECKPOINTS = (("1h", 1), ("4h", 4), ("24h", 24), ("72h", 72))
 # A reading LinkedIn doesn't answer after this many attempts is skipped, not failed.

@@ -210,6 +210,13 @@ An engagement read runs within five minutes. It starts with the `/me` account ch
 a random 3 to 9 seconds before each page. Both reads are GET-only JSON on
 `www.linkedin.com`, and LinkedIn's refusals map to the same reasons as collection.
 
+The same image sends approved connection requests (#450), in `linkedin_invitations.py`:
+- `linkedin_invite`: one request to one person, after `/me` and a fresh top-card read show
+  neither a connection nor an invitation; the one POST, to a fixed path, without a note;
+- `linkedin_relationships`: up to 20 people's relationship (connected, invited or neither), for
+  who accepted.
+See [Connection requests](linkedin-requests.md).
+
 Comments aren't read from the server: the comment endpoints answer 400 to plain GETs, and the
 post page renders only the first comment. Reading them needs LinkedIn's current query ID from
 the member's browser, as search once did.

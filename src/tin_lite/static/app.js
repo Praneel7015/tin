@@ -240,6 +240,8 @@ const state = {
   // Proposed website changes and open judgment calls wait in Decisions beside run reviews.
   websiteChanges: [],
   judgmentCalls: [],
+  // The member's connection requests: sending on the LinkedIn card, the batch in Decisions.
+  linkedInRequests: null,
   view: viewFromLocation(),
   documentRoute: documentRouteFromLocation(),
   taskRoute: taskRouteFromLocation(),
@@ -5142,13 +5144,14 @@ function decisionItems() {
   const calls = state.judgmentCalls.map((call) => ({
     id: `question:${call.id}`, kind: "judgment_call", title: call.question, created_at: call.recorded_at, call,
   }));
-  return [...state.decisions, ...changes, ...calls];
+  return [...window.TinRequests.items(state.linkedInRequests), ...state.decisions, ...changes, ...calls];
 }
 
 // The list shows each kind under its own heading, in decisionItems' order: what to approve
 // first, then what changes the site, then what the coding agent will answer.
 const DECISION_GROUPS = [
-  { title: "Reviews", has: (item) => item.kind !== "website_change" && item.kind !== "judgment_call" },
+  { title: "Connection requests", has: (item) => item.kind === "connection_requests" },
+  { title: "Reviews", has: (item) => !["website_change", "judgment_call", "connection_requests"].includes(item.kind) },
   { title: "Website changes", has: (item) => item.kind === "website_change" },
   { title: "Questions", has: (item) => item.kind === "judgment_call" },
 ];
@@ -5159,15 +5162,43 @@ function decisionGroups(items) {
     .filter((group) => group.items.length);
 }
 
+// What waits in Decisions besides run reviews: website changes, judgment calls, and the
+// member's connection requests (which also carry their sending, for the LinkedIn card).
 async function fetchWebsiteChanges(projectId) {
   const id = encodeURIComponent(projectId);
-  const [changes, questions] = await Promise.all([
+  const [changes, questions, requests] = await Promise.all([
     api(`/api/projects/${id}/website-changes?status=pending`).catch(() => []),
     api(`/api/projects/${id}/website-changes/questions`).catch(() => ({ questions: [] })),
+    api(`/api/projects/${id}/linkedin-requests`).catch(() => null),
   ]);
   return {
     changes: Array.isArray(changes) ? changes : [],
     questions: Array.isArray(questions?.questions) ? questions.questions : [],
+    requests: requests && !Array.isArray(requests) && typeof requests === "object" ? requests : null,
+  };
+}
+
+function requestsContext() {
+  return {
+    api,
+    projectId: state.project.id,
+    toast: showToast,
+    render: () => render(),
+    navigate,
+    data: () => state.linkedInRequests,
+    update: (data) => { state.linkedInRequests = data; },
+    refresh: async () => {
+      const context = currentProjectContext();
+      const fresh = await fetchWebsiteChanges(context.projectId);
+      if (!isCurrentProjectContext(context)) return;
+      state.linkedInRequests = fresh.requests;
+      state.decisionId = null;
+      render();
+    },
+    openLinkedInCard: () => {
+      state.expandedIntegration = "linkedin";
+      navigate("integrations");
+    },
   };
 }
 
@@ -5489,8 +5520,10 @@ function renderDecisions() {
   const decision = selectedDecision();
   if (decision && state.decisionId !== decision.id) state.decisionId = decision.id;
   const items = decisionItems();
-  const detail = decision?.kind === "website_change" ? websiteChangeDetailHtml(decision)
-    : decision?.kind === "judgment_call" ? judgmentCallDetailHtml(decision) : decisionDetailHtml(decision);
+  const detail = decision?.kind === "connection_requests"
+    ? window.TinRequests.detail(decision, state.linkedInRequests, { waiting: `Waiting ${waitingLabel(decision.created_at)}` })
+    : decision?.kind === "website_change" ? websiteChangeDetailHtml(decision)
+      : decision?.kind === "judgment_call" ? judgmentCallDetailHtml(decision) : decisionDetailHtml(decision);
   main.innerHTML = `<section class="product-view decisions-view">
     <header class="decisions-header"><h1>Decisions</h1>${decisionsPace() ? `<code>${escapeHtml(decisionsPace())}</code>` : ""}</header>
     ${items.length ? `<div class="decisions-layout">
@@ -5512,6 +5545,7 @@ function renderDecisions() {
     });
   });
   main.querySelector("[data-open-system]")?.addEventListener("click", () => navigate("workflows"));
+  if (decision?.kind === "connection_requests") window.TinRequests.bindDecision(main, decision, requestsContext());
   main.querySelectorAll("[data-decision-read]").forEach((button) => {
     button.addEventListener("click", () => openDecisionReview(decision));
   });
@@ -6800,6 +6834,7 @@ function renderConnectRequest(requested) {
 }
 
 function bindIntegrationCardControls() {
+  if (state.project) window.TinRequests.bindSending(document, requestsContext());
   document.querySelectorAll("[data-integration-expand]").forEach((button) => {
     button.addEventListener("click", () => toggleIntegration(button.dataset.integrationExpand));
   });
@@ -7075,7 +7110,8 @@ function linkedInCard(integrations) {
   const parts = [posting, reading].filter(Boolean);
   if (!parts.length) return null;
   const connected = parts.some((part) => part.connection_id);
-  const needs = parts.some((part) => part.connection_id && part.status === "needs_attention");
+  const needs = parts.some((part) => part.connection_id && part.status === "needs_attention")
+    || window.TinRequests.needsYou(state.linkedInRequests);
   return {
     key: "linkedin",
     name: "LinkedIn",
@@ -7207,13 +7243,13 @@ function linkedInReadingPart(reading) {
   });
 }
 
-// Sending connection requests (#450) adds its row here.
-function linkedInSendingRow(_card) {
-  return "";
+// Sending connection requests (#450): a row of the card, from linkedin-requests.js.
+function linkedInSendingRow(card) {
+  return card.reading ? window.TinRequests.sendingRow(state.linkedInRequests) : "";
 }
 
-function linkedInSendingSummary(_card) {
-  return "";
+function linkedInSendingSummary(card) {
+  return card.reading ? window.TinRequests.summary(state.linkedInRequests) : "";
 }
 
 function renderLinkedInExpanded(card) {
@@ -7728,10 +7764,11 @@ async function pollRuns() {
     if (generation !== state.projectGeneration || state.project?.id !== projectId) return;
     const collectionsChanged = workflowsChanged || runsHaveChanged(state.runs, results)
       || JSON.stringify(state.decisions) !== JSON.stringify(decisions)
-      || JSON.stringify([state.websiteChanges, state.judgmentCalls]) !== JSON.stringify([websiteChanges.changes, websiteChanges.questions]);
+      || JSON.stringify([state.websiteChanges, state.judgmentCalls, state.linkedInRequests]) !== JSON.stringify([websiteChanges.changes, websiteChanges.questions, websiteChanges.requests]);
     state.decisions = decisions;
     state.websiteChanges = websiteChanges.changes;
     state.judgmentCalls = websiteChanges.questions;
+    state.linkedInRequests = websiteChanges.requests;
     state.runs = results;
     const summaryChanged = JSON.stringify(state.systemSummary) !== JSON.stringify(systemSummary);
     state.systemSummary = systemSummary;
@@ -7940,6 +7977,7 @@ async function loadProject(project, { announce = false, integrationReturn = null
     state.decisions = decisions;
     state.websiteChanges = websiteChanges.changes;
     state.judgmentCalls = websiteChanges.questions;
+    state.linkedInRequests = websiteChanges.requests;
     state.messages = messages.map(chatTurnFromMessage);
     state.integrations = integrations;
     await loadRunWorkflows(allRuns);

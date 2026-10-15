@@ -1,0 +1,244 @@
+/* Connection requests (#450, Paper INVITE-A to INVITE-C): the batch in Decisions and the
+   Sending row on the LinkedIn card. */
+
+.requests-card .request-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.requests-card .request-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 0;
+  border-top: 1px solid rgb(var(--ink-rgb) / 8%);
+  cursor: pointer;
+}
+
+.requests-card .request-row input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--accent-deep);
+}
+
+.requests-card .request-person {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.requests-card .request-person strong {
+  color: var(--ink);
+  font: 400 14px/19px var(--sans);
+}
+
+.requests-card .request-person span {
+  overflow: hidden;
+  color: var(--ink-secondary);
+  font: 13px/17px var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.requests-card .request-icp {
+  width: 48px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  color: var(--ink);
+  font: 13px/17px var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.requests-card .request-fit {
+  width: 36px;
+  flex: 0 0 auto;
+  color: var(--ink);
+  font: 12.5px/16px var(--mono);
+  text-align: right;
+}
+
+.requests-card .request-engaged {
+  width: 128px;
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  font: 11.5px/14px var(--mono);
+  text-align: right;
+}
+
+.requests-card .request-row.is-skipped :is(strong, span, code) { color: var(--ink-muted); }
+
+.requests-card .decision-approval:disabled { cursor: not-allowed; }
+
+.requests-settings-link {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: 700 13px/19px var(--sans);
+  cursor: pointer;
+}
+
+.requests-settings-link:hover { text-decoration: underline; }
+
+.requests-off .requests-settings-link { font-size: inherit; }
+
+/* The Sending row on the LinkedIn card. */
+
+.requests-sending .linkedin-part-body {
+  gap: 8px;
+}
+
+.requests-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  font: 13px/18px var(--sans);
+}
+
+.requests-head .is-muted { color: var(--ink-muted); }
+
+.requests-switch {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(var(--ink-rgb) / 18%);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.requests-switch span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--paper-card);
+  transition: transform 120ms ease;
+}
+
+.requests-switch.is-on { background: var(--accent-deep); }
+
+.requests-switch.is-on span { transform: translateX(12px); }
+
+.requests-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.requests-switch:focus-visible {
+  outline: 2px solid rgb(var(--accent-deep-rgb) / 45%);
+  outline-offset: 2px;
+}
+
+.requests-line {
+  color: var(--ink-secondary);
+  font: 13px/18px var(--sans);
+}
+
+.requests-consent {
+  display: flex;
+  max-width: 640px;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--ink);
+  font: 13px/19px var(--sans);
+  cursor: pointer;
+}
+
+.requests-consent input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  accent-color: var(--accent-deep);
+}
+
+.requests-risk {
+  max-width: 640px;
+  margin: 0;
+  padding-left: 26px;
+  color: var(--ink-secondary);
+  font: 12.5px/18px var(--sans);
+}
+
+.requests-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.requests-consent ~ .requests-actions { padding-left: 26px; }
+
+.requests-actions .button {
+  min-height: 30px;
+  padding: 6px 14px;
+}
+
+.requests-resume {
+  min-height: 30px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--hot);
+  color: #fff;
+  font: 700 12.5px/16px var(--sans);
+  cursor: pointer;
+}
+
+.requests-resume:hover { background: var(--hot-hover); }
+
+.requests-quiet {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-secondary);
+  font: 12.5px/16px var(--sans);
+  cursor: pointer;
+}
+
+.requests-quiet:hover { color: var(--ink); }
+
+.requests-limits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.requests-limits label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--ink-secondary);
+  font: 12px/16px var(--sans);
+}
+
+.requests-limits :is(input, select) {
+  width: 84px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid rgb(var(--ink-rgb) / 20%);
+  border-radius: var(--radius-chip, 4px);
+  background: var(--paper-card);
+  color: var(--ink);
+  font: 13px/18px var(--sans);
+}
+
+@media (max-width: 640px) {
+  .requests-card .request-engaged,
+  .requests-card .request-icp {
+    display: none;
+  }
+}

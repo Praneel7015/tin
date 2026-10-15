@@ -84,6 +84,7 @@ from tin_lite.integrations import (
 from tin_lite.keyword_plan_control import stop_keyword_plan as stop_keyword_plan_service
 from tin_lite.linkedin_posting import visible as linkedin_visible
 from tin_lite.linkedin_posts import LinkedInPosts
+from tin_lite.linkedin_requests_api import router as linkedin_requests_router
 from tin_lite.luna import LunaProtocolError, LunaSafetyError, LunaUpstreamError
 from tin_lite.organic_audit_control import stop_organic_audit as stop_organic_audit_service
 from tin_lite.organic_system_api import router as organic_system_router
@@ -169,6 +170,7 @@ router.include_router(organic_system_router)
 router.include_router(project_connections_router)
 router.include_router(project_authors_router)
 router.include_router(people_router)
+router.include_router(linkedin_requests_router)
 
 router.include_router(collection_router)
 router.include_router(public_catalog_router)
@@ -472,6 +474,8 @@ ASSET_VERSION = hashlib.sha256(
             "output-comparison.js",
             "people.css",
             "people.js",
+            "linkedin-requests.css",
+            "linkedin-requests.js",
             "pierre-trees.js",
             "system-week.js",
             "theme.js",

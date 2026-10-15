@@ -1,0 +1,152 @@
+// Packaged dashboard with synthetic APIs. No live credentials, projects or LinkedIn.
+// Connection requests (Paper INVITE-A to INVITE-C): a batch waits in Decisions, approving queues
+// the ticked people for Tin to send one at a time, and sending is turned on, paused and resumed
+// on the LinkedIn card.
+import assert from "node:assert/strict";
+import test from "node:test";
+import { chromium } from "playwright";
+import { openApp, serveApp, syntheticPeople } from "./app-fixture.js";
+
+const soon = () => new Date(Date.now() + 86400000).toISOString();
+const reading = {
+  key: "network.linkedin", name: "LinkedIn", badge: "in", description: "Read posts and who engaged.", unlocks: ["People who engaged"],
+  configured: true, connection_id: "reading-1", status: "connected",
+  configuration: {actor: {name: "Avery Example"}, collection_permission: {version: 1, mode: "cloud_preferred"},
+    session_state: "available", session_expires_at: soon(), session_verified_at: new Date(Date.now() - 3600000).toISOString()},
+  connected_at: "2026-10-14T09:00:00Z",
+};
+const person = (n, name, fit) => ({
+  request_id: `q-${n}`, record_id: `p-${n}`, name, headline: `Founder, Company ${n}`,
+  icp: "ICP 1: founders who need growth done", fit, engaged: {kind: "reacted", at: "2026-10-13T08:00:00Z"},
+});
+
+function requests({on = false, held = false} = {}) {
+  const inAnHour = new Date(Date.now() + 3600000).toISOString();
+  return {
+    offered: true,
+    reading: true,
+    sending: {on, paused: held, held, paused_reason: held ? "challenge" : null, paused_until: null,
+      daily_cap: 15, weekly_cap: 60, start_minute: 540, end_minute: 1020, timezone: "Europe/Berlin"},
+    pause_text: held ? "LinkedIn asked to verify your account" : null,
+    consent: {version: 1, text: "Send the connection requests I approve from Tin’s servers, with my LinkedIn session: one at a time, a few each weekday.", risk: "LinkedIn’s terms don’t allow automated requests."},
+    week: {sent: 9, accepted: 3, queued: 5, pending: 6, next_send: inAnHour},
+    batches: [{
+      id: "batch-1", created_at: new Date(Date.now() - 7200000).toISOString(),
+      first_send: inAnHour, last_send: new Date(Date.now() + 3 * 86400000).toISOString(),
+      people: [person(1, "Maya Lindqvist", 0.84), person(2, "Daniel Okafor", 0.78), person(3, "Amara Osei", 0.66)],
+    }],
+  };
+}
+
+async function open({url, state, integrations = [reading], people}, run) {
+  const served = await serveApp({decisionCount: 1, integrations, requests: state, ...(people ? {people, engagers: true} : {})});
+  const browser = await chromium.launch({headless: true});
+  try {
+    const {page, context, errors} = await openApp(browser, served.base, {url, theme: "dark"});
+    await run(page, served);
+    assert.deepEqual(errors, []);
+    await context.close();
+  } finally {
+    await browser.close();
+    served.server.close();
+  }
+}
+
+test("a batch waits first in Decisions, and approving sends only the ticked people", {timeout: 120000}, async () => {
+  await open({url: "/decisions", state: requests({on: true})}, async (page, served) => {
+    const card = page.locator(".requests-card");
+    await card.waitFor();
+    assert.deepEqual(await page.locator(".decision-group-title").allInnerTexts(), ["Connection requests\n1", "Reviews\n1"]);
+    assert.match(await page.locator(".decision-list-item.is-active").innerText(), /Send requests to 3 people/);
+    assert.match(await card.innerText(), /3 people who reacted to your posts fit your ICP and aren’t connected to you yet\./);
+    assert.match(await card.innerText(), /one at a time on its own schedule, never together/);
+    // The window is the project's time zone, named when it isn't the viewer's.
+    assert.match(await card.innerText(), /weekdays 9:00–17:00 Europe\/Berlin, at most 15 a day/);
+    assert.match(await card.innerText(), /The first goes out around \d+:\d\d today, the last on/);
+    assert.equal(await card.locator(".request-row").count(), 3);
+    await card.getByRole("checkbox").nth(2).uncheck();
+    const approve = card.getByRole("button", {name: "Approve 2 requests"});
+    await approve.click();
+    await page.locator(".toast", {hasText: "Approved. Tin sends the 2 one at a time"}).waitFor();
+    const write = served.requestWrites.find(item => item.path.endsWith("/approve"));
+    assert.deepEqual(write.body.people, ["p-1", "p-2"]);
+    assert.match(write.body.request_id, /^[0-9a-f-]{36}$/);
+    assert.equal(await page.locator(".requests-card").count(), 0);
+  });
+});
+
+test("with sending off, the batch asks you to turn it on first", {timeout: 120000}, async () => {
+  await open({url: "/decisions", state: requests({on: false})}, async page => {
+    const card = page.locator(".requests-card");
+    await card.waitFor();
+    assert.equal(await card.getByRole("button", {name: "Approve 3 requests"}).isDisabled(), true);
+    assert.match(await card.innerText(), /Turn on sending on the LinkedIn card first\./);
+    await card.getByRole("button", {name: "Open the LinkedIn card"}).click();
+    await page.locator(".linkedin-card.is-expanded .requests-sending").waitFor();
+    assert.equal(new URL(page.url()).pathname, "/integrations");
+  });
+});
+
+test("sending turns on only with the consent box ticked, then shows the week", {timeout: 120000}, async () => {
+  await open({url: "/integrations", state: requests({on: false})}, async (page, served) => {
+    await page.locator(".linkedin-card").getByRole("button", {name: "Configure"}).click();
+    const row = page.locator(".requests-sending");
+    await row.waitFor();
+    assert.match(await row.innerText(), /Sending\s*Send connection requests you approve, one at a time/);
+    await row.getByRole("switch").click();
+    const turnOn = row.getByRole("button", {name: "Turn on sending"});
+    assert.equal(await turnOn.isDisabled(), true);
+    assert.match(await row.innerText(), /LinkedIn’s terms don’t allow automated requests\./);
+    await row.getByRole("checkbox").check();
+    await row.getByRole("button", {name: "Turn on sending"}).click();
+    await page.locator(".toast", {hasText: "Sending is on."}).waitFor();
+    assert.deepEqual(served.requestWrites.at(-1), {method: "PUT", path: "/sending", body: {enabled: true, consent_version: 1}});
+    const on = page.locator(".requests-sending");
+    assert.match(await on.innerText(), /15 a day · 60 a week · weekdays 9:00–17:00 Europe\/Berlin · 15\+ min apart/);
+    assert.match(await page.locator(".linkedin-card").innerText(), /This week\s*9 sent · 3 accepted · 5 queued · 6 pending · next send/);
+    assert.match(await page.locator(".linkedin-card .integration-health").innerText(), /sending on · 9 sent this week · 3 accepted/);
+
+    await on.getByRole("button", {name: "Change limits"}).click();
+    await on.getByLabel("A day").fill("10");
+    await on.getByRole("button", {name: "Save limits"}).click();
+    await page.locator(".toast", {hasText: "Limits saved."}).waitFor();
+    assert.equal(served.requestWrites.at(-1).body.limits.daily_cap, 10);
+  });
+});
+
+test("with reading in this browser only, sending waits for cloud reading", {timeout: 120000}, async () => {
+  await open({url: "/integrations", state: {...requests({on: false}), reading: false, browser_only: true}}, async page => {
+    await page.locator(".linkedin-card").getByRole("button", {name: "Configure"}).click();
+    const row = page.locator(".requests-sending");
+    assert.match(await row.innerText(), /one at a time · turns on with cloud reading/);
+    assert.equal(await row.getByRole("switch").isDisabled(), true);
+  });
+});
+
+test("a warning from LinkedIn pauses sending until you resume it", {timeout: 120000}, async () => {
+  await open({url: "/integrations", state: requests({on: true, held: true})}, async (page, served) => {
+    assert.deepEqual(await page.locator("[data-integration-filter]").allInnerTexts(), ["All 2", "Connected 0", "Needs you 1", "Available 1"]);
+    assert.match(await page.locator(".linkedin-card .integration-health").innerText(), /sending paused/);
+    await page.locator(".linkedin-card").getByRole("button", {name: "Configure"}).click();
+    const row = page.locator(".requests-sending");
+    assert.match(await row.innerText(), /Sending paused: LinkedIn asked to verify your account\. Open LinkedIn in Chrome/);
+    await row.getByRole("button", {name: "Resume sending"}).click();
+    await page.locator(".toast", {hasText: "Sending resumed."}).waitFor();
+    assert.equal(served.requestWrites.at(-1).path, "/sending/resume");
+    assert.equal(await page.locator(".requests-sending .linkedin-part-needs").count(), 0);
+  });
+});
+
+test("People shows who was invited, in the column and as a segment", {timeout: 120000}, async () => {
+  const people = syntheticPeople();
+  const maya = people.find(item => item.id === "p-maya");
+  maya.fields.linkedin_relationship = {...maya.fields.linkedin_relationship, value: "pending", by: "requests"};
+  maya.invited_at = "2026-10-16T09:40:00Z";
+  await open({url: "/people", state: requests({on: true}), people}, async page => {
+    await page.locator(".people-table").waitFor();
+    assert.match(await page.getByRole("tab", {name: /^Invited/}).innerText(), /^Invited\s+1$/);
+    assert.equal(await page.locator('tr[data-person="p-maya"] td.is-linkedin').innerText(), "Invited oct 16");
+    await page.getByRole("tab", {name: /^Invited/}).click();
+    assert.deepEqual(await page.locator(".people-table tbody td.is-name").allInnerTexts(), ["Maya Lindqvist"]);
+  });
+});

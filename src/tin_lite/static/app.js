@@ -2793,9 +2793,14 @@ function systemCardIndicator(kind) {
   return '<svg aria-hidden="true" viewBox="0 0 10 10"><path d="M2 3.5 5 6.5 8 3.5" /></svg>';
 }
 
+// What the founder calls a run: their saved workflow's name, else the catalog title.
+function runName(run, configured = null) {
+  return configured?.name || workflowForRun(run)?.title || formatWorkflowKey(run.workflow_name);
+}
+
 function systemRunCard(run, configured = null) {
   const workflow = workflowForRun(run);
-  const title = configured?.name || workflow?.title || formatWorkflowKey(run.workflow_name);
+  const title = runName(run, configured);
   const key = configured?.workflow_key || workflow?.key || run.workflow_name;
   const schedule = configured ? systemScheduleLabel(configured) : "manual";
   const last = systemLastLabel(configured);
@@ -4583,7 +4588,7 @@ async function startWorkflow(workflowId, button) {
     if (!isCurrentProjectContext(context)) return;
     upsertRun(run);
     render();
-    showToast(`${formatWorkflowKey(run.workflow_name)} started.`);
+    showToast(`${runName(run)} started.`);
     schedulePolling();
   } catch (error) {
     if (!isCurrentProjectContext(context)) return;
@@ -4913,7 +4918,7 @@ async function runProjectWorkflow(projectWorkflowId, button) {
       configured.last_artifact_title = run.artifact_title;
     }
     render();
-    showToast(`${formatWorkflowKey(run.workflow_name)} started.`);
+    showToast(`${runName(run, configured)} started.`);
     schedulePolling();
   } catch (error) {
     if (!isCurrentProjectContext(context)) return;
@@ -4950,7 +4955,7 @@ async function retryProjectWorkflow(projectWorkflowId, button) {
     if (!isCurrentProjectContext(context)) return;
     upsertRun(run);
     renderWorkflows();
-    showToast(`${formatWorkflowKey(run.workflow_name)} is retrying.`);
+    showToast(`${runName(run, configured)} is retrying.`);
     schedulePolling();
   } catch (error) {
     if (!isCurrentProjectContext(context)) return;

@@ -97,6 +97,11 @@ export async function serveApp({decisionCount = 4, people = syntheticPeople(), e
       response.statusCode = 204;
       return response.end();
     }
+    const startPath = url.pathname.match(/^\/api\/projects\/[^/]+\/workflows\/([^/]+)\/runs$/);
+    if (request.method === "POST" && startPath) {
+      const workflow = catalog.find(item => item.id === projectWorkflows.find(saved => saved.id === startPath[1])?.workflow_id);
+      return send({id: "run-started", workflow_id: workflow.id, workflow_name: workflow.key, status: "running", created_at: "2026-10-15T10:00:00Z"});
+    }
     if (request.method !== "GET") {response.statusCode = 204; return response.end();}
     if (/^\/api\/projects\/[^/]+\/people$/.test(url.pathname)) return send({people, truncated: false, fit_shown: 0.6});
     if (personPath) {

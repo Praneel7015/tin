@@ -116,18 +116,34 @@ async def record_reactions(
 # The ICP file and scoring.
 
 
-def icp_profiles(text: str) -> list[str]:
-    """The named profiles in an ICP file: one per `##` heading, without its numbering."""
+# The same reading of strategy/ICP.md as the built-in workflows (#432): a `##` section is an
+# ICP when it states who buys or what they need with a labelled line, and the file's other
+# sections (strategy, ownership, messaging, open questions) are not profiles.
+_ICP_LABEL = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?:\*\*|__)?(?:buyers?|who buys|persona|decision maker|"
+    r"problem(?: statement)?|core problem|company|companies|firmographics?|account|"
+    r"job to be done|jtbd|job)(?:\*\*|__)?\s*[:：]",
+    re.I,
+)
+_NOT_A_PROFILE = re.compile(r"messag|theme|overview|summary|contents|how to use", re.I)
 
-    names = []
+
+def icp_profiles(text: str) -> list[str]:
+    """The named profiles in an ICP file: each `##` section with a labelled buyer, problem,
+    company or job line. A file without such labels names its profiles by heading alone."""
+
+    sections: list[tuple[str, list[str]]] = []
     for line in text.splitlines():
         match = re.match(r"##\s+(.+?)\s*#*\s*$", line)
-        if not match:
-            continue
-        name = re.sub(r"^\d+[.)]\s*", "", match[1]).strip()[:100]
-        if name and name not in names:
-            names.append(name)
-    return names[:MAX_PROFILES]
+        if match:
+            name = re.sub(r"^\d+[.)]\s*", "", match[1]).strip()[:100]
+            sections.append((name, []))
+        elif sections:
+            sections[-1][1].append(line)
+    named = [(n, body) for n, body in sections if n and not _NOT_A_PROFILE.search(n)]
+    labelled = [n for n, body in named if any(_ICP_LABEL.match(line) for line in body)]
+    names = labelled or [n for n, _ in named]
+    return list(dict.fromkeys(names))[:MAX_PROFILES]
 
 
 def score_instructions(profiles: list[str]) -> str:

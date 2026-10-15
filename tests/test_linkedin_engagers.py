@@ -30,13 +30,28 @@ from tin_lite.people_records import Value
 from tin_lite.workflows import LinkedInEngagersWorkflow
 
 NOW = datetime.now(UTC)
-ICP = """# ICP
+ICP = """# ICP and go-to-market
+
+## Strategy in brief
+
+Two offers, one per ICP.
 
 ## 1. Software founders
-Founders of seed-stage software companies.
+
+Company: seed-stage B2B software.
+Buyer: the founder.
 
 ## 2. Service agencies
-Agencies that build software for clients.
+
+**Problem statement:** agencies that build software for clients need leads.
+
+## Messaging and content
+
+Buyer: not a profile; messaging sections never are.
+
+## Open questions
+
+Which triggers convert fastest.
 """
 
 
@@ -240,8 +255,13 @@ def listed(storage):
     return rows, tree[engagers.SUMMARY_PATH][1].decode()
 
 
-def test_icp_profiles_come_from_level_two_headings():
+def test_icp_profiles_are_the_sections_that_say_who_buys():
     assert engagers.icp_profiles(ICP) == ["Software founders", "Service agencies"]
+    # Without labelled lines, each heading names a profile.
+    assert engagers.icp_profiles("## Founders\nPeople who build.\n## Agencies\n") == [
+        "Founders",
+        "Agencies",
+    ]
     assert engagers.icp_profiles("# Only a title\n\nNo profiles.") == []
 
 

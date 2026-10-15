@@ -27,7 +27,8 @@ Approving (`POST /api/projects/{project_id}/linkedin-requests/batches/{id}/appro
 discarding declines everyone. Nobody declined is proposed again. The same `request_id`
 repeats the same decision. Approving needs sending to be on, and starts the batch's
 `social.linkedin_requests` run with the start key `linkedin-requests:<batch>`; nothing else
-can start it. Nothing is sent at the moment of approval.
+can start it. Nothing is sent at the moment of approval. If the run can't start, the batch goes
+back to Decisions as it was and the member reads why.
 
 ## Sent, one at a time
 

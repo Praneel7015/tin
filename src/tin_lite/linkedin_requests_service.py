@@ -7,6 +7,7 @@ Approving starts the `social.linkedin_requests` run for that batch.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -14,6 +15,8 @@ from uuid import UUID
 from tin_lite import linkedin_requests as requests
 from tin_lite.connection_collection import PROVIDER, enabled
 from tin_lite.connection_collection_connection import permission
+
+logger = logging.getLogger(__name__)
 
 CONSENT_TEXT = (
     "Send the connection requests I approve from Tin's servers, with my LinkedIn session: one "
@@ -163,7 +166,7 @@ class ConnectionRequests:
         request_id: UUID,
         approve: bool,
         people: list[UUID] | None = None,
-        trigger_client: str = "dashboard",
+        trigger_source: str = "manual",
         oauth_client_id: str | None = None,
     ) -> dict[str, Any]:
         """Approve the chosen people, which starts the sending run, or discard the batch."""
@@ -183,12 +186,34 @@ class ConnectionRequests:
         except requests.RequestError as error:
             raise _refused(error) from None
         if decided["status"] == "approved":
-            decided["run_id"] = str(
-                await self._start(project_id, batch_id, member, trigger_client, oauth_client_id)
-            )
+            try:
+                run_id = await self._start(
+                    project_id, batch_id, member, trigger_source, oauth_client_id
+                )
+            except RequestsRefused:
+                await self._reopen(project_id, batch_id)
+                raise
+            except Exception:
+                logger.exception("connection requests: the sending run did not start")
+                await self._reopen(project_id, batch_id)
+                raise RequestsRefused(
+                    503, "Tin couldn't start sending, so nothing was approved. Try again shortly."
+                ) from None
+            decided["run_id"] = str(run_id)
         return decided
 
-    async def _start(self, project_id, batch_id, member, trigger_client, oauth_client_id):
+    async def _reopen(self, project_id: UUID, batch_id: UUID) -> None:
+        """The sending run never started: the batch goes back to Decisions as it was, so the
+        member sees why and approves again. A run that did start keeps the approval."""
+
+        if await self.db.get_run_by_start_key(
+            project_id=project_id, start_idempotency_key=f"linkedin-requests:{batch_id}"
+        ):
+            return
+        async with self.db.pool.acquire() as conn, conn.transaction():
+            await requests.reopen(conn, batch_id)
+
+    async def _start(self, project_id, batch_id, member, trigger_source, oauth_client_id):
         from tin_lite.run_service import start_workflow_run
 
         workflow = await self.db.get_workflow(requests.WORKFLOW_ID)
@@ -209,7 +234,7 @@ class ConnectionRequests:
                 started_by_clerk_user_id=member,
                 start_idempotency_key=f"linkedin-requests:{batch_id}",
                 input_payload={"batch_id": str(batch_id)},
-                trigger_client=trigger_client,
+                trigger_source=trigger_source,
                 started_by_oauth_client_id=oauth_client_id,
                 _linkedin_requests=True,
             )
@@ -219,7 +244,6 @@ class ConnectionRequests:
             WorkflowExecutorUnavailableError,
             WorkflowInputError,
         ) as exc:
-            # Approved and queued: approving again with the same request starts it.
             raise RequestsRefused(
                 409, public_error_text(exc, "Tin couldn't start sending. Approve again shortly.")
             ) from None

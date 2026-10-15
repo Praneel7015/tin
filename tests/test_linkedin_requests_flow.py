@@ -10,12 +10,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from mcp.server.mcpserver.exceptions import ToolError
+from test_catalog_executor_transition import WIKI
 from test_connection_collection import USER
 from test_connection_collection import collection_db as collection_db
 from test_linkedin_engagers import (
@@ -35,6 +37,7 @@ from tin_lite import linkedin_requests as requests
 from tin_lite import linkedin_requests_activities
 from tin_lite import people_records as records
 from tin_lite.auth import AuthContext, require_user
+from tin_lite.catalog import BUILTIN_WORKFLOWS
 from tin_lite.connection_collection import CollectionError
 from tin_lite.linkedin_requests_activities import LinkedInRequestsActivities
 from tin_lite.linkedin_requests_api import router
@@ -44,6 +47,7 @@ from tin_lite.people_api import router as people_router
 # Monday 19 October 2026, 10:00 in the project's time zone (UTC).
 MONDAY = datetime(2026, 10, 19, 10, tzinfo=UTC)
 STARTED = []
+REAL_START = ConnectionRequests._start
 
 
 def client(f, user=USER):
@@ -65,8 +69,8 @@ def no_temporal(monkeypatch):
 
     STARTED.clear()
 
-    async def start(self, project_id, batch_id, member, trigger_client, oauth_client_id):
-        STARTED.append((project_id, batch_id, member, trigger_client))
+    async def start(self, project_id, batch_id, member, trigger_source, oauth_client_id):
+        STARTED.append((project_id, batch_id, member, trigger_source))
         return uuid4()
 
     monkeypatch.setattr(ConnectionRequests, "_start", start)
@@ -192,12 +196,85 @@ async def test_only_you_approve_and_only_with_sending_on(collection_db):
     )
     assert statuses == {known[member(1)]: "queued", known[member(4)]: "declined"}
     # A repeated approval asks to start the same run again; its start key makes it one run.
-    assert {(m, client_) for _p, _b, m, client_ in STARTED} == {(USER, "dashboard")}
+    assert {(m, source) for _p, _b, m, source in STARTED} == {(USER, "manual")}
     assert len({b for _p, b, _m, _c in STARTED}) == 1
     # Nobody decided is proposed again.
     await ran(f, [person(1), person(4)], n=3)
     async with client(f) as http:
         assert (await http.get(base)).json()["batches"] == []
+
+
+async def test_approving_starts_one_real_run_and_a_failed_start_reopens_the_batch(
+    collection_db, monkeypatch
+):
+    f = await fixture(collection_db)
+    await ran(f, [person(1), person(4)])
+    known = await ids(f)
+    # The catalog's own definition, published at a fixed revision.
+    builtin = next(item for item in BUILTIN_WORKFLOWS if item.key == requests.KEY)
+    definition, _files = builtin.definition_and_files_with_wiki(WIKI)
+    await f.db.pool.execute(
+        """INSERT INTO workflows (id,key,title,executor,definition_repo_id,
+                definition_path,current_commit_sha,version_label,definition)
+           VALUES ($1,$2,$2,$2,'registry/workflows',$3,$4,'1',$5::jsonb)""",
+        requests.WORKFLOW_ID,
+        requests.KEY,
+        builtin.definition_path,
+        "e" * 40,
+        json.dumps(definition),
+    )
+    temporal = SimpleNamespace(start_workflow=AsyncMock())
+    f.runtime = SimpleNamespace(
+        database=f.db,
+        storage=f.storage,
+        temporal=temporal,
+        integrations=SimpleNamespace(ensure_requirements=AsyncMock()),
+    )
+    base = f"/api/projects/{f.project.id}/linkedin-requests"
+
+    # Starting fails before any run exists: the batch is back in Decisions, unchanged.
+    async def broken(*_args):
+        raise RuntimeError("no start")
+
+    monkeypatch.setattr(ConnectionRequests, "_start", broken)
+    async with client(f) as http:
+        await turn_on(http, f)
+        batch = (await http.get(base)).json()["batches"][0]
+        approve = f"{base}/batches/{batch['id']}/approve"
+        failed = await http.post(
+            approve, json={"request_id": str(uuid4()), "people": [str(known[member(1)])]}
+        )
+        assert failed.status_code == 503 and "nothing was approved" in failed.json()["detail"]
+        again = (await http.get(base)).json()["batches"]
+    assert [b["id"] for b in again] == [batch["id"]]
+    assert sorted(p["name"] for p in again[0]["people"]) == ["Person 1", "Person 4"]
+
+    # The real start: a dashboard approval records a manual run, one per batch.
+    monkeypatch.setattr(ConnectionRequests, "_start", REAL_START)
+    app_client = client(f)
+    app_client._transport.app.state.runtime = f.runtime
+    app_client._transport.app.state.settings = SimpleNamespace(
+        **vars(f.store.settings), task_queue="tin-test"
+    )
+    decision = {"request_id": str(uuid4()), "people": [str(known[member(1)])]}
+    async with app_client as http:
+        answer = await http.post(approve, json=decision)
+        assert answer.status_code == 200, answer.text
+        assert (await http.post(approve, json=decision)).json()["run_id"] == answer.json()["run_id"]
+    run = await f.db.get_run(UUID(answer.json()["run_id"]))
+    assert run.executor == requests.KEY and run.trigger_source == "manual"
+    assert run.trigger_client is None and run.input == {"batch_id": batch["id"]}
+    # A repeated approval re-sends the start of a still-pending run, under the same workflow ID.
+    assert (
+        await f.db.pool.fetchval(
+            "SELECT count(*) FROM workflow_runs WHERE start_idempotency_key = $1",
+            f"linkedin-requests:{batch['id']}",
+        )
+        == 1
+    )
+    assert {call.kwargs["id"] for call in temporal.start_workflow.await_args_list} == {
+        run.temporal_workflow_id
+    }
 
 
 class InviteCloud:

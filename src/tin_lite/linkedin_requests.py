@@ -495,6 +495,52 @@ async def decide(
     return {"status": status, "batch_id": batch_id, "queued": len(chosen), "repeated": False}
 
 
+async def reopen(conn, batch_id: UUID) -> bool:
+    """Undo an approval whose sending run never started: its people wait in Decisions again,
+    including any it declined. Returns whether anything changed."""
+
+    batch = await conn.fetchrow(
+        "SELECT * FROM linkedin_request_batches WHERE id = $1 FOR UPDATE", batch_id
+    )
+    if batch is None or batch["status"] != "approved" or batch["send_run_id"] is not None:
+        return False
+    # The decision set every row it touched at the same moment it was decided.
+    if await conn.fetchval(
+        """SELECT EXISTS (SELECT 1 FROM linkedin_requests WHERE batch_id = $1
+           AND (attempted_at IS NOT NULL OR status NOT IN ('queued', 'declined')
+                OR COALESCE(queued_at, settled_at) <> $2))""",
+        batch_id,
+        batch["decided_at"],
+    ):
+        return False
+    # An engagers run may have opened a new batch since: its people join that one.
+    target = await conn.fetchval(
+        """SELECT id FROM linkedin_request_batches
+           WHERE project_id = $1 AND member = $2 AND status = 'open'""",
+        batch["project_id"],
+        batch["member"],
+    )
+    await conn.execute(
+        """UPDATE linkedin_requests SET status = 'proposed', queued_at = NULL,
+               settled_at = NULL, batch_id = $2
+           WHERE batch_id = $1""",
+        batch_id,
+        target or batch_id,
+    )
+    if target is None:
+        await conn.execute(
+            """UPDATE linkedin_request_batches SET status = 'open', decided_at = NULL,
+                   decision_request_id = NULL
+               WHERE id = $1""",
+            batch_id,
+        )
+    else:
+        await conn.execute(
+            "UPDATE linkedin_request_batches SET status = 'discarded' WHERE id = $1", batch_id
+        )
+    return True
+
+
 # What the member sees: this week, and what waits.
 
 

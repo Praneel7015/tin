@@ -1666,7 +1666,7 @@ def create_mcp_app(
                     request_id=_mcp_uuid(request_id, field="request_id"),
                     approve=approve,
                     people=[_mcp_uuid(item, field="person_ids") for item in person_ids or []],
-                    trigger_client="mcp",
+                    trigger_source="mcp",
                     oauth_client_id=token.client_id,
                 )
             )

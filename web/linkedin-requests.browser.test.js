@@ -60,6 +60,8 @@ test("a batch waits first in Decisions, and approving sends only the ticked peop
     assert.match(await page.locator(".decision-list-item.is-active").innerText(), /Send requests to 3 people/);
     assert.match(await card.innerText(), /3 people who reacted to your posts fit your ICP and aren’t connected to you yet\./);
     assert.match(await card.innerText(), /one at a time on its own schedule, never together/);
+    // The window is the project's time zone, named when it isn't the viewer's.
+    assert.match(await card.innerText(), /weekdays 9:00–17:00 Europe\/Berlin, at most 15 a day/);
     assert.match(await card.innerText(), /The first goes out around \d+:\d\d today, the last on/);
     assert.equal(await card.locator(".request-row").count(), 3);
     await card.getByRole("checkbox").nth(2).uncheck();

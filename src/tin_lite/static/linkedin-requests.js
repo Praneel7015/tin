@@ -40,6 +40,13 @@ window.TinRequests = (() => {
     return numbered ? numbered[1] : text;
   }
 
+  // The window is in the project's time zone; it reads "your time" when that is the viewer's.
+  function zone(sending) {
+    let own = "";
+    try { own = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { own = ""; }
+    return sending.timezone && sending.timezone !== own ? sending.timezone : "your time";
+  }
+
   function limitsLine(sending) {
     return `${sending.daily_cap} a day · ${sending.weekly_cap} a week · weekdays ${clock(sending.start_minute)}–${clock(sending.end_minute)} ${sending.timezone} · 15+ min apart`;
   }
@@ -80,7 +87,7 @@ window.TinRequests = (() => {
         ? ` It goes out ${when(batch.first_send, { at: true })}.`
         : ` The first goes out ${when(batch.first_send, { at: true })}, the last ${when(batch.last_send)}.`
       : "";
-    const terms = `Tin sends them one at a time on its own schedule, never together: at least 15 minutes apart plus a random wait, weekdays ${clock(sending.start_minute ?? 540)}–${clock(sending.end_minute ?? 1020)} your time, at most ${sending.daily_cap ?? 15} a day.${sending.on ? schedule : ""} It stops at the first warning from LinkedIn.`;
+    const terms = `Tin sends them one at a time on its own schedule, never together: at least 15 minutes apart plus a random wait, weekdays ${clock(sending.start_minute ?? 540)}–${clock(sending.end_minute ?? 1020)} ${escape(zone(sending))}, at most ${sending.daily_cap ?? 15} a day.${sending.on ? schedule : ""} It stops at the first warning from LinkedIn.`;
     return `<article class="decision-detail-card requests-card" data-requests-batch="${escape(batch.id)}">
       <header>
         <span class="decision-workflow-mark">P</span>

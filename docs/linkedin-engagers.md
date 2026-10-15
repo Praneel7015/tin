@@ -43,7 +43,9 @@ sends nothing.
 4. **Score.**
    - People without a score under the current definition go to the model (`gpt-6-luna`,
      route `linkedin.engagers.icp`) in batches of 25, with the ICP file. The model sees
-     names and headlines only, as data.
+     names and headlines, and the five newest notes members wrote about a person, as data.
+   - A fit a member set is never scored again. A score older than the person's newest note is
+     scored again, with the note.
    - Each answer sets `icp` and `icp_fit` with a reason, or "unknown" with a reason when the
      headline is too thin.
    - The score ranks whom the founder looks at first; it is not a decision to contact anyone.

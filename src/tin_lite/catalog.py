@@ -1687,7 +1687,7 @@ BUILTIN_WORKFLOWS = (
             "nothing."
         ),
         executor=linkedin_engagers.KEY,
-        version_label="1.1.0",
+        version_label="1.2.0",
         presentation=WorkflowDiagram(
             direction="TD",
             nodes=(
@@ -1719,7 +1719,7 @@ BUILTIN_WORKFLOWS = (
                     "score",
                     "step",
                     "Score against your ICP",
-                    "each person, with a reason",
+                    "from headline and your notes, with a reason",
                 ),
                 DiagramNode(
                     "files",

@@ -5,7 +5,8 @@ field values that each say who set them, when and why, and keeps an append-only 
 Only Tin's own services write here. When one read supplies identifiers of two records, they
 merge: the older record survives, the newer points at it, and events stay where they were
 written. Forgetting a person deletes the record and keeps a hash of each identifier, so no
-later read adds them back.
+later read adds them back. Members correct values (a run never replaces them) and write notes
+about a person; Tin reads the notes the next time it scores them.
 """
 
 from __future__ import annotations
@@ -31,10 +32,12 @@ FIELDS: dict[str, tuple[str, str, tuple[str, ...] | None]] = {
     "linkedin_relationship": ("choice", "On LinkedIn", RELATIONSHIPS),
     "icp": ("text", "ICP", None),
     "icp_fit": ("number", "ICP fit", None),
+    "customer": ("choice", "Customer", ("yes", "no")),
 }
 SET_BY = ("run", "member")
 TEXT_LIMIT = 2000
 REASON_LIMIT = 500
+NOTE_LIMIT = 2000
 # LinkedIn's own profile ID, as in /in/ACoAA… and urn:li:fsd_profile:ACoAA….
 MEMBER_ID = re.compile(r"ACo[A-Za-z0-9_-]{20,80}")
 
@@ -234,6 +237,9 @@ async def _merge(conn, survivor: UUID, others: list[UUID]) -> None:
         survivor,
     )
     await conn.execute("DELETE FROM record_values WHERE record_id = ANY($1::uuid[])", others)
+    await conn.execute(
+        "UPDATE record_notes SET record_id = $2 WHERE record_id = ANY($1::uuid[])", others, survivor
+    )
 
 
 def _typed(spec: tuple[str, tuple[str, ...] | None], value) -> tuple[str | None, float | None]:
@@ -263,11 +269,13 @@ async def set_values(
     set_by_kind: str,
     set_by: str,
     definition: str = "",
+    refresh: bool = False,
 ) -> int:
     """Write current values with their lineage; returns how many changed.
 
     A value a member set is never replaced by a run, and a write that changes nothing (same
-    value, reason and definition) leaves the earlier one, with its time, in place.
+    value, reason and definition) leaves the earlier one, with its time, in place, unless
+    `refresh` asks for a new time: a score made again after a note, even unchanged, is current.
     """
 
     if set_by_kind not in SET_BY or not set_by:
@@ -294,12 +302,22 @@ async def set_values(
                ON CONFLICT (record_id, field) DO UPDATE SET
                    value_text = EXCLUDED.value_text, value_number = EXCLUDED.value_number,
                    reason = EXCLUDED.reason, set_by_kind = EXCLUDED.set_by_kind,
-                   set_by = EXCLUDED.set_by, definition = EXCLUDED.definition, set_at = now()
+                   set_by = EXCLUDED.set_by, definition = EXCLUDED.definition, set_at = now(),
+                   -- A member's value keeps the run's value it replaced; a run's keeps none.
+                   previous = CASE
+                       WHEN EXCLUDED.set_by_kind = 'run' THEN NULL
+                       WHEN record_values.set_by_kind = 'run' THEN jsonb_build_object(
+                           'text', record_values.value_text,
+                           'number', record_values.value_number,
+                           'reason', record_values.reason, 'set_by', record_values.set_by,
+                           'definition', record_values.definition,
+                           'set_at', record_values.set_at)
+                       ELSE record_values.previous END
                WHERE NOT (record_values.set_by_kind = 'member' AND EXCLUDED.set_by_kind = 'run')
-                 AND (record_values.value_text, record_values.value_number, record_values.reason,
-                      record_values.definition)
+                 AND ($10 OR (record_values.value_text, record_values.value_number,
+                      record_values.reason, record_values.definition)
                      IS DISTINCT FROM (EXCLUDED.value_text, EXCLUDED.value_number,
-                      EXCLUDED.reason, EXCLUDED.definition)
+                      EXCLUDED.reason, EXCLUDED.definition))
                RETURNING true""",
             project_id,
             target,
@@ -310,6 +328,7 @@ async def set_values(
             set_by_kind,
             set_by[:200],
             definition[:200],
+            refresh,
         )
         changed += bool(written)
     return changed
@@ -353,6 +372,119 @@ async def add_event(
     return bool(inserted)
 
 
+# What members change: a value, back to the run's value it replaced, and notes.
+
+
+async def set_by_member(
+    conn, project_id: UUID, record_id: UUID, values: list[Value], *, member: str
+) -> int:
+    """A member's values, which no run replaces; each keeps the run's value it replaced."""
+
+    await ensure_fields(conn, project_id)
+    return await set_values(
+        conn, project_id, record_id, values, set_by_kind="member", set_by=member
+    )
+
+
+async def restore_run_values(
+    conn, project_id: UUID, record_id: UUID, fields: tuple[str, ...]
+) -> None:
+    """Put back the run's values members replaced in these fields. A field a member set with
+    no run value before it goes empty, so the next run fills it."""
+
+    target = await current(conn, project_id, record_id)
+    if target is None:
+        raise RecordError("record_gone")
+    async with conn.transaction():
+        await conn.execute(
+            """UPDATE record_values SET value_text = previous->>'text',
+                   value_number = (previous->>'number')::double precision,
+                   reason = COALESCE(previous->>'reason', ''), set_by_kind = 'run',
+                   set_by = previous->>'set_by',
+                   definition = COALESCE(previous->>'definition', ''),
+                   set_at = (previous->>'set_at')::timestamptz, previous = NULL
+               WHERE record_id = $1 AND field = ANY($2::text[]) AND set_by_kind = 'member'
+                 AND previous IS NOT NULL""",
+            target,
+            list(fields),
+        )
+        await conn.execute(
+            """DELETE FROM record_values WHERE record_id = $1 AND field = ANY($2::text[])
+               AND set_by_kind = 'member'""",
+            target,
+            list(fields),
+        )
+
+
+def _note_body(body) -> str:
+    if not isinstance(body, str):
+        raise RecordError("empty_note")
+    # Keep the writer's line breaks; trim the ends and runs of blank lines.
+    text = re.sub(r"\n{3,}", "\n\n", body.replace("\r\n", "\n").strip())
+    if not text:
+        raise RecordError("empty_note")
+    if len(text) > NOTE_LIMIT:
+        raise RecordError("note_too_long")
+    return text
+
+
+async def add_note(conn, project_id: UUID, record_id: UUID, body, *, author: str) -> UUID:
+    text = _note_body(body)
+    target = await current(conn, project_id, record_id)
+    if target is None:
+        raise RecordError("record_gone")
+    note_id = uuid4()
+    await conn.execute(
+        """INSERT INTO record_notes (id, project_id, record_id, body, author)
+           VALUES ($1, $2, $3, $4, $5)""",
+        note_id,
+        project_id,
+        target,
+        text,
+        author[:200],
+    )
+    return note_id
+
+
+async def _own_note(conn, project_id: UUID, record_id: UUID, note_id: UUID, author: str):
+    target = await current(conn, project_id, record_id)
+    if target is None:
+        raise RecordError("record_gone")
+    found = await conn.fetchval(
+        "SELECT author FROM record_notes WHERE id = $1 AND project_id = $2 AND record_id = $3",
+        note_id,
+        project_id,
+        target,
+    )
+    if found is None:
+        raise RecordError("note_gone")
+    if found != author:
+        raise RecordError("not_author")
+
+
+async def edit_note(
+    conn, project_id: UUID, record_id: UUID, note_id: UUID, body, *, author: str
+) -> None:
+    """Change a note; only its author can."""
+
+    text = _note_body(body)
+    await _own_note(conn, project_id, record_id, note_id, author)
+    await conn.execute(
+        "UPDATE record_notes SET body = $2, updated_at = now() WHERE id = $1 AND body <> $2",
+        note_id,
+        text,
+    )
+
+
+async def delete_note(
+    conn, project_id: UUID, record_id: UUID, note_id: UUID, *, author: str
+) -> None:
+    """Delete a note; only its author can."""
+
+    await _own_note(conn, project_id, record_id, note_id, author)
+    await conn.execute("DELETE FROM record_notes WHERE id = $1", note_id)
+
+
 async def forget(conn, project_id: UUID, record_id: UUID) -> bool:
     """Delete a person and everything merged into them, and keep their identifiers' hashes."""
 
@@ -381,6 +513,7 @@ async def forget(conn, project_id: UUID, record_id: UUID) -> bool:
             ],
         )
         await conn.execute("DELETE FROM record_events WHERE record_id = ANY($1::uuid[])", ids)
+        await conn.execute("DELETE FROM record_notes WHERE record_id = ANY($1::uuid[])", ids)
         await conn.execute("DELETE FROM record_values WHERE record_id = ANY($1::uuid[])", ids)
         await conn.execute("DELETE FROM record_identifiers WHERE record_id = ANY($1::uuid[])", ids)
         await conn.execute("DELETE FROM records WHERE id = ANY($1::uuid[])", ids)
@@ -400,7 +533,7 @@ async def people(
                (SELECT jsonb_object_agg(v.field, jsonb_build_object(
                     'text', v.value_text, 'number', v.value_number, 'reason', v.reason,
                     'definition', v.definition, 'set_by_kind', v.set_by_kind,
-                    'set_by', v.set_by, 'set_at', v.set_at))
+                    'set_by', v.set_by, 'set_at', v.set_at, 'previous', v.previous))
                 FROM record_values v WHERE v.record_id = r.id) AS fields,
                (SELECT jsonb_object_agg(kind, n) FROM (
                     SELECT e.kind, count(*) AS n FROM record_events e
@@ -440,7 +573,7 @@ async def people(
 
 # Short names for the workflows that write records, shown beside a value as who set it.
 WRITERS = {"social.linkedin_engagers": "engagers"}
-VIEW_FIELDS = ("icp", "icp_fit", "linkedin_relationship")
+VIEW_FIELDS = ("icp", "icp_fit", "linkedin_relationship", "customer")
 # Values computed under a definition, such as the ICP file, go stale when it changes.
 DEFINED_FIELDS = ("icp", "icp_fit")
 POST = re.compile(r"urn:li:(?:activity|ugcPost|share):[0-9]{1,30}")
@@ -483,30 +616,68 @@ def _when(row) -> datetime:
     return posted if posted.tzinfo else posted.replace(tzinfo=UTC)
 
 
-def _fields(person: dict, runs: dict, *, viewer: str, definition: str) -> dict[str, dict]:
+def _member(set_by: str, viewer: str) -> str:
+    return "you" if set_by == viewer else "a teammate"
+
+
+def _fields(
+    person: dict, runs: dict, *, viewer: str, definition: str, noted: datetime | None = None
+) -> dict[str, dict]:
+    """The view's fields. A run's score is stale under another definition, or when a note
+    came after it (`noted`): the next run reads the note and scores again."""
+
     shown = {}
     for key in VIEW_FIELDS:
         value = person["fields"].get(key)
         if not value:
             continue
-        if value["set_by_kind"] == "member":
-            by = "you" if value["set_by"] == viewer else "a teammate"
-        else:
+        member = value["set_by_kind"] == "member"
+        by = _member(value["set_by"], viewer) if member else None
+        if not member:
             by = (runs.get(value["set_by"]) or {}).get("by") or "Tin"
+        stale = ""
+        if key in DEFINED_FIELDS and not member:
+            if definition and value["definition"] and value["definition"] != definition:
+                stale = "definition"
+            elif noted and noted > datetime.fromisoformat(value["set_at"]):
+                stale = "note"
+        previous = value.get("previous") if member else None
         shown[key] = {
             "value": value["number"] if key == "icp_fit" else value["text"],
             "reason": value["reason"],
             "by": by,
             "at": value["set_at"],
-            "stale": bool(
-                key in DEFINED_FIELDS
-                and definition
-                and value["definition"]
-                and value["definition"] != definition
-            ),
+            "stale": bool(stale),
+            "stale_reason": stale or None,
             "definition": value["definition"].split("@", 1)[0],
+            # The run's value a member's value replaced: what "Use Tin's score" brings back.
+            "previous": (
+                {
+                    "value": previous["number"] if key == "icp_fit" else previous["text"],
+                    "reason": previous["reason"] or "",
+                }
+                if previous
+                else None
+            ),
         }
     return shown
+
+
+async def _notes(conn, project_id: UUID, only: UUID | None) -> dict[UUID, list]:
+    """Each person's notes, newest first."""
+
+    found: dict[UUID, list] = {}
+    for row in await conn.fetch(
+        """SELECT n.id, COALESCE(r.merged_into, r.id) AS person, n.body, n.author,
+               n.created_at, n.updated_at
+           FROM record_notes n JOIN records r ON r.id = n.record_id
+           WHERE n.project_id = $1 AND ($2::uuid IS NULL OR COALESCE(r.merged_into, r.id) = $2)
+           ORDER BY n.created_at DESC, n.id""",
+        project_id,
+        only,
+    ):
+        found.setdefault(row["person"], []).append(row)
+    return found
 
 
 async def directory(
@@ -545,18 +716,41 @@ async def directory(
             if value["set_by_kind"] == "run"
         },
     )
-    return [
-        {
-            "id": person["id"],
-            "name": (person["fields"].get("name") or {}).get("text") or "",
-            "headline": (person["fields"].get("headline") or {}).get("text") or "",
-            "profile_url": person["profile_url"],
-            "fields": _fields(person, runs, viewer=viewer, definition=definition),
-            "last_touch": touches.get(person["id"]),
-            "added": {"at": person["created_at"], "by": writer(person["source"])},
-        }
-        for person in listed
-    ]
+    notes = await _notes(conn, project_id, only)
+    result = []
+    for person in listed:
+        written = notes.get(person["id"], [])
+        latest = written[0] if written else None
+        result.append(
+            {
+                "id": person["id"],
+                "name": (person["fields"].get("name") or {}).get("text") or "",
+                "headline": (person["fields"].get("headline") or {}).get("text") or "",
+                "profile_url": person["profile_url"],
+                "fields": _fields(
+                    person,
+                    runs,
+                    viewer=viewer,
+                    definition=definition,
+                    noted=max((n["updated_at"] for n in written), default=None),
+                ),
+                "last_touch": touches.get(person["id"]),
+                "added": {"at": person["created_at"], "by": writer(person["source"])},
+                # The newest note for the grid, and every note's words for search.
+                "note": (
+                    {
+                        "body": latest["body"],
+                        "by": _member(latest["author"], viewer),
+                        "at": latest["created_at"],
+                        "count": len(written),
+                    }
+                    if latest
+                    else None
+                ),
+                "notes_text": " \n".join(n["body"] for n in written)[: NOTE_LIMIT * 2],
+            }
+        )
+    return result
 
 
 async def person(
@@ -600,4 +794,15 @@ async def person(
             }
         )
     events.sort(key=lambda event: event["at"], reverse=True)
-    return {**found[0], "events": events}
+    notes = [
+        {
+            "id": row["id"],
+            "body": row["body"],
+            "by": _member(row["author"], viewer),
+            "mine": row["author"] == viewer,
+            "at": row["created_at"],
+            "edited": row["updated_at"] > row["created_at"],
+        }
+        for row in (await _notes(conn, project_id, target)).get(target, [])
+    ]
+    return {**found[0], "events": events, "notes": notes}

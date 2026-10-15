@@ -430,6 +430,7 @@ class LinkedInEngagersActivities:
                             set_by_kind="run",
                             set_by=str(run.id),
                             definition=definition,
+                            refresh=bool(definition),
                         )
                     except records.RecordError as error:
                         # The founder forgot this person while the model scored them.

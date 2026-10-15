@@ -692,6 +692,12 @@ it removes (running work, schedules, connections, files, for every member) and w
 history), confirm once, then pass the project's exact name as confirm_name; the personal project
 cannot be deleted.
 
+People: list_people lists who engaged with the founder's posts, best ICP fit first, and
+get_person reads one with their notes and timeline. When the founder corrects someone in their
+own words (a customer, not a buyer, the right ICP, how they know them), use update_person or
+add_person_note: no run replaces a member's pick, and Tin reads notes the next time it scores
+the person. Forget a person (forget_person) only when the founder asked, with their exact name.
+
 Tool errors start with a code, then the reason: forbidden (sign in or scope; stop), not_found
 (wrong id or no access; stop), invalid (fix the input and retry), conflict (state moved; re-read
 it and retry once), or a workflow-specific code explained in its text."""
@@ -1199,6 +1205,179 @@ def create_mcp_app(
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from None
+
+    from fastapi.encoders import jsonable_encoder
+
+    async def people_service(project_id: str, tool_name: str):
+        from tin_lite.people_service import People
+
+        token = await caller()
+        parsed = _mcp_uuid(project_id, field="project_id")
+        await require_project(parsed, token, tool_name=tool_name)
+        return parsed, token.subject, People(runtime().database, runtime().storage)
+
+    async def people_result(call):
+        from tin_lite.people_service import PeopleError
+
+        try:
+            return await call
+        except PeopleError as error:
+            code = {404: "not_found", 403: "forbidden"}.get(error.status, "invalid")
+            raise ToolError(f"{code}: {error.message}") from None
+
+    def person_row(person: dict) -> dict[str, Any]:
+        fields = person["fields"]
+
+        def value(key):
+            return (fields.get(key) or {}).get("value")
+
+        fit = fields.get("icp_fit") or {}
+        return {
+            "id": str(person["id"]),
+            "name": person["name"],
+            "headline": person["headline"],
+            "profile_url": person["profile_url"],
+            "icp": value("icp"),
+            "icp_fit": value("icp_fit"),
+            "fit_set_by": fit.get("by"),
+            "fit_reason": fit.get("reason"),
+            "fit_stale": fit.get("stale", False),
+            "linkedin": value("linkedin_relationship"),
+            "customer": value("customer") == "yes",
+            "newest_note": (person.get("note") or {}).get("body"),
+            "note_count": (person.get("note") or {}).get("count", 0),
+        }
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def list_people(
+        project_id: str, segment: str = "all", query: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        """List a project's people, best ICP fit first: who they are, their ICP and fit with
+        who set it and why, whether they are a customer, and their newest note.
+
+        segment: "all", "icp_fit" (fit at or above fit_shown) or "not_connected" (not
+        connected on LinkedIn). query matches name, headline, ICP and notes. `profiles` are
+        the ICP file's profiles, the values update_person accepts.
+        """
+        parsed, viewer, people = await people_service(project_id, "list_people")
+        if segment not in {"all", "icp_fit", "not_connected"}:
+            raise ToolError('invalid: segment is "all", "icp_fit" or "not_connected"')
+        listed = await people_result(people.list(parsed, viewer))
+        rows = [person_row(person) for person in listed["people"]]
+        if segment == "icp_fit":
+            rows = [r for r in rows if (r["icp_fit"] or 0) >= listed["fit_shown"]]
+        elif segment == "not_connected":
+            rows = [r for r in rows if r["linkedin"] in {"none", "pending"}]
+        if query:
+            words = query.casefold()
+            texts = {str(p["id"]): p.get("notes_text") or "" for p in listed["people"]}
+            rows = [
+                r
+                for r in rows
+                if words
+                in " ".join([r["name"], r["headline"], r["icp"] or "", texts[r["id"]]]).casefold()
+            ]
+        rows.sort(key=lambda r: (r["icp_fit"] is None, -(r["icp_fit"] or 0), r["name"].casefold()))
+        limit = max(1, min(int(limit), 500))
+        return {
+            "people": rows[:limit],
+            "total": len(rows),
+            "fit_shown": listed["fit_shown"],
+            "profiles": listed["profiles"],
+            "links": {"people": f"{dashboard_url(settings)}/people?project={parsed}"},
+        }
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def get_person(project_id: str, person_id: str) -> dict[str, Any]:
+        """Read one person: their fields with who set each and why, every note (newest
+        first) and their timeline of reactions to the team's posts."""
+        parsed, viewer, people = await people_service(project_id, "get_person")
+        person = await people_result(
+            people.get(parsed, _mcp_uuid(person_id, field="person_id"), viewer)
+        )
+        return jsonable_encoder(person)
+
+    @server.tool(annotations=ToolAnnotations(destructiveHint=False, idempotentHint=True))
+    async def update_person(
+        project_id: str,
+        person_id: str,
+        icp: str | None = None,
+        not_a_fit: bool = False,
+        use_tin_score: bool = False,
+        customer: bool | None = None,
+    ) -> dict[str, Any]:
+        """Correct one person the way a member does in People, only as the founder asked.
+
+        Give at most one of: icp, a profile exactly as list_people's `profiles` (the person
+        fits it); not_a_fit=true (they fit no profile); use_tin_score=true (drop the member's
+        pick and use Tin's own score again). No run replaces a member's pick. customer marks
+        them a customer (true) or not (false).
+        """
+        parsed, viewer, people = await people_service(project_id, "update_person")
+        chosen = [icp is not None, not_a_fit, use_tin_score]
+        if sum(chosen) > 1:
+            raise ToolError("invalid: give one of icp, not_a_fit or use_tin_score")
+        if not any(chosen) and customer is None:
+            raise ToolError("invalid: nothing to change")
+        from tin_lite.people_service import UNCHANGED
+
+        fit: Any = UNCHANGED
+        if icp is not None:
+            fit = {"icp": icp}
+        elif not_a_fit:
+            fit = {"icp": None}
+        elif use_tin_score:
+            fit = None
+        person = await people_result(
+            people.update(
+                parsed,
+                _mcp_uuid(person_id, field="person_id"),
+                viewer,
+                fit=fit,
+                customer=customer,
+            )
+        )
+        return jsonable_encoder(person)
+
+    @server.tool(annotations=ToolAnnotations(destructiveHint=False))
+    async def add_person_note(project_id: str, person_id: str, note: str) -> dict[str, Any]:
+        """Add a note about a person: what the founder's team knows, such as that they are a
+        customer, a former intern or not a buyer. Write what the founder told you, plainly;
+        never a credential. Project members see it, and Tin reads it the next time it scores
+        the person."""
+        parsed, viewer, people = await people_service(project_id, "add_person_note")
+        person = await people_result(
+            people.add_note(parsed, _mcp_uuid(person_id, field="person_id"), viewer, note)
+        )
+        return jsonable_encoder(person)
+
+    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    async def delete_person_note(project_id: str, person_id: str, note_id: str) -> dict[str, Any]:
+        """Delete one of your own notes about a person (get_person lists them with their
+        ids); a teammate's note stays."""
+        parsed, viewer, people = await people_service(project_id, "delete_person_note")
+        person = await people_result(
+            people.delete_note(
+                parsed,
+                _mcp_uuid(person_id, field="person_id"),
+                _mcp_uuid(note_id, field="note_id"),
+                viewer,
+            )
+        )
+        return jsonable_encoder(person)
+
+    @server.tool(annotations=ToolAnnotations(destructiveHint=True))
+    async def forget_person(project_id: str, person_id: str, confirm_name: str) -> dict[str, Any]:
+        """Forget a person, only when the founder asked for it in their words: Tin deletes
+        their fields, notes and timeline in this project and never adds them again, even
+        when they react to a later post. `confirm_name` is their exact name from get_person."""
+        parsed, viewer, people = await people_service(project_id, "forget_person")
+        person_uuid = _mcp_uuid(person_id, field="person_id")
+        person = await people_result(people.get(parsed, person_uuid, viewer))
+        if " ".join(confirm_name.split()) != person["name"]:
+            raise ToolError("conflict: confirm_name does not match the person's name")
+        await people_result(people.forget(parsed, person_uuid, viewer))
+        return {"forgotten": True, "person_id": str(person_uuid)}
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_writing_style_guide(

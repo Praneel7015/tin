@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 from fastapi import FastAPI
+from mcp.server.mcpserver.exceptions import ToolError
 from test_connection_collection import USER
 from test_connection_collection import collection_db as collection_db
 from test_linkedin_engagers import (
@@ -220,3 +222,197 @@ async def test_a_person_forgotten_while_scored_is_skipped(collection_db):
     assert left[0]["fields"]["icp_fit"]["number"] == 0.9
     status = await f.db.pool.fetchval("SELECT status FROM workflow_runs WHERE id=$1", UUID(run_id))
     assert status == "succeeded"
+
+
+def mcp(f, monkeypatch, actor=USER):
+    from tin_lite.mcp_server import create_mcp_app
+
+    token = SimpleNamespace(subject=actor, scopes=["openid"], client_id="client_test")
+    monkeypatch.setattr("tin_lite.mcp_server.get_access_token", lambda: token)
+    runtime = SimpleNamespace(database=f.db, storage=f.storage)
+    settings = SimpleNamespace(
+        switchboard_public_url="https://tin.test", clerk_frontend_api_url="https://clerk.test"
+    )
+    return create_mcp_app(settings=settings, auth=SimpleNamespace(), runtime=lambda: runtime)[0]
+
+
+def structured(result):
+    return result[1] if isinstance(result, tuple) else result.structured_content
+
+
+async def test_a_member_picks_the_fit_and_can_give_tins_score_back(collection_db):
+    f = await fixture(collection_db)
+    await ran(f, [person(1, headline="Designer")])
+    path = f"/api/projects/{f.project.id}/people"
+    async with client(f) as http:
+        someone = (await http.get(path)).json()
+        assert someone["profiles"] == ["Software founders", "Service agencies"]
+        one = someone["people"][0]["id"]
+        assert someone["people"][0]["fields"]["icp_fit"]["value"] == 0.1
+
+        picked = await http.patch(f"{path}/{one}", json={"fit": {"icp": "Software founders"}})
+        assert picked.status_code == 200, picked.text
+        fields = picked.json()["fields"]
+        assert fields["icp"]["value"] == "Software founders" and fields["icp"]["by"] == "you"
+        assert fields["icp_fit"]["value"] == 1.0 and fields["icp_fit"]["stale"] is False
+        # Tin's score stays, so "Use Tin's score" can bring it back.
+        assert fields["icp_fit"]["previous"] == {"value": 0.1, "reason": "Headline says Designer"}
+
+        assert (
+            await http.patch(f"{path}/{one}", json={"fit": {"icp": "Agencies"}})
+        ).status_code == 422
+        assert (
+            await http.patch(f"{path}/{one}", json={"fit": {"icp": "x"}, "y": 1})
+        ).status_code == 422
+
+    # A run never scores a member's pick again, so it never pays for it.
+    router = Router()
+    item = post(1, 3)
+    await run_through(
+        work(f, Cloud([item], {item["thread_urn"]: [person(1, headline="Designer")]}), router),
+        await engagers_run(f),
+    )
+    assert router.requests == []
+    async with client(f) as http:
+        fields = (await http.get(f"{path}/{one}")).json()["fields"]
+        assert fields["icp_fit"]["value"] == 1.0 and fields["icp_fit"]["by"] == "you"
+
+        restored = (await http.patch(f"{path}/{one}", json={"fit": None})).json()["fields"]
+        assert restored["icp"]["value"] == "none" and restored["icp"]["by"] == "engagers"
+        assert restored["icp_fit"]["value"] == 0.1 and restored["icp_fit"]["previous"] is None
+
+        not_a_fit = (await http.patch(f"{path}/{one}", json={"fit": {"icp": None}})).json()
+        assert not_a_fit["fields"]["icp"]["value"] == "none"
+        assert not_a_fit["fields"]["icp_fit"]["value"] == 0.0
+
+        customer = (await http.patch(f"{path}/{one}", json={"customer": True})).json()
+        assert customer["fields"]["customer"]["value"] == "yes"
+        assert customer["fields"]["customer"]["by"] == "you"
+        assert (await http.patch(f"{path}/{one}", json={"customer": False})).json()["fields"][
+            "customer"
+        ]["value"] == "no"
+    async with client(f, "user_outsider") as http:
+        assert (await http.patch(f"{path}/{one}", json={"customer": True})).status_code == 404
+
+
+async def test_a_note_marks_the_score_old_and_the_next_run_reads_it(collection_db):
+    f = await fixture(collection_db)
+    await add_teammate(f)
+    await ran(f, [person(1)])
+    path = f"/api/projects/{f.project.id}/people"
+    note = "Interned with us in 2024.\n\nA friend of the team, not a buyer."
+    async with client(f) as http:
+        one = (await http.get(path)).json()["people"][0]["id"]
+        assert (await http.post(f"{path}/{one}/notes", json={"body": "  \n "})).status_code == 422
+        added = await http.post(f"{path}/{one}/notes", json={"body": f"  {note}\n"})
+        assert added.status_code == 201, added.text
+        found = added.json()
+        assert [(n["body"], n["by"], n["mine"]) for n in found["notes"]] == [(note, "you", True)]
+        assert found["fields"]["icp_fit"]["stale"] is True
+        assert found["fields"]["icp_fit"]["stale_reason"] == "note"
+        listed = (await http.get(path)).json()["people"][0]
+        assert listed["note"]["body"] == note and listed["note"]["count"] == 1
+        assert "friend of the team" in listed["notes_text"]
+    note_id = found["notes"][0]["id"]
+
+    # The next run sends the note with the headline, and the new score is current.
+    router = Router()
+    item = post(1, 3)
+    await run_through(
+        work(f, Cloud([item], {item["thread_urn"]: [person(1)]}), router), await engagers_run(f)
+    )
+    sent = json.loads(router.requests[0].messages[0].content)["people"]
+    assert sent[0]["notes"] == [note]
+    async with client(f) as http:
+        fields = (await http.get(f"{path}/{one}")).json()["fields"]
+        assert fields["icp_fit"]["stale"] is False
+    # Scored after the note, they aren't sent again.
+    again = Router()
+    await run_through(
+        work(f, Cloud([item], {item["thread_urn"]: [person(1)]}), again), await engagers_run(f)
+    )
+    assert again.requests == []
+
+    # Only the author changes or deletes a note.
+    async with client(f, TEAMMATE) as http:
+        seen = (await http.get(f"{path}/{one}")).json()["notes"][0]
+        assert seen["by"] == "a teammate" and seen["mine"] is False
+        changed = await http.patch(f"{path}/{one}/notes/{note_id}", json={"body": "Mine now"})
+        assert changed.status_code == 403
+        assert (await http.delete(f"{path}/{one}/notes/{note_id}")).status_code == 403
+    async with client(f) as http:
+        edited = await http.patch(f"{path}/{one}/notes/{note_id}", json={"body": "Ex-intern."})
+        assert edited.json()["notes"][0]["body"] == "Ex-intern."
+        assert edited.json()["notes"][0]["edited"] is True
+        assert edited.json()["fields"]["icp_fit"]["stale"] is True
+        gone = (await http.delete(f"{path}/{one}/notes/{note_id}")).json()
+        assert gone["notes"] == []
+        assert (await http.delete(f"{path}/{one}/notes/{note_id}")).status_code == 404
+        await http.post(f"{path}/{one}/notes", json={"body": "Another"})
+        assert (await http.delete(f"{path}/{one}")).status_code == 204
+    assert await f.db.pool.fetchval("SELECT count(*) FROM record_notes") == 0
+
+
+async def test_mcp_reads_and_corrects_people_like_a_member(collection_db, monkeypatch):
+    f = await fixture(collection_db)
+    await ran(f, [person(1), person(2, headline="Designer")])
+    server = mcp(f, monkeypatch)
+    project = str(f.project.id)
+    listed = structured(await server.call_tool("list_people", {"project_id": project}))
+    assert [p["name"] for p in listed["people"]] == ["Person 1", "Person 2"]
+    assert listed["profiles"] == ["Software founders", "Service agencies"]
+    assert listed["links"]["people"].endswith(f"/people?project={project}")
+    designer = listed["people"][1]["id"]
+
+    fitting = structured(
+        await server.call_tool("list_people", {"project_id": project, "segment": "icp_fit"})
+    )
+    assert [p["name"] for p in fitting["people"]] == ["Person 1"]
+    changed = structured(
+        await server.call_tool(
+            "update_person",
+            {
+                "project_id": project,
+                "person_id": designer,
+                "icp": "Service agencies",
+                "customer": True,
+            },
+        )
+    )
+    assert changed["fields"]["icp"]["value"] == "Service agencies"
+    assert changed["fields"]["customer"]["value"] == "yes"
+    noted = structured(
+        await server.call_tool(
+            "add_person_note",
+            {"project_id": project, "person_id": designer, "note": "Started as our intern."},
+        )
+    )
+    assert noted["notes"][0]["body"] == "Started as our intern."
+    found = structured(
+        await server.call_tool("list_people", {"project_id": project, "query": "intern"})
+    )
+    assert [p["name"] for p in found["people"]] == ["Person 2"]
+    assert found["people"][0]["customer"] is True and found["people"][0]["note_count"] == 1
+
+    with pytest.raises(ToolError, match="conflict"):
+        await server.call_tool(
+            "forget_person", {"project_id": project, "person_id": designer, "confirm_name": "P2"}
+        )
+    with pytest.raises(ToolError, match="invalid"):
+        await server.call_tool(
+            "update_person",
+            {"project_id": project, "person_id": designer, "icp": "x", "not_a_fit": True},
+        )
+    forgotten = structured(
+        await server.call_tool(
+            "forget_person",
+            {"project_id": project, "person_id": designer, "confirm_name": "Person 2"},
+        )
+    )
+    assert forgotten["forgotten"] is True
+    with pytest.raises(ToolError, match="not_found"):
+        await server.call_tool("get_person", {"project_id": project, "person_id": designer})
+
+    outsider = mcp(f, monkeypatch, actor="user_outsider")
+    with pytest.raises(ToolError, match="not_found"):
+        await outsider.call_tool("list_people", {"project_id": project})

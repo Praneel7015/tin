@@ -99,6 +99,7 @@ from tin_lite.paid_ads_proposals import (
     discard_paid_ads_proposal as discard_paid_ads_proposal_service,
 )
 from tin_lite.paid_ads_proposals import list_paid_ads_proposals as list_paid_ads_proposals_service
+from tin_lite.people_api import router as people_router
 from tin_lite.private_workflow_api import router as private_workflow_router
 from tin_lite.private_workflows import private_execution_ready, workflow_source_view
 from tin_lite.product_urls import dashboard_url
@@ -169,6 +170,7 @@ router.include_router(technical_fix_router)
 router.include_router(organic_system_router)
 router.include_router(project_connections_router)
 router.include_router(project_authors_router)
+router.include_router(people_router)
 
 router.include_router(collection_router)
 router.include_router(public_catalog_router)
@@ -470,6 +472,8 @@ ASSET_VERSION = hashlib.sha256(
             "output-comparison-page.js",
             "output-comparison.css",
             "output-comparison.js",
+            "people.css",
+            "people.js",
             "pierre-trees.js",
             "system-week.js",
             "theme.js",
@@ -503,6 +507,7 @@ def _static_page(filename: str, request: Request) -> Response:
                 "/chat",
                 "/activity",
                 "/decisions",
+                "/people",
                 "/files",
                 "/integrations",
                 "/billing",
@@ -1495,6 +1500,7 @@ class GoogleAdsLinkRequest(BaseModel):
 @router.api_route("/chat", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/activity", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/decisions", methods=["GET", "HEAD"], include_in_schema=False)
+@router.api_route("/people", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/files", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/integrations", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/billing", methods=["GET", "HEAD"], include_in_schema=False)

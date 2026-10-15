@@ -4,8 +4,8 @@
 LinkedIn session, then each post's reactions. Every person who reacted becomes a People record
 (matched on their LinkedIn profile ID) with their name, headline and whether they're already a
 connection, and a `reacted` event per post. A model step scores each person against the
-project's ICP file. The list is rendered to project Files as a CSV and a short summary, the
-view until `/people` exists.
+project's ICP file. The list is rendered to project Files as a CSV and a short summary; the
+`/people` view reads the same records.
 
 Only identifiers and counts pass through Temporal. Names, headlines and scores stay in Postgres
 and in the rendered files.
@@ -14,6 +14,7 @@ and in the rendered files.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
@@ -144,6 +145,34 @@ def icp_profiles(text: str) -> list[str]:
     labelled = [n for n, body in named if any(_ICP_LABEL.match(line) for line in body)]
     names = labelled or [n for n, _ in named]
     return list(dict.fromkeys(names))[:MAX_PROFILES]
+
+
+async def read_icp(storage, project) -> dict:
+    """The ICP file at the project's head: its path, revision, profiles and definition.
+
+    The definition names the file and a digest of its words, so scores go stale when the
+    words change, not on every commit. Empty when the project has no ICP with profiles.
+    """
+
+    repo = await storage.get_repo(project.state_repo_id)
+    revision = await storage.head_sha(repo, project.canonical_branch)
+    if revision:
+        for path in ICP_PATHS:
+            raw = await storage.read_canonical_artifact_if_exists(
+                repo_id=project.state_repo_id, commit_sha=revision, path=path
+            )
+            if raw:
+                text = raw[:ICP_BYTES].decode("utf-8", "replace")
+                profiles = icp_profiles(text)
+                if profiles:
+                    digest = hashlib.sha256(text.encode()).hexdigest()[:12]
+                    return {
+                        "path": path,
+                        "revision": revision,
+                        "profiles": profiles,
+                        "definition": f"{path}@{digest}",
+                    }
+    return {}
 
 
 def score_instructions(profiles: list[str]) -> str:

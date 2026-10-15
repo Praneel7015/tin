@@ -69,6 +69,8 @@
     <script src="/assets/x-posts.js?v={{ASSET_VERSION}}" defer></script>
     <link rel="stylesheet" href="/assets/linkedin-posts.css?v={{ASSET_VERSION}}" />
     <script src="/assets/linkedin-posts.js?v={{ASSET_VERSION}}" defer></script>
+    <link rel="stylesheet" href="/assets/people.css?v={{ASSET_VERSION}}" />
+    <script src="/assets/people.js?v={{ASSET_VERSION}}" defer></script>
     <script src="/assets/auth-appearance.js?v={{ASSET_VERSION}}" defer></script>
     <script src="/assets/project-connections.js?v={{ASSET_VERSION}}" defer></script>
     <script src="/assets/app.js?v={{ASSET_VERSION}}-project-cleanup" defer></script>
@@ -138,6 +140,13 @@
             </svg>
             <span>Decisions</span>
             <small id="decision-count"></small>
+          </button>
+          <button class="nav-item" type="button" data-view="people" hidden>
+            <svg aria-hidden="true" viewBox="0 0 16 16">
+              <circle cx="8" cy="5.2" r="2.6" />
+              <path d="M2.8 13.6c.4-2.6 2.6-4.2 5.2-4.2s4.8 1.6 5.2 4.2" />
+            </svg>
+            <span>People</span>
           </button>
           <button class="nav-item" type="button" data-view="files">
             <svg aria-hidden="true" viewBox="0 0 16 16">

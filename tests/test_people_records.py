@@ -185,12 +185,14 @@ async def test_values_keep_lineage_and_a_members_edit(publication_db):
                     conn, project_id, person, [bad], set_by_kind="run", set_by=RUN
                 )
         fields = (await records.people(conn, project_id))[0]["fields"]
+    assert fields["name"].pop("set_at")
     assert fields["name"] == {
         "text": "Jane",
         "number": None,
         "reason": "",
         "definition": "",
         "set_by_kind": "member",
+        "set_by": "u1",
     }
     assert fields["icp_fit"]["number"] == 0.82 and fields["icp_fit"]["definition"] == "icp-2"
     assert fields["headline"]["text"] is None

@@ -59,18 +59,18 @@ const MCP_URL = document.documentElement.dataset.mcpUrl?.startsWith("http")
 function configuredOrigin(value) {
   return value && !value.startsWith("{{") ? new URL(value).origin : window.location.origin;
 }
-const ALLOWED_VIEWS = new Set(["chat", "workflows", "activity", "decisions", "files", "integrations"]);
+const ALLOWED_VIEWS = new Set(["chat", "workflows", "activity", "decisions", "people", "files", "integrations"]);
 if (BILLING_ENABLED) ALLOWED_VIEWS.add("billing");
 // One small History API router. Legacy bookmarks are input-only compatibility;
 // new links use paths. Document heading fragments are not application routes.
-const DASHBOARD_ROUTE = /^(?:system|workflows|chat|activity|decisions|files|integrations|connect|billing|file|(?:document|task|compare)\/[^/?]+)(?:\?|$)/;
+const DASHBOARD_ROUTE = /^(?:system|workflows|chat|activity|decisions|people|files|integrations|connect|billing|file|(?:document|task|compare)\/[^/?]+)(?:\?|$)/;
 // `carry` names the only current query parameters that survive; null keeps the rest.
 function routeUrl(route, base = window.location.href, carry = null) {
   const url = new URL(base);
   const [path, query = ""] = route.replace(/^#?\/?/, "").split("?", 2);
   url.pathname = `/${path === "workflows" ? "system" : path}`;
   if (carry) for (const key of [...url.searchParams.keys()]) if (!carry.includes(key)) url.searchParams.delete(key);
-  for (const key of ["return", "taskPath", "source", "path", "revision", "reviewRun", "compareRun", "back", "x_draft", "x_run", "x_back"]) url.searchParams.delete(key);
+  for (const key of ["return", "taskPath", "source", "path", "revision", "reviewRun", "compareRun", "back", "x_draft", "x_run", "x_back", "person"]) url.searchParams.delete(key);
   for (const [key, value] of new URLSearchParams(query)) url.searchParams.set(key, value);
   url.hash = "";
   return `${url.pathname}${url.search}`;
@@ -1306,6 +1306,9 @@ function updateRail() {
   workflowCount.textContent = runningCount ? String(runningCount) : "";
   const waiting = decisionItems().length;
   decisionCount.textContent = waiting ? String(waiting) : "";
+  // People shows where a workflow that finds people is offered; the only one is gated per project.
+  document.querySelector('.nav-item[data-view="people"]').hidden =
+    state.view !== "people" && !state.workflows.some((workflow) => workflow.key === "social.linkedin_engagers");
   updateAgentRail();
 }
 
@@ -1893,6 +1896,7 @@ function render() {
     window.TinXPosts?.close();
     window.TinLinkedInPosts?.close();
   }
+  if (state.view !== "people" || state.projectAccess !== "ready") window.TinPeople?.close();
   state.comparePage?.destroy();
   state.comparePage = null;
   disposeDocument();
@@ -1923,6 +1927,7 @@ function render() {
   if (state.view === "workflows" && !document.querySelector(".system-config-form")) renderWorkflows();
   if (state.view === "activity") renderActivity();
   if (state.view === "decisions") renderDecisions();
+  if (state.view === "people") renderPeople();
   if (state.view === "files") renderFiles();
   if (state.view === "integrations") renderIntegrations();
   if (state.view === "billing") window.TinBilling.mount(main, {
@@ -1938,6 +1943,16 @@ function render() {
     document.querySelector('[data-view="decisions"]').classList.add("is-active");
     renderOutputComparison();
   }
+}
+
+function renderPeople() {
+  window.TinPeople.mount(main, {
+    api,
+    projectId: state.project.id,
+    projectName: state.project.name,
+    toast: showToast,
+    openSystem: () => navigate("workflows"),
+  });
 }
 
 function personalProjectName() {

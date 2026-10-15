@@ -1,8 +1,9 @@
 # People records
 
 A project's people records hold one lasting record per person the project knows. This is the
-first slice of the records design (#435): Tin's own workflows write them. Segments, a commit
-log, agent copies (`pull_records`, `commit_record_changes`) and the `/people` view come later.
+first slice of the records design (#435): Tin's own workflows write them, and members read them
+in [the People view](#the-people-view). Custom fields, saved segments, a commit log and agent
+copies (`pull_records`, `commit_record_changes`) come later.
 `src/tin_lite/people_records.py` is the only writer.
 
 ## Tables
@@ -54,6 +55,34 @@ The built-in fields are:
 Events are only added. Each has an `event_key` that is unique per project: an engagement
 keys on the post, the person and the kind, so reading the same post again adds nothing. An
 event written to a record that later merged counts under the survivor.
+
+## The People view
+
+`/people` lists a project's people for its members (`src/tin_lite/static/people.js`, Paper
+boards PEOPLE-A1, C1 and C1b). It reads `GET /api/projects/{project_id}/people`
+(`people_records.directory`), at most 5,000 people, newest first; the page sorts, searches,
+segments and pages them.
+
+- **Grid:** name, headline, ICP, ICP fit, LinkedIn (connected or not) and last touch.
+  - Last touch is the latest event. LinkedIn gives no time for a reaction, so a reaction counts
+    on the post's date.
+  - The segments are all people, ICP fit (0.6 or more) and not connected yet.
+- **Score hover:** the reason, the score, the ICP and when it was set.
+  - A score computed under an earlier `strategy/ICP.md` reads "old": the view compares each
+    value's `definition` with the ICP file at the project's head
+    (`linkedin_engagers.read_icp`), and the next engagers run rescores it.
+- **Person panel:** `GET …/people/{person_id}` adds the timeline. The address keeps the person
+  (`?person=`), so a reload opens them again.
+  - Each field says who set it: the workflow's short name ("engagers"), or "you" and
+    "a teammate" for a member's value.
+  - A reaction says whose post it was: the run read the LinkedIn of the member who started it.
+- **Forget:** `DELETE …/people/{person_id}` runs `forget` after a confirmation in the panel's
+  footer. The engagers list in Files drops the person at its next run. A person forgotten while
+  a run scores them is skipped, not an error.
+
+The menu shows People where the project is offered a workflow that finds people (today only
+`social.linkedin_engagers`, which is gated per project), and on `/people` itself. Any project
+member can read and forget the project's people; other users get 404.
 
 ## Forgetting and deletion
 

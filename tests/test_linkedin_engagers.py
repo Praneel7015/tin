@@ -344,12 +344,13 @@ async def test_a_run_keeps_everyone_who_reacted_scores_them_and_writes_the_list(
     assert by_member[member(5)]["events"] == {"reacted": 2}
     assert by_member[member(1)]["fields"]["linkedin_relationship"]["text"] == "connected"
     assert by_member[member(200)]["fields"]["icp"]["text"] == "none"
-    assert by_member[member(201)]["fields"]["headline"] == {
+    headline = by_member[member(201)]["fields"]["headline"]
+    assert {k: headline[k] for k in ("text", "number", "reason", "definition", "set_by")} == {
         "text": None,
         "number": None,
         "reason": "LinkedIn showed none",
         "definition": "",
-        "set_by_kind": "run",
+        "set_by": run_id,
     }
     fit = by_member[member(7)]["fields"]["icp_fit"]
     assert fit["number"] == 0.9 and fit["definition"].startswith("strategy/ICP.md@")

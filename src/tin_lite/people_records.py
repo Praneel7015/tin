@@ -15,7 +15,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 from uuid import UUID, uuid4
@@ -387,16 +387,20 @@ async def forget(conn, project_id: UUID, record_id: UUID) -> bool:
         return True
 
 
-async def people(conn, project_id: UUID, *, limit: int = 5000) -> list[dict[str, Any]]:
-    """Current people with identifiers, values and event counts, newest first."""
+async def people(
+    conn, project_id: UUID, *, limit: int = 5000, only: UUID | None = None
+) -> list[dict[str, Any]]:
+    """Current people with identifiers, values and event counts, newest first; `only` reads
+    one."""
 
     rows = await conn.fetch(
-        """SELECT r.id, r.created_at, r.updated_at,
+        """SELECT r.id, r.source, r.created_at, r.updated_at,
                (SELECT jsonb_object_agg(i.kind, i.value) FROM record_identifiers i
                 WHERE i.record_id = r.id) AS identifiers,
                (SELECT jsonb_object_agg(v.field, jsonb_build_object(
                     'text', v.value_text, 'number', v.value_number, 'reason', v.reason,
-                    'definition', v.definition, 'set_by_kind', v.set_by_kind))
+                    'definition', v.definition, 'set_by_kind', v.set_by_kind,
+                    'set_by', v.set_by, 'set_at', v.set_at))
                 FROM record_values v WHERE v.record_id = r.id) AS fields,
                (SELECT jsonb_object_agg(kind, n) FROM (
                     SELECT e.kind, count(*) AS n FROM record_events e
@@ -405,11 +409,13 @@ async def people(conn, project_id: UUID, *, limit: int = 5000) -> list[dict[str,
                     GROUP BY e.kind) counted) AS events
            FROM records r
            WHERE r.project_id = $1 AND r.type = $2 AND r.merged_into IS NULL
+             AND ($4::uuid IS NULL OR r.id = $4)
            ORDER BY r.created_at DESC, r.id
            LIMIT $3""",
         project_id,
         PERSON,
         limit,
+        only,
     )
     result = []
     for row in rows:
@@ -422,8 +428,176 @@ async def people(conn, project_id: UUID, *, limit: int = 5000) -> list[dict[str,
                 "profile_url": profile_link(identifiers),
                 "fields": fields,
                 "events": json.loads(row["events"]) if row["events"] else {},
+                "source": row["source"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
         )
     return result
+
+
+# What the People view reads: each person's fields with who set them, and their timeline.
+
+# Short names for the workflows that write records, shown beside a value as who set it.
+WRITERS = {"social.linkedin_engagers": "engagers"}
+VIEW_FIELDS = ("icp", "icp_fit", "linkedin_relationship")
+# Values computed under a definition, such as the ICP file, go stale when it changes.
+DEFINED_FIELDS = ("icp", "icp_fit")
+POST = re.compile(r"urn:li:(?:activity|ugcPost|share):[0-9]{1,30}")
+
+
+def writer(key: str) -> str:
+    return WRITERS.get(key) or key.rsplit(".", 1)[-1].replace("_", " ")
+
+
+async def _run_writers(conn, run_ids: set[str]) -> dict[str, dict[str, str | None]]:
+    """Each run's workflow name and who started it."""
+
+    ids = []
+    for value in run_ids:
+        try:
+            ids.append(UUID(value))
+        except ValueError:
+            continue
+    rows = await conn.fetch(
+        """SELECT r.id, COALESCE(w.key, r.executor) AS key, r.started_by_clerk_user_id
+           FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id
+           WHERE r.id = ANY($1::uuid[])""",
+        ids,
+    )
+    return {
+        str(row["id"]): {"by": writer(row["key"]), "started_by": row["started_by_clerk_user_id"]}
+        for row in rows
+    }
+
+
+def _when(row) -> datetime:
+    """When an event happened: its own time, else the post's date, else when Tin saw it."""
+
+    if row["occurred_at"]:
+        return row["occurred_at"]
+    try:
+        posted = datetime.fromisoformat(row["posted_at"])
+    except (TypeError, ValueError):
+        return row["recorded_at"]
+    return posted if posted.tzinfo else posted.replace(tzinfo=UTC)
+
+
+def _fields(person: dict, runs: dict, *, viewer: str, definition: str) -> dict[str, dict]:
+    shown = {}
+    for key in VIEW_FIELDS:
+        value = person["fields"].get(key)
+        if not value:
+            continue
+        if value["set_by_kind"] == "member":
+            by = "you" if value["set_by"] == viewer else "a teammate"
+        else:
+            by = (runs.get(value["set_by"]) or {}).get("by") or "Tin"
+        shown[key] = {
+            "value": value["number"] if key == "icp_fit" else value["text"],
+            "reason": value["reason"],
+            "by": by,
+            "at": value["set_at"],
+            "stale": bool(
+                key in DEFINED_FIELDS
+                and definition
+                and value["definition"]
+                and value["definition"] != definition
+            ),
+            "definition": value["definition"].split("@", 1)[0],
+        }
+    return shown
+
+
+async def directory(
+    conn,
+    project_id: UUID,
+    *,
+    viewer: str,
+    definition: str = "",
+    limit: int = 5000,
+    only: UUID | None = None,
+) -> list[dict[str, Any]]:
+    """Every current person as the People view lists them, newest first.
+
+    `definition` is the current ICP definition; a score computed under another one is stale.
+    """
+
+    listed = await people(conn, project_id, limit=limit, only=only)
+    touches: dict[UUID, dict] = {}
+    for row in await conn.fetch(
+        """SELECT COALESCE(r.merged_into, r.id) AS person, e.kind, e.occurred_at,
+               e.recorded_at, e.detail->>'posted_at' AS posted_at
+           FROM record_events e JOIN records r ON r.id = e.record_id
+           WHERE e.project_id = $1 AND ($2::uuid IS NULL OR COALESCE(r.merged_into, r.id) = $2)""",
+        project_id,
+        only,
+    ):
+        at = _when(row)
+        if row["person"] not in touches or at > touches[row["person"]]["at"]:
+            touches[row["person"]] = {"kind": row["kind"], "at": at}
+    runs = await _run_writers(
+        conn,
+        {
+            value["set_by"]
+            for person in listed
+            for value in person["fields"].values()
+            if value["set_by_kind"] == "run"
+        },
+    )
+    return [
+        {
+            "id": person["id"],
+            "name": (person["fields"].get("name") or {}).get("text") or "",
+            "headline": (person["fields"].get("headline") or {}).get("text") or "",
+            "profile_url": person["profile_url"],
+            "fields": _fields(person, runs, viewer=viewer, definition=definition),
+            "last_touch": touches.get(person["id"]),
+            "added": {"at": person["created_at"], "by": writer(person["source"])},
+        }
+        for person in listed
+    ]
+
+
+async def person(
+    conn, project_id: UUID, record_id: UUID, *, viewer: str, definition: str = ""
+) -> dict[str, Any] | None:
+    """One person with their timeline, newest first; None once they're gone."""
+
+    target = await current(conn, project_id, record_id)
+    if target is None:
+        return None
+    found = await directory(
+        conn, project_id, viewer=viewer, definition=definition, limit=1, only=target
+    )
+    if not found:
+        return None
+    rows = await conn.fetch(
+        """SELECT e.kind, e.occurred_at, e.recorded_at, e.detail, e.run_id,
+               e.detail->>'posted_at' AS posted_at
+           FROM record_events e JOIN records r ON r.id = e.record_id
+           WHERE e.project_id = $1 AND (r.id = $2 OR r.merged_into = $2)""",
+        project_id,
+        target,
+    )
+    runs = await _run_writers(conn, {str(row["run_id"]) for row in rows if row["run_id"]})
+    events = []
+    for row in rows:
+        detail = json.loads(row["detail"]) if isinstance(row["detail"], str) else row["detail"]
+        post = detail.get("post") if isinstance(detail.get("post"), str) else ""
+        reaction = detail.get("reaction")
+        started_by = (runs.get(str(row["run_id"])) or {}).get("started_by")
+        events.append(
+            {
+                "kind": row["kind"],
+                "at": _when(row),
+                "reaction": reaction if isinstance(reaction, str) else None,
+                "post_url": (
+                    f"https://www.linkedin.com/feed/update/{post}/" if POST.fullmatch(post) else ""
+                ),
+                # Whose post: a run reads the LinkedIn of the member who started it.
+                "yours": started_by == viewer if started_by else None,
+            }
+        )
+    events.sort(key=lambda event: event["at"], reverse=True)
+    return {**found[0], "events": events}

@@ -2582,7 +2582,9 @@ def create_mcp_app(
             if workflow.executor == "connections.collect":
                 from tin_lite.connection_collection_connection import default_inputs
 
-                inputs = await default_inputs(services.database, parsed_project_id, inputs or {})
+                inputs = await default_inputs(
+                    services.database, parsed_project_id, inputs or {}, member=clerk_user_id
+                )
             normalized_inputs = normalize_workflow_inputs(
                 schema=schema,
                 project_id=parsed_project_id,
@@ -4885,7 +4887,8 @@ def create_mcp_app(
         await require_project(parsed_project_id, token, tool_name="list_integrations")
         service = runtime().integrations
         connections = {
-            item.provider_key: item for item in await service.list_connections(parsed_project_id)
+            item.provider_key: item
+            for item in await service.list_connections(parsed_project_id, member=clerk_user_id)
         }
         return [
             _mcp_integration_view(
@@ -5168,7 +5171,7 @@ def create_mcp_app(
         parsed_project_id = _mcp_uuid(project_id, field="project_id")
         await require_project(parsed_project_id, token, tool_name="disconnect_integration")
         disconnected = await runtime().integrations.disconnect(
-            project_id=parsed_project_id, provider_key=provider_key
+            project_id=parsed_project_id, provider_key=provider_key, member=clerk_user_id
         )
         if not disconnected:
             raise LookupError("integration not found")

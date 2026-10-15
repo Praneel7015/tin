@@ -131,7 +131,9 @@ async def record_onboarding_picks(
                     raise LookupError("project not found")
                 connected = {
                     item.provider_key: item
-                    for item in await runtime.integrations.list_connections(project.id)
+                    for item in await runtime.integrations.list_connections(
+                        project.id, member=run.started_by_clerk_user_id
+                    )
                 }
                 for pick in connections:
                     if pick.decision != "connected":

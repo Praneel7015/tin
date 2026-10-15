@@ -252,7 +252,9 @@ async def start_workflow_run(
                 "execution": existing.input.get("execution", "local_only"),
             }
         else:
-            input_payload = await default_inputs(runtime.database, project_id, input_payload or {})
+            input_payload = await default_inputs(
+                runtime.database, project_id, input_payload or {}, member=started_by_clerk_user_id
+            )
     normalized_inputs = normalize_workflow_inputs(
         schema=schema,
         project_id=project_id,

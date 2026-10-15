@@ -738,8 +738,11 @@ class IntegrationService:
             and self._settings.github_webhook_secret
         )
 
-    async def list_connections(self, project_id: UUID) -> list[IntegrationConnection]:
-        return await self._database.list_integration_connections(project_id)
+    async def list_connections(
+        self, project_id: UUID, *, member: str | None = None
+    ) -> list[IntegrationConnection]:
+        """With `member`, the LinkedIn reading connection listed is that member's own."""
+        return await self._database.list_integration_connections(project_id, member=member)
 
     @property
     def custom(self):
@@ -4421,20 +4424,39 @@ class IntegrationService:
         )
         return updated
 
-    async def disconnect(self, *, project_id: UUID, provider_key: str) -> bool:
+    async def disconnect(
+        self, *, project_id: UUID, provider_key: str, member: str | None = None
+    ) -> bool:
         if provider_key == LINKEDIN_PROVIDER:
+            # A member disconnects their own LinkedIn; teammates' connections stay. Without a
+            # member (project deletion), every one goes.
             async with self._database.pool.acquire() as conn, conn.transaction():
                 await conn.execute(
                     "UPDATE connection_collection_jobs SET "
                     "state='partial',reason='disconnected',generation=generation+1,lease_hash=NULL,"
                     "lease_expires_at=NULL WHERE project_id=$1 "
+                    "AND ($2::text IS NULL OR clerk_user_id=$2) "
                     "AND state NOT IN ('completed','partial','failed','stopped')",
                     project_id,
+                    member,
+                )
+                # A finished job can still name the browser that last held its lease; the
+                # browser goes with the connection, so the job forgets it first.
+                await conn.execute(
+                    "UPDATE connection_collection_jobs SET lease_device_id=NULL "
+                    "WHERE lease_device_id IN (SELECT d.id FROM connection_extension_devices d "
+                    "JOIN integration_connections c ON c.id=d.connection_id "
+                    "WHERE c.project_id=$1 AND c.provider_key='network.linkedin' "
+                    "AND ($2::text IS NULL OR c.connected_by_clerk_user_id=$2))",
+                    project_id,
+                    member,
                 )
                 result = await conn.execute(
-                    "DELETE FROM integration_connections WHERE project_id=$1 AND provider_key=$2",
+                    "DELETE FROM integration_connections WHERE project_id=$1 AND provider_key=$2 "
+                    "AND ($3::text IS NULL OR connected_by_clerk_user_id=$3)",
                     project_id,
                     provider_key,
+                    member,
                 )
                 return result != "DELETE 0"
         definition = self._definition(provider_key)

@@ -121,13 +121,15 @@ class CollectionStore:
                 return {"project_id": str(project_id), "device_id": str(previous["id"])}
             if attempt["used_at"]:
                 raise CollectionError("pairing_consumed")
-            # Serialize all pairings for the same project before replacing its binding.
+            # Serialize all pairings for the same project before replacing a binding. Each
+            # member has their own LinkedIn connection: pairing replaces only the member's.
             await conn.fetchval("SELECT id FROM projects WHERE id=$1 FOR UPDATE", project_id)
             if await conn.fetchval(
                 """SELECT EXISTS(SELECT 1 FROM connection_collection_jobs
-                    WHERE project_id=$1 AND state NOT IN
+                    WHERE project_id=$1 AND clerk_user_id=$2 AND state NOT IN
                     ('completed','partial','failed','stopped'))""",
                 project_id,
+                user,
             ):
                 raise CollectionError("collection_active")
             connection_id = await conn.fetchval(
@@ -135,7 +137,8 @@ class CollectionStore:
                 (id,project_id,provider_key,external_account_id,external_account_label,
                  configuration,connected_by_clerk_user_id)
                 VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)
-                ON CONFLICT (project_id,provider_key) DO UPDATE SET
+                ON CONFLICT (project_id,provider_key,connected_by_clerk_user_id)
+                    WHERE provider_key='network.linkedin' DO UPDATE SET
                     external_account_id=EXCLUDED.external_account_id,
                     external_account_label=EXCLUDED.external_account_label,
                     configuration=EXCLUDED.configuration,status='connected',
@@ -159,8 +162,9 @@ class CollectionStore:
             )
             await conn.execute(
                 """UPDATE connection_extension_devices SET revoked_at=now()
-                WHERE project_id=$1 AND revoked_at IS NULL""",
+                WHERE project_id=$1 AND clerk_user_id=$2 AND revoked_at IS NULL""",
                 project_id,
+                user,
             )
             device_id = uuid4()
             await conn.execute(
@@ -207,11 +211,14 @@ class CollectionStore:
             )
             if existing:
                 return record(existing)
+            # A run collects with the LinkedIn of the member who started it.
             connection = await conn.fetchrow(
                 """SELECT * FROM integration_connections
-                WHERE project_id=$1 AND provider_key=$2 AND status='connected' FOR SHARE""",
+                WHERE project_id=$1 AND provider_key=$2 AND status='connected'
+                  AND connected_by_clerk_user_id=$3 FOR SHARE""",
                 run.project_id,
                 PROVIDER,
+                run.started_by_clerk_user_id,
             )
             if (
                 not connection

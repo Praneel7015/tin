@@ -175,7 +175,9 @@ class FakeIntegrationDatabase:
         self.connections[(connection.project_id, connection.provider_key)] = connection
         return connection
 
-    async def list_integration_connections(self, project_id: UUID) -> list[IntegrationConnection]:
+    async def list_integration_connections(
+        self, project_id: UUID, *, member: str | None = None
+    ) -> list[IntegrationConnection]:
         return [item for item in self.connections.values() if item.project_id == project_id]
 
     async def get_integration_connection(self, **values) -> IntegrationConnection | None:

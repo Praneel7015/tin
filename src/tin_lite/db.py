@@ -637,14 +637,21 @@ class Database:
         )
         return [_project_membership(row) for row in rows]
 
-    async def list_integration_connections(self, project_id: UUID) -> list[IntegrationConnection]:
+    async def list_integration_connections(
+        self, project_id: UUID, *, member: str | None = None
+    ) -> list[IntegrationConnection]:
+        """The project's connections. Each member has their own LinkedIn reading connection;
+        with `member`, only theirs is listed."""
         rows = await self.pool.fetch(
             """
             SELECT * FROM integration_connections
             WHERE project_id = $1
-            ORDER BY provider_key
+              AND (provider_key <> 'network.linkedin' OR $2::text IS NULL
+                   OR connected_by_clerk_user_id = $2)
+            ORDER BY provider_key, connected_by_clerk_user_id
             """,
             project_id,
+            member,
         )
         return [_integration_connection(row) for row in rows]
 
@@ -737,6 +744,9 @@ class Database:
         credential_key_version: str | None,
         connected_by_clerk_user_id: str,
     ) -> IntegrationConnection:
+        if provider_key == "network.linkedin":
+            # Each member's LinkedIn reading connection is made by pairing Tin for Chrome.
+            raise ValueError("LinkedIn reading connections are made by pairing, per member")
         row = await (borrowed_connection(self) or self.pool).fetchrow(
             """
             INSERT INTO integration_connections (
@@ -750,7 +760,8 @@ class Database:
                 $1, $2, $3, 'connected', $4, $5, $6::jsonb,
                 $7, $8, $9, now(), NULL
             )
-            ON CONFLICT (project_id, provider_key) DO UPDATE
+            ON CONFLICT (project_id, provider_key) WHERE provider_key <> 'network.linkedin'
+            DO UPDATE
             SET status = 'connected',
                 external_account_id = EXCLUDED.external_account_id,
                 external_account_label = EXCLUDED.external_account_label,

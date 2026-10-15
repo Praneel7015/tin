@@ -393,12 +393,12 @@ async def test_a_run_keeps_everyone_who_reacted_scores_them_and_writes_the_list(
     )
 
 
-async def test_only_the_member_who_connected_linkedin_reads_their_posts(collection_db):
+async def test_a_member_reads_only_with_their_own_linkedin(collection_db):
     f = await fixture(collection_db)
     other = "user_someoneelse"
     await f.db.grant_project_membership(project_id=f.project.id, clerk_user_id=other)
     run_id = await engagers_run(f, by=other)
-    with pytest.raises(IntegrationAuthorizationError, match="Only the member who connected"):
+    with pytest.raises(IntegrationAuthorizationError, match="Connect your own LinkedIn"):
         await work(f, Cloud([], {})).prepare(run_id)
 
 

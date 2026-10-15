@@ -124,17 +124,18 @@ class LinkedInEngagersActivities:
             raise WorkflowInputError("Reading LinkedIn isn't turned on for this project yet.")
         if not cloud_ready(self.settings) or self.cipher is None:
             raise IntegrationUpstreamError("Tin's LinkedIn reader isn't available right now.")
+        # Each member has their own LinkedIn connection; a run reads its starter's posts.
         connection = await self.db.pool.fetchrow(
             """SELECT * FROM integration_connections
-               WHERE project_id = $1 AND provider_key = $2 AND status = 'connected'""",
+               WHERE project_id = $1 AND provider_key = $2 AND status = 'connected'
+                 AND connected_by_clerk_user_id = $3""",
             run.project_id,
             PROVIDER,
+            run.started_by_clerk_user_id,
         )
         if connection is None:
-            raise IntegrationAuthorizationError("Connect LinkedIn under Integrations first.")
-        if connection["connected_by_clerk_user_id"] != run.started_by_clerk_user_id:
             raise IntegrationAuthorizationError(
-                "Only the member who connected LinkedIn can read their own posts."
+                "Connect your own LinkedIn under Integrations, with Tin for Chrome, first."
             )
         config = document(connection["configuration"])
         if not permission(config) or not usable(config) or not connection["credential_ciphertext"]:

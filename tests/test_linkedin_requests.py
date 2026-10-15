@@ -261,3 +261,26 @@ def test_a_batch_is_spread_one_at_a_time_inside_the_window():
     # A first week: 8 a day.
     days = {m.astimezone(requests.ZoneInfo("America/Los_Angeles")).date() for m in plan}
     assert len(days) >= 2
+
+
+class Answers:
+    """A connection whose queries answer in order: Start here, saved schedule, project."""
+
+    def __init__(self, *values):
+        self.values = list(values)
+
+    async def fetchval(self, _query, _project_id):
+        return self.values.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_the_window_is_in_the_founder_s_time_zone_as_start_here_recorded_it():
+    project = uuid4()
+    zone = requests.founder_timezone
+    assert await zone(Answers("America/Los_Angeles", "Europe/Berlin", "UTC"), project) == (
+        "America/Los_Angeles"
+    )
+    assert await zone(Answers(None, "Europe/Berlin", "UTC"), project) == "Europe/Berlin"
+    # Free text Start here couldn't resolve falls through; the project's default is UTC.
+    assert await zone(Answers("Pacific time", None, "Asia/Tokyo"), project) == "Asia/Tokyo"
+    assert await zone(Answers(None, None, None), project) == "UTC"

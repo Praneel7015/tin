@@ -42,7 +42,8 @@ The run asks `linkedin_requests_next` what to do and follows: send, wait, read w
 or finish. Every decision about time is made from Postgres, so history holds only request IDs,
 waits and outcomes. A request may go when, for the member across all their projects:
 
-- it's a weekday inside the window (09:00–17:00 by default) in the project's time zone;
+- it's a weekday inside the window (09:00–17:00 by default) in the founder's time zone: the one
+  Start here recorded, else the newest saved schedule's, as the organic system reads it;
 - at least 15 minutes have passed since their last request, plus a wait of up to 25 minutes
   that each request draws once from its ID;
 - they're under the daily and weekly caps (15 and 60 by default, half in their first week of

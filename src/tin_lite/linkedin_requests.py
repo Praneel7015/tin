@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from tin_lite import people_records as records
+from tin_lite.schedules import supported_timezone
 
 KEY = "social.linkedin_requests"
 WORKFLOW_ID = UUID("9b3f6d2a-41c7-4e8b-a5d2-6c1e8f4b7a90")
@@ -79,11 +80,32 @@ class RequestError(ValueError):
 # Settings.
 
 
+async def founder_timezone(conn, project_id: UUID) -> str:
+    """The founder's time zone, read as the organic system reads it
+    (`organic_system_activities.founder_timezone`): Start here's answer, then the newest saved
+    schedule's, then the project's, else UTC."""
+
+    candidates = (
+        """SELECT input->>'timezone' FROM workflow_runs WHERE project_id = $1
+           AND executor = 'growth.onboarding' AND input ? 'timezone'
+           ORDER BY created_at DESC LIMIT 1""",
+        """SELECT schedule->>'timezone' FROM project_workflows WHERE project_id = $1
+           AND schedule IS NOT NULL AND status IN ('active', 'paused')
+           ORDER BY created_at DESC LIMIT 1""",
+        "SELECT timezone FROM projects WHERE id = $1",
+    )
+    for query in candidates:
+        value = await conn.fetchval(query, project_id)
+        if value and supported_timezone(value):
+            return value
+    return "UTC"
+
+
 async def sending(conn, project_id: UUID, member: str) -> dict[str, Any]:
-    """The member's sending on this project, with the project's time zone."""
+    """The member's sending on this project, in the founder's time zone."""
 
     row = await conn.fetchrow(
-        """SELECT s.*, p.timezone FROM projects p
+        """SELECT s.* FROM projects p
            LEFT JOIN linkedin_sending s ON s.project_id = p.id AND s.member = $2
            WHERE p.id = $1""",
         project_id,
@@ -94,7 +116,7 @@ async def sending(conn, project_id: UUID, member: str) -> dict[str, Any]:
     result = dict(DEFAULTS)
     if row["member"] is not None:
         result.update({key: row[key] for key in DEFAULTS})
-    result["timezone"] = row["timezone"] or "UTC"
+    result["timezone"] = await founder_timezone(conn, project_id)
     result["on"] = bool(result["enabled"] and result["consent_version"] == CONSENT_VERSION)
     until = result["paused_until"]
     # LinkedIn's weekly limit holds sending until a time; anything else until the member resumes.

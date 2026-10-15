@@ -276,7 +276,7 @@ async def test_onboarding_tin_state_reads_the_project_scope() -> None:
             seen["workflows"] = project_id
             return WORKFLOWS
 
-        async def list_integration_connections(self, project_id):
+        async def list_integration_connections(self, project_id, *, member=None):
             seen["connections"] = project_id
             return [_connection("workspace.google")]
 

@@ -62,14 +62,17 @@ def status(configuration, settings):
     }
 
 
-async def default_inputs(database, project_id, inputs):
-    """Apply the saved choice only to new configurations with no explicit mode."""
+async def default_inputs(database, project_id, inputs, *, member):
+    """Apply the member's own saved choice only to new configurations with no explicit mode."""
     if "execution" in inputs:
         return inputs
-    connection = await database.get_integration_connection(
-        project_id=project_id, provider_key="network.linkedin"
+    configuration = await database.pool.fetchval(
+        "SELECT configuration FROM integration_connections WHERE project_id=$1 "
+        "AND provider_key='network.linkedin' AND connected_by_clerk_user_id=$2",
+        project_id,
+        member,
     )
-    mode = permission(connection.configuration).get("mode") if connection else None
+    mode = permission(configuration).get("mode") if configuration else None
     return {**inputs, "execution": mode} if mode in MODES else inputs
 
 
@@ -200,10 +203,12 @@ class CollectionConnection:
                 "ORDER BY run_id FOR UPDATE",
                 project_id,
             )
+            # Each member sets the choice on their own LinkedIn connection.
             row = await conn.fetchrow(
                 "SELECT * FROM integration_connections WHERE project_id=$1 AND "
-                "provider_key='network.linkedin' FOR UPDATE",
+                "provider_key='network.linkedin' AND connected_by_clerk_user_id=$2 FOR UPDATE",
                 project_id,
+                user,
             )
             if not row or row["connected_by_clerk_user_id"] != user or row["status"] != "connected":
                 raise CollectionError("account_owner_required")

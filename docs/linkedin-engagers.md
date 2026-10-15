@@ -12,7 +12,7 @@ sends nothing.
   refused.
 - **Runtime:** it needs the LinkedIn cloud runtime, with a template that includes the
   engagement reads, and the native model service (`TIN_LITE_LUNA_API_KEY`).
-- **Member:** only the member who connected LinkedIn can run it. Their saved session reads
+- **Member:** each member runs it with their own LinkedIn connection. Their saved session reads
   their own posts. That member needs cloud reading turned on and a live session from Tin for
   Chrome, as collection does.
 

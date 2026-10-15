@@ -26,6 +26,16 @@ Saving the choice does not report cloud setup complete until the session is veri
 failed preparation stays in the setup dialog with a retry action. Connected accounts without
 a visible name show a connected-account label, not another account-selection prompt.
 
+Each member of a project connects their own LinkedIn. A project keeps one LinkedIn reading
+connection per member (`integration_connections` allows one `network.linkedin` row per project
+and member; every other integration stays one per project):
+- Pairing Tin for Chrome replaces only that member's own connection and paired browser.
+- A run collects or reads with the LinkedIn of the member who started it; a member who hasn't
+  connected their own is asked to.
+- Integrations, the LinkedIn card and MCP show each member their own connection, the saved
+  choice fills their own new workflows, and disconnecting removes only their own.
+- Deleting the project removes every member's connection.
+
 ![First-time installation with synthetic content](images/linkedin-install.png)
 
 ![Confirm the account and collection choice](images/linkedin-setup.png)

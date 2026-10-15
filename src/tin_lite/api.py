@@ -1848,7 +1848,10 @@ async def list_project_integrations(
 ) -> list[IntegrationView]:
     await _require_project_access(project_id, request, user)
     service = request.app.state.runtime.integrations
-    connections = {item.provider_key: item for item in await service.list_connections(project_id)}
+    connections = {
+        item.provider_key: item
+        for item in await service.list_connections(project_id, member=user.clerk_user_id)
+    }
     return [
         _integration_view(
             definition,
@@ -2326,7 +2329,7 @@ async def disconnect_project_integration(
     await _require_project_access(project_id, request, user)
     try:
         deleted = await request.app.state.runtime.integrations.disconnect(
-            project_id=project_id, provider_key=provider_key
+            project_id=project_id, provider_key=provider_key, member=user.clerk_user_id
         )
     except IntegrationError as exc:
         raise _integration_http_error(exc) from exc
@@ -3505,7 +3508,9 @@ async def create_project_workflow(
         if workflow.executor == "connections.collect":
             from tin_lite.connection_collection_connection import default_inputs
 
-            supplied_inputs = await default_inputs(database, project_id, supplied_inputs)
+            supplied_inputs = await default_inputs(
+                database, project_id, supplied_inputs, member=user.clerk_user_id
+            )
         inputs = normalize_workflow_inputs(
             schema=schema,
             project_id=project_id,

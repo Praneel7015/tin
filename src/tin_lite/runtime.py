@@ -12,6 +12,7 @@ from tin_lite import (
     content_plan,
     content_plan_editorial,
     growth_plan,
+    linkedin_engagers,
     paid_ads,
     paid_ads_launch,
     payment_recovery,
@@ -44,6 +45,7 @@ from tin_lite.integrations import IntegrationService
 from tin_lite.keyword_plan import POLICY as KEYWORD_POLICY
 from tin_lite.keyword_plan import ROUTE_KEY as KEYWORD_ROUTE_KEY
 from tin_lite.keyword_plan_activities import KeywordPlanActivities
+from tin_lite.linkedin_engagers_activities import LinkedInEngagersActivities
 from tin_lite.linkedin_listening_activities import LinkedInListeningActivities
 from tin_lite.linkedin_publish_activities import LinkedInPublishActivities
 from tin_lite.luna import LunaService, OpenAIResponsesClient, TinWorkflowApiClient
@@ -142,6 +144,7 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
             CHARACTER_MODEL_ROUTE,
             style_capture.ROUTE,
             x_feedback.ROUTE,
+            linkedin_engagers.ROUTE,
             *growth_plan.ROUTES,
             *paid_ads.ROUTES,
             *paid_ads_launch.ROUTES,
@@ -355,6 +358,14 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         cloud=LinkedInCloud(database, settings),
         cipher=integrations._cipher,
     )
+    engagers_activities = LinkedInEngagersActivities(
+        database=database,
+        storage=storage,
+        settings=settings,
+        cloud=LinkedInCloud(database, settings),
+        cipher=integrations._cipher,
+        router=model_router if settings.luna_api_key is not None else None,
+    )
     code = CodeActivities(common=activity_instance, model_router=model_router)
     activities = [
         collection.prepare,
@@ -400,6 +411,12 @@ async def build_runtime(settings: Settings) -> RuntimeServices:
         linkedin_listening_activities.results_read,
         linkedin_listening_activities.results_publish,
         linkedin_listening_activities.results_failure,
+        engagers_activities.prepare,
+        engagers_activities.posts,
+        engagers_activities.reactions,
+        engagers_activities.score,
+        engagers_activities.publish,
+        engagers_activities.failure,
         plan_activities.prepare,
         plan_activities.write,
         plan_activities.publish,

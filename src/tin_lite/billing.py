@@ -59,6 +59,8 @@ CONNECTED_ACCOUNT_EXECUTORS = {
     "social.linkedin_publish": "tin-linkedin-operator-funded-v1",
     "social.linkedin_listen": "tin-linkedin-operator-funded-v1",
     "social.linkedin_results": "tin-linkedin-operator-funded-v1",
+    # Tin pays the LinkedIn sandbox reads and the small ICP scoring calls.
+    "social.linkedin_engagers": "tin-funded-linkedin-engagers-v1",
 }
 # Spending limits a new hosted project starts with, in nanodollars. Saved policies keep
 # their own limits: these apply only where a project has no policy yet.

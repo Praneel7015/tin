@@ -222,6 +222,17 @@ async def start_workflow_run(
             raise WorkflowExecutorUnavailableError(
                 "Connection collection is unavailable on this project."
             )
+    if workflow.executor == "social.linkedin_engagers":
+        from tin_lite.connection_collection import enabled
+
+        if not enabled(settings, project_id):
+            raise WorkflowExecutorUnavailableError(
+                "Reading LinkedIn isn't turned on for this project yet."
+            )
+        if not getattr(settings, "luna_api_key", None):
+            raise WorkflowExecutorUnavailableError(
+                "Scoring LinkedIn engagers requires the native model service."
+            )
     if workflow.executor == "social.x_revise" and not _x_feedback:
         raise WorkflowInputError("Read the X draft and use request_workflow_changes to revise it.")
     if workflow.executor == "social.x_revise" and not getattr(settings, "luna_api_key", None):

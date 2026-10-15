@@ -6936,7 +6936,8 @@ class Database:
             "DELETE FROM record_fields WHERE project_id = $1",
             "DELETE FROM record_suppressions WHERE project_id = $1",
             "DELETE FROM effect_receipts WHERE operation IN "
-            "('social.linkedin_listen', 'social.linkedin_results') AND "
+            "('social.linkedin_listen', 'social.linkedin_results', 'social.linkedin_engagers', "
+            "'linkedin_engagement_v1') AND "
             "split_part(execution_key, ':', 1) IN (SELECT id::text FROM workflow_runs "
             "WHERE project_id = $1)",
             # LinkedIn collection holds other people's names, headlines and page text. Jobs (and
@@ -7297,6 +7298,10 @@ class Database:
             "social.linkedin_listen": (
                 "linkedin_post_results_ready",
                 "Tin read your LinkedIn post's first three days.",
+            ),
+            "social.linkedin_engagers": (
+                "linkedin_engagers_ready",
+                "Your list of people who engaged on LinkedIn is ready.",
             ),
             "social.linkedin_results": (
                 "linkedin_results_ready",

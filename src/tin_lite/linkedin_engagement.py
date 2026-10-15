@@ -20,9 +20,12 @@ import re
 import secrets
 import unicodedata
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from urllib.parse import quote
 
-from tin_lite.connection_collection import CollectionError
+from pydantic import Field, field_validator
+
+from tin_lite.connection_collection import ClosedModel, CollectionError
 from tin_lite.linkedin_session import _get, headers, identity_matches, identity_profile
 
 WINDOW_DAYS = 90
@@ -42,6 +45,58 @@ DEGREE = re.compile(r"(1st|2nd|3rd)\+?")
 REACTION = re.compile(r"[A-Z][A-Z_]{1,30}")
 ORIGIN = "https://www.linkedin.com"
 _RANDOM = secrets.SystemRandom()
+
+
+class Post(ClosedModel):
+    activity_urn: str
+    thread_urn: str
+    published_at: str = Field(max_length=40)
+    excerpt: str = Field(max_length=280)
+    reactions: int | None
+    comments: int | None
+
+    @field_validator("activity_urn")
+    @classmethod
+    def activity_valid(cls, value):
+        if not ACTIVITY.fullmatch(value):
+            raise ValueError("activity")
+        return value
+
+    @field_validator("thread_urn")
+    @classmethod
+    def thread_valid(cls, value):
+        if not THREAD.fullmatch(value):
+            raise ValueError("thread")
+        return value
+
+
+class PostsResult(ClosedModel):
+    """What a posts read hands back to Tin; the controller checks it before using it."""
+
+    posts: list[Post] = Field(max_length=MAX_POSTS)
+    complete: bool
+
+
+class Reactor(ClosedModel):
+    member: str
+    name: str = Field(max_length=200)
+    headline: str = Field(max_length=1000)
+    degree: Literal["1st", "2nd", "3rd"] | None
+    reaction: str | None = Field(max_length=31)
+
+    @field_validator("member")
+    @classmethod
+    def member_valid(cls, value):
+        if not MEMBER_ID.fullmatch(value):
+            raise ValueError("member")
+        return value
+
+
+class ReactionsResult(ClosedModel):
+    people: list[Reactor] = Field(max_length=REACTIONS_PAGE * REACTION_PAGES_PER_READ)
+    total: int | None
+    next_start: int | None
+    capped: bool
 
 
 def clean(value) -> str:

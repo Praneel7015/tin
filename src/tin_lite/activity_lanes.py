@@ -27,7 +27,15 @@ CODEX_ACTIVITIES = frozenset(
     }
 )
 COLLECTION_ACTIVITIES = frozenset(
-    {"collection_prepare", "collection_poll", "collection_publish", "collection_failure"}
+    {
+        "collection_prepare",
+        "collection_poll",
+        "collection_publish",
+        "collection_failure",
+        # Engagement reads use the same LinkedIn sandbox, so they share its bounded lane.
+        "linkedin_engagers_posts",
+        "linkedin_engagers_reactions",
+    }
 )
 
 TRUSTED_ACTIVITIES = frozenset(
@@ -58,6 +66,10 @@ TRUSTED_ACTIVITIES = frozenset(
         "linkedin_results_read",
         "linkedin_results_publish",
         "linkedin_results_failure",
+        "linkedin_engagers_prepare",
+        "linkedin_engagers_score",
+        "linkedin_engagers_publish",
+        "linkedin_engagers_failure",
         "ai_answers_measure",
         "apply_project_task_changes",
         "awesome_submit_apply",

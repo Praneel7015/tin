@@ -112,6 +112,15 @@ test("sending turns on only with the consent box ticked, then shows the week", {
   });
 });
 
+test("with reading in this browser only, sending waits for cloud reading", {timeout: 120000}, async () => {
+  await open({url: "/integrations", state: {...requests({on: false}), reading: false, browser_only: true}}, async page => {
+    await page.locator(".linkedin-card").getByRole("button", {name: "Configure"}).click();
+    const row = page.locator(".requests-sending");
+    assert.match(await row.innerText(), /one at a time · turns on with cloud reading/);
+    assert.equal(await row.getByRole("switch").isDisabled(), true);
+  });
+});
+
 test("a warning from LinkedIn pauses sending until you resume it", {timeout: 120000}, async () => {
   await open({url: "/integrations", state: requests({on: true, held: true})}, async (page, served) => {
     assert.deepEqual(await page.locator("[data-integration-filter]").allInnerTexts(), ["All 2", "Connected 0", "Needs you 1", "Available 1"]);

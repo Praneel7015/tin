@@ -98,6 +98,25 @@ async def turn_on(http, f):
     assert answer.json()["sending"]["on"] is True
 
 
+async def test_sending_needs_cloud_reading(collection_db):
+    """Sending uses the session cloud reading saves: browser-only reading can't turn it on."""
+
+    f = await fixture(collection_db)
+    await f.db.pool.execute(
+        """UPDATE integration_connections
+           SET configuration = jsonb_set(configuration, '{collection_permission,mode}',
+                                         '"local_only"')
+           WHERE project_id = $1 AND provider_key = 'network.linkedin'""",
+        f.project.id,
+    )
+    base = f"/api/projects/{f.project.id}/linkedin-requests"
+    async with client(f) as http:
+        state = (await http.get(base)).json()
+        refused = await http.put(f"{base}/sending", json={"enabled": True, "consent_version": 1})
+    assert state["reading"] is False and state["browser_only"] is True
+    assert refused.status_code == 409 and "cloud reading" in refused.text
+
+
 async def test_people_who_fit_and_engaged_with_your_posts_are_proposed_once(collection_db):
     f = await fixture(collection_db)
     await add_teammate(f)

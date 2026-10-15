@@ -13,6 +13,7 @@ from uuid import UUID
 
 from tin_lite import linkedin_requests as requests
 from tin_lite.connection_collection import PROVIDER, enabled
+from tin_lite.connection_collection_connection import permission
 
 CONSENT_TEXT = (
     "Send the connection requests I approve from Tin's servers, with my LinkedIn session: one "
@@ -59,16 +60,24 @@ class ConnectionRequests:
             raise RequestsRefused(404, "project not found")
         return project
 
-    async def _reading(self, project_id: UUID, member: str) -> bool:
-        return bool(
-            await self.db.pool.fetchval(
-                """SELECT EXISTS (SELECT 1 FROM integration_connections
-                   WHERE project_id = $1 AND provider_key = $2 AND status = 'connected'
-                     AND connected_by_clerk_user_id = $3)""",
-                project_id,
-                PROVIDER,
-                member,
-            )
+    async def _reading(self, project_id: UUID, member: str) -> str | None:
+        """How the member's own LinkedIn reading runs: "cloud", "browser" or None. Sending uses
+        the session cloud reading saves, so it needs cloud."""
+
+        configuration = await self.db.pool.fetchval(
+            """SELECT configuration FROM integration_connections
+               WHERE project_id = $1 AND provider_key = $2 AND status = 'connected'
+                 AND connected_by_clerk_user_id = $3""",
+            project_id,
+            PROVIDER,
+            member,
+        )
+        if configuration is None:
+            return None
+        return (
+            "browser"
+            if permission(configuration).get("mode", "local_only") == "local_only"
+            else "cloud"
         )
 
     async def state(self, project_id: UUID, member: str) -> dict[str, Any]:
@@ -81,9 +90,11 @@ class ConnectionRequests:
             week = await requests.week(conn, project_id, member, now)
             batches = await requests.open_batches(conn, project_id, member, now)
         offered = enabled(self.settings, project_id)
+        reading = await self._reading(project_id, member) if offered else None
         return {
             "offered": offered,
-            "reading": await self._reading(project_id, member) if offered else False,
+            "reading": reading == "cloud",
+            "browser_only": reading == "browser",
             "sending": {
                 key: sending[key]
                 for key in (
@@ -121,8 +132,8 @@ class ConnectionRequests:
         limits: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         await self._project(project_id, member)
-        if enabled_ and not await self._reading(project_id, member):
-            raise RequestsRefused(409, "Connect your own LinkedIn reading first.")
+        if enabled_ and await self._reading(project_id, member) != "cloud":
+            raise RequestsRefused(409, "Turn on cloud reading on the LinkedIn card first.")
         try:
             async with self.db.pool.acquire() as conn:
                 await requests.set_sending(

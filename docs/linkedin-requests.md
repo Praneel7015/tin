@@ -32,8 +32,9 @@ can start it. Nothing is sent at the moment of approval.
 ## Sent, one at a time
 
 Sending is per member and project, off until the member turns it on on the LinkedIn card by
-ticking the consent box (`PUT …/linkedin-requests/sending` with `consent_version` 1). MCP
-can't turn it on. The card says plainly that LinkedIn's terms don't allow automated requests
+ticking the consent box (`PUT …/linkedin-requests/sending` with `consent_version` 1). It needs
+the member's cloud reading, whose saved session it sends with; reading in this browser only
+keeps the switch off. MCP can't turn it on. The card says plainly that LinkedIn's terms don't allow automated requests
 and that pacing lowers the risk to the account without removing it.
 
 The run asks `linkedin_requests_next` what to do and follows: send, wait, read who accepted,

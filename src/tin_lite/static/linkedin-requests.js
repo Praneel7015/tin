@@ -145,7 +145,8 @@ window.TinRequests = (() => {
     const head = (switchHtml, text, muted = false) => `<div class="requests-head">${switchHtml}<span class="${muted ? "is-muted" : ""}">${escape(text)}</span></div>`;
     let body;
     if (!data.reading) {
-      body = head(toggle(false, { disabled: true }), "Send connection requests you approve, one at a time · turns on after Reading", true);
+      const after = data.browser_only ? "turns on with cloud reading" : "turns on after Reading";
+      body = head(toggle(false, { disabled: true }), `Send connection requests you approve, one at a time · ${after}`, true);
     } else if (sending.held) {
       body = `${head(toggle(true), "Connection requests you approve")}
         <p class="linkedin-part-needs" role="status">Sending paused: ${escape(data.pause_text || "LinkedIn refused a request")}. Open LinkedIn in Chrome and sort it out there, then resume. Approved requests not sent yet wait.</p>

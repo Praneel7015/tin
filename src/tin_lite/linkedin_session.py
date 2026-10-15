@@ -385,12 +385,12 @@ def resolved_source(payload, source, keywords):
     return result.model_dump()
 
 
-async def _get(client, session, path, params=None):
+async def _get(client, session, path, params=None, *, request_headers=None):
     async with client.stream(
         "GET",
         "https://www.linkedin.com" + path,
         params=params,
-        headers=headers(session, search=params is not None),
+        headers=request_headers or headers(session, search=params is not None),
         follow_redirects=False,
     ) as response:
         if response.status_code == 429:

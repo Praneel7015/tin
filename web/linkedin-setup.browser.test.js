@@ -83,7 +83,9 @@ for (const named of [true, false]) test(named ? "LinkedIn guides installation, c
     await page.getByRole("button",{name:"Configure",exact:true}).click();
     assert.equal(await page.getByText("Choose an account",{exact:true}).count(),0);
     if(!named)assert.equal(await page.locator(".integration-primary").textContent(),"LinkedIn account connected");
-    assert.equal(await page.locator(".integration-expanded .integration-detail-row").count(),4);
+    // One LinkedIn card; only reading is offered here, so it has one row.
+    assert.equal(await page.locator(".linkedin-part").count(),1);
+    assert.match(await page.locator(".linkedin-part").innerText(),/Reading\s*Your posts and who engaged · cloud with browser backup\s*Tin for Chrome · your own session · /);
     assert.equal(await page.locator(".integration-control-footer").count(),1);
     assert.equal(await page.getByRole("button",{name:"Done",exact:true}).count(),1);
     if(process.env.TIN_LINKEDIN_CARD_SCREENSHOT)await page.locator(".integration-card.is-connected").screenshot({path:process.env.TIN_LINKEDIN_CARD_SCREENSHOT});

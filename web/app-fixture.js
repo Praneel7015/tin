@@ -88,7 +88,7 @@ function noted(person) {
   }
 }
 
-export async function serveApp({decisionCount = 4, people = syntheticPeople(), engagers = false} = {}) {
+export async function serveApp({decisionCount = 4, people = syntheticPeople(), engagers = false, integrations = [], removed = []} = {}) {
   const project = {id: "project", name: "Example Co", workspace_id: "ws", workspace_name: "Example", member_count: 1, hidden: false};
   const catalog = [{id: "wf-answer", key: "content.generate", title: "Draft planned content", description: "Draft the next planned page for review.", definition: {schedule_modes: ["weekly", "on_demand"]}}];
   // The workflow that finds people is offered only to some projects; People shows with it.
@@ -189,7 +189,17 @@ export async function serveApp({decisionCount = 4, people = syntheticPeople(), e
       const workflow = catalog.find(item => item.id === projectWorkflows.find(saved => saved.id === startPath[1])?.workflow_id);
       return send({id: "run-started", workflow_id: workflow.id, workflow_name: workflow.key, status: "running", created_at: "2026-10-15T10:00:00Z"});
     }
+    // Disconnecting marks the connection gone, as the API does, and records which.
+    const integrationPath = url.pathname.match(/^\/api\/projects\/[^/]+\/integrations\/([^/]+)$/);
+    if (request.method === "DELETE" && integrationPath) {
+      const found = integrations.find(item => item.key === decodeURIComponent(integrationPath[1]));
+      removed.push(decodeURIComponent(integrationPath[1]));
+      if (found) Object.assign(found, {connection_id: null, status: "available", configuration: {}});
+      response.statusCode = 204;
+      return response.end();
+    }
     if (request.method !== "GET") {response.statusCode = 204; return response.end();}
+    if (/^\/api\/projects\/[^/]+\/integrations$/.test(url.pathname)) return send(integrations);
     if (/^\/api\/projects\/[^/]+\/people$/.test(url.pathname)) return send({people: people.map(listed), truncated: false, fit_shown: 0.6, profiles, icp_path: "strategy/ICP.md"});
     if (personPath) {
       const found = people.find(item => item.id === personPath[1]);
@@ -218,7 +228,7 @@ export async function serveApp({decisionCount = 4, people = syntheticPeople(), e
     response.writeHead(404).end();
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  return {server, people, base: `http://127.0.0.1:${server.address().port}`};
+  return {server, people, integrations, removed, base: `http://127.0.0.1:${server.address().port}`};
 }
 
 export async function openApp(browser, base, {viewport = {width: 1440, height: 900}, url = "/system", theme = "light"} = {}) {

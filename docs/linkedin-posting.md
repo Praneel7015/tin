@@ -7,8 +7,20 @@ confirmation and a receipt around every write.
 
 ## Connect
 
-The **LinkedIn posting** card (`social.linkedin`) is separate from the **LinkedIn** card
-(`network.linkedin`), which collects connections through the browser extension.
+Posting (`social.linkedin`) and reading (`network.linkedin`, through the browser extension and
+each member's own session) are two connections, but Integrations shows them as rows of one
+**LinkedIn** card (`app.js`, `renderLinkedInCard`; Paper INVITE-B and INVITE-B3):
+- **Posting** names the accounts Tin may post as. **Manage** lists them, with Check again, Add
+  accounts and Disconnect posting.
+- **Reading** says where Tin reads (cloud with browser backup, cloud only, or this browser
+  only) and when the session was checked. **Turn off** removes only your own reading
+  connection.
+- **Disconnect LinkedIn** removes whichever of the two are connected, after one confirmation
+  that names both.
+- With nothing connected, the rows are the steps: Sign in with LinkedIn and Add Tin for
+  Chrome. When the project is offered only one part, Connect goes straight to it.
+- The tab counts treat the card as one: connected if either part is, needing you if either
+  does.
 
 1. **Connect** finds the project's Zernio profile by its name, or makes it. There is one
    profile per project, named `tin:<project id>`, with the project ID as its `externalId`.

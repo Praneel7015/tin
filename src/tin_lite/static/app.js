@@ -290,6 +290,7 @@ const state = {
   integrationFilter: "all",
   integrationSearch: "",
   expandedIntegration: null,
+  linkedInManaging: false,
   githubInstallationChoice: null,
   resourceChoice: null,
   stripeKeyChoice: null,
@@ -6771,6 +6772,7 @@ function renderConnectRequest(requested) {
     .filter(Boolean);
   const done = items.filter((integration) => integration.connection_id && integration.status === "connected" &&
     (!RESOURCE_SCOPED_INTEGRATIONS.has(integration.key) || integrationSelection(integration)));
+  const cards = withLinkedInCard(items);
   const projectName = escapeHtml(state.project?.name || "your project");
   main.innerHTML = `<section class="product-view integrations-view connect-view">
     <header class="workspace-header">
@@ -6782,7 +6784,7 @@ function renderConnectRequest(requested) {
       <button class="button-quiet" type="button" data-connect-show-all>${state.projectAccess === "locked" ? "Back to setup" : "All integrations"}</button>
     </header>
     <div class="integration-list">
-      ${items.length ? items.map(renderIntegrationCard).join("") : `<div class="integration-no-results"><strong>Nothing to connect.</strong><span>The link named no integration Tin offers.</span></div>`}
+      ${cards.length ? cards.map(renderIntegrationCard).join("") : `<div class="integration-no-results"><strong>Nothing to connect.</strong><span>The link named no integration Tin offers.</span></div>`}
     </div>
     <footer class="connect-footer">
       ${done.length === items.length && items.length
@@ -6825,6 +6827,18 @@ function bindIntegrationCardControls() {
   document.querySelectorAll("[data-linkedin-posting-refresh]").forEach((button) => {
     button.addEventListener("click", () => refreshLinkedInPosting(button));
   });
+  document.querySelectorAll("[data-linkedin-manage]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.linkedInManaging = !state.linkedInManaging;
+      renderIntegrations();
+    });
+  });
+  document.querySelectorAll("[data-linkedin-turn-off]").forEach((button) => {
+    button.addEventListener("click", turnOffLinkedInReading);
+  });
+  document.querySelectorAll("[data-linkedin-disconnect]").forEach((button) => {
+    button.addEventListener("click", disconnectLinkedIn);
+  });
 }
 
 function renderIntegrations() {
@@ -6832,7 +6846,7 @@ function renderIntegrations() {
   if (requested.length) return renderConnectRequest(requested);
   if (state.projectAccess === "locked") return renderLockPage();
   const search = state.integrationSearch.trim().toLowerCase();
-  const catalog = [...state.integrations, CUSTOM_API_TEMPLATE];
+  const catalog = [...withLinkedInCard(state.integrations), CUSTOM_API_TEMPLATE];
   const visible = catalog.filter((integration) => {
     const matchesSearch = !search || [
       integration.name,
@@ -6892,11 +6906,11 @@ function renderIntegrations() {
 }
 
 function renderIntegrationCard(integration) {
+  if (integration.merged) return renderLinkedInCard(integration);
   const expanded = state.expandedIntegration === integration.key;
   const connected = Boolean(integration.connection_id);
   const selected = integrationSelection(integration);
   const needsResource = connected && RESOURCE_SCOPED_INTEGRATIONS.has(integration.key) && !selected;
-  const needsLinkedInSetup = connected && integration.key === "network.linkedin" && !linkedInSetupReady(integration);
   const logoPaths = {
     "analytics.gsc": "/assets/integrations/google-search-console.svg",
     "infra.github": "/assets/integrations/github.svg",
@@ -6914,19 +6928,14 @@ function renderIntegrationCard(integration) {
       : integration.key === "analytics.posthog" ? "Choose a PostHog project" : "Choose a Search property"
     : integration.key === "analytics.posthog"
       ? integration.external_account_label || "PostHog"
-    : integration.key === "network.linkedin" && connected
-      ? linkedInAccountLabel(integration)
-      : integration.key === "infra.github" && selected && codeRepositories(integration).length
+    : integration.key === "infra.github" && selected && codeRepositories(integration).length
       ? `${selected} + ${codeRepositories(integration).length} more`
       : selected || integration.external_account_label || "Choose an account";
-  const health = integration.key === "network.linkedin" && connected ? linkedInHealth(integration)
-    : integration.key.startsWith("custom.api.")
+  const health = integration.key.startsWith("custom.api.")
     ? integration.configuration?.access_verified ? "access verified" : "saved · not verified"
     : integration.key === "social.x" && connected
     ? integration.status === "needs_attention" ? "reconnect required"
       : (integration.configuration?.granted_capabilities || []).includes("x.posts.publish") ? "ready to publish approved posts" : "reading only"
-    : integration.key === "social.linkedin" && connected
-    ? linkedInPostingHealth(integration)
     : integration.key === "ads.google" && connected
     ? googleAdsHealth(integration)
     : integration.key === "payments.stripe" && connected
@@ -6939,7 +6948,7 @@ function renderIntegrationCard(integration) {
       ? `checked ${timeLabel(integration.last_checked_at)}`
       : "ready for workflows";
   const unlocks = (integration.unlocks || []).join(" · ");
-  return `<article class="integration-card ${connected ? "is-connected" : "is-available"} ${needsResource || needsLinkedInSetup ? "is-needs-setup" : ""} ${expanded ? "is-expanded" : ""}">
+  return `<article class="integration-card ${connected ? "is-connected" : "is-available"} ${needsResource ? "is-needs-setup" : ""} ${expanded ? "is-expanded" : ""}">
     <div class="integration-card-row">
       <span class="integration-badge ${["infra.github", "infra.github_user"].includes(integration.key) ? "is-monochrome" : ""}" aria-hidden="true">${logo}</span>
       <span class="integration-identity">
@@ -6949,9 +6958,7 @@ function renderIntegrationCard(integration) {
       <span class="integration-state-mark is-${escapeHtml(integration.status)}" aria-hidden="true"></span>
       ${connected ? `<span class="integration-primary">${escapeHtml(primary)}</span>
         <span class="integration-health">${escapeHtml(health)}</span>
-        ${needsLinkedInSetup
-          ? `<button class="integration-row-action" type="button" data-integration-connect="network.linkedin" aria-haspopup="dialog">Finish setup</button>`
-          : RESOURCE_SCOPED_INTEGRATIONS.has(integration.key)
+        ${RESOURCE_SCOPED_INTEGRATIONS.has(integration.key)
           ? `<button class="integration-row-action" type="button" data-integration-choose="${escapeHtml(integration.key)}" aria-haspopup="dialog">${needsResource ? "Set up" : "Configure"}</button>`
           : `<button class="integration-row-action" type="button" data-integration-expand="${escapeHtml(integration.key)}" aria-expanded="${expanded}">Configure</button>`}`
         : `<span class="integration-unlocks">would unlock ${escapeHtml(unlocks)}</span>
@@ -7057,45 +7064,176 @@ function linkedInPostingHealth(integration) {
   return `approved posts only · ${count} ${count === 1 ? "account" : "accounts"}`;
 }
 
-function renderLinkedInPostingExpanded(integration) {
-  const accounts = integration.configuration?.accounts || [];
-  const rows = accounts.map((account) => `<div class="integration-detail-row">
-      <span class="integration-detail-label">${account.kind === "organization" ? "Page" : "Profile"}</span>
-      <span class="integration-detail-value">${account.active ? "" : "○ "}${escapeHtml(account.name)}${account.active ? "" : " · needs reconnecting"}</span>
-    </div>`).join("");
-  return `<div class="integration-expanded">
-    ${integration.status === "needs_attention" ? `<p class="integration-setup-prompt" role="status"><strong>LinkedIn needs reconnecting.</strong> No connected account can post. Connect again and pick yourself or a page.</p>` : ""}
-    ${rows || `<div class="integration-detail-row"><span class="integration-detail-label">Accounts</span><span class="integration-detail-value is-muted">None connected</span></div>`}
-    <div class="integration-detail-row"><span class="integration-detail-label">Unlocks</span><span class="integration-detail-value is-muted">${escapeHtml((integration.unlocks || []).join(" · "))}</span></div>
-    <p class="integration-setup-prompt">Drafting never posts to LinkedIn. Tin publishes only the exact post you preview and confirm, as the account you choose for it.</p>
-    <div class="integration-control-footer">
-      <span>connected ${escapeHtml(integration.connected_at ? timeLabel(integration.connected_at) : "recently")} · via Zernio · ${escapeHtml(integration.last_checked_at ? `checked ${timeLabel(integration.last_checked_at)}` : "not checked yet")}</span>
-      <button class="integration-reconnect" type="button" data-linkedin-posting-refresh>Check again</button>
-      <button class="integration-reconnect" type="button" data-integration-connect="social.linkedin">${integration.status === "needs_attention" ? "Reconnect" : "Add accounts"}</button>
-      <button class="integration-disconnect" type="button" data-integration-disconnect="social.linkedin">Disconnect</button>
-      <button class="integration-done" type="button" data-integration-expand="social.linkedin">Done</button>
+// One LinkedIn card (Paper INVITE-B, INVITE-B3). Posting (LinkedIn sign-in, through Zernio) and
+// reading (Tin for Chrome, each member's own session) stay two connections underneath, with
+// their own keys, APIs and MCP tools; the card shows them as rows.
+const LINKEDIN_PARTS = ["social.linkedin", "network.linkedin"];
+
+function linkedInCard(integrations) {
+  const posting = integrations.find((item) => item.key === "social.linkedin") || null;
+  const reading = integrations.find((item) => item.key === "network.linkedin") || null;
+  const parts = [posting, reading].filter(Boolean);
+  if (!parts.length) return null;
+  const connected = parts.some((part) => part.connection_id);
+  const needs = parts.some((part) => part.connection_id && part.status === "needs_attention");
+  return {
+    key: "linkedin",
+    name: "LinkedIn",
+    badge: "in",
+    merged: true,
+    posting,
+    reading,
+    description: parts.flatMap((part) => [part.name, part.key, part.description]).filter(Boolean).join(" "),
+    unlocks: [...new Set(parts.flatMap((part) => part.unlocks || []))],
+    configured: parts.some((part) => part.configured),
+    connection_id: connected ? "linkedin" : null,
+    status: needs ? "needs_attention" : connected ? "connected" : "available",
+  };
+}
+
+// The integrations with LinkedIn's two connections as one card, where the first of them stood.
+function withLinkedInCard(integrations) {
+  const card = linkedInCard(integrations);
+  if (!card) return integrations;
+  const listed = [];
+  for (const item of integrations) {
+    if (!LINKEDIN_PARTS.includes(item.key)) listed.push(item);
+    else if (!listed.includes(card)) listed.push(card);
+  }
+  return listed;
+}
+
+function renderLinkedInCard(card) {
+  const expanded = state.expandedIntegration === card.key;
+  const { posting, reading } = card;
+  const connected = Boolean(card.connection_id);
+  const readingSetup = Boolean(reading?.connection_id) && !linkedInSetupReady(reading);
+  const kinds = [posting && "posting", reading && "reading", reading && "sending"].filter(Boolean).join(" · ");
+  const accounts = posting?.connection_id ? linkedInPostingAccounts(posting).map((account) => account.name).filter(Boolean) : [];
+  const primary = accounts.length ? accounts.join(", ")
+    : reading?.connection_id ? linkedInAccountLabel(reading)
+      : "LinkedIn connected";
+  const health = !connected ? ""
+    : posting?.connection_id && posting.status === "needs_attention" ? "posting needs reconnecting"
+      : readingSetup ? linkedInHealth(reading)
+        : linkedInSendingSummary(card) || (reading?.connection_id ? linkedInHealth(reading) : linkedInPostingHealth(posting));
+  const offered = [posting, reading].filter(Boolean);
+  // One part offered connects straight away; both open the card's steps.
+  const connect = offered.length === 1
+    ? `<button class="integration-connect" type="button" data-integration-connect="${escapeHtml(offered[0].key)}">Connect</button>`
+    : `<button class="integration-connect" type="button" data-integration-expand="linkedin" aria-expanded="${expanded}">Connect</button>`;
+  return `<article class="integration-card linkedin-card ${connected ? "is-connected" : "is-available"} ${readingSetup ? "is-needs-setup" : ""} ${expanded ? "is-expanded" : ""}">
+    <div class="integration-card-row">
+      <span class="integration-badge" aria-hidden="true">in</span>
+      <span class="integration-identity">
+        <strong class="integration-name">LinkedIn</strong>
+        <code class="integration-key">${escapeHtml(kinds)}</code>
+      </span>
+      <span class="integration-state-mark is-${escapeHtml(card.status)}" aria-hidden="true"></span>
+      ${connected ? `<span class="integration-primary">${escapeHtml(primary)}</span>
+        <span class="integration-health">${escapeHtml(health)}</span>
+        ${readingSetup
+          ? `<button class="integration-row-action" type="button" data-integration-connect="network.linkedin" aria-haspopup="dialog">Finish setup</button>`
+          : `<button class="integration-row-action" type="button" data-integration-expand="linkedin" aria-expanded="${expanded}">Configure</button>`}`
+        : `<span class="integration-unlocks">would unlock ${escapeHtml(card.unlocks.join(" · "))}</span>
+        ${connect}`}
     </div>
+    ${expanded ? renderLinkedInExpanded(card) : ""}
+  </article>`;
+}
+
+function linkedInPart(label, main, { meta = "", action = "", needs = "", extra = "" } = {}) {
+  return `<div class="linkedin-part">
+    <span class="linkedin-part-label">${escapeHtml(label)}</span>
+    <div class="linkedin-part-body">
+      <span class="linkedin-part-main">${escapeHtml(main)}</span>
+      ${meta ? `<code class="linkedin-part-meta">${escapeHtml(meta)}</code>` : ""}
+      ${needs ? `<p class="linkedin-part-needs" role="status">${escapeHtml(needs)}</p>` : ""}
+      ${extra}
+    </div>
+    ${action}
+  </div>`;
+}
+
+function linkedInPostingPart(posting) {
+  if (!posting.connection_id) {
+    return linkedInPart("Posting", "Post drafts you approve, as you or your company page, and read their results", {
+      action: `<button class="linkedin-part-connect" type="button" data-integration-connect="social.linkedin">Sign in with LinkedIn</button>`,
+    });
+  }
+  const accounts = posting.configuration?.accounts || [];
+  const active = accounts.filter((account) => account.active).map((account) => account.name);
+  const lapsed = accounts.filter((account) => !account.active).map((account) => account.name);
+  const needs = posting.status === "needs_attention"
+    ? "LinkedIn needs reconnecting. No connected account can post. Connect again and pick yourself or a page."
+    : lapsed.length ? `${lapsed.join(", ")} ${lapsed.length === 1 ? "needs" : "need"} reconnecting.` : "";
+  const managing = state.linkedInManaging;
+  const manage = managing ? `<div class="linkedin-part-manage">
+      ${accounts.map((account) => `<span><code>${account.kind === "organization" ? "page" : "profile"}</code> ${escapeHtml(account.name)}${account.active ? "" : " · needs reconnecting"}</span>`).join("") || "<span>No account connected</span>"}
+      <p>Drafting never posts to LinkedIn. Tin publishes only the exact post you preview and confirm, as the account you choose for it.</p>
+      <div>
+        <button class="integration-reconnect" type="button" data-linkedin-posting-refresh>Check again</button>
+        <button class="integration-reconnect" type="button" data-integration-connect="social.linkedin">${posting.status === "needs_attention" ? "Reconnect" : "Add accounts"}</button>
+        <button class="integration-reconnect is-danger" type="button" data-integration-disconnect="social.linkedin">Disconnect posting</button>
+      </div>
+    </div>` : "";
+  return linkedInPart("Posting", `${active.join(", ") || "No account can post"} · approved posts only`, {
+    meta: "LinkedIn sign-in · pages for everyone, your profile only for you",
+    needs,
+    extra: manage,
+    action: posting.status === "needs_attention"
+      ? `<button class="linkedin-part-action is-needs" type="button" data-integration-connect="social.linkedin">Reconnect</button>`
+      : `<button class="linkedin-part-action" type="button" data-linkedin-manage aria-expanded="${managing}">Manage</button>`,
+  });
+}
+
+function linkedInReadingPart(reading) {
+  if (!reading.connection_id) {
+    return linkedInPart("Reading", "Read your posts and who engaged with them, with your own session", {
+      action: `<button class="linkedin-part-connect" type="button" data-integration-connect="network.linkedin">Add Tin for Chrome</button>`,
+    });
+  }
+  const config = reading.configuration || {};
+  const mode = { cloud_preferred: "cloud with browser backup", cloud_only: "cloud only", local_only: "this browser only" }[config.collection_permission?.mode];
+  const checked = config.session_verified_at ? `checked ${timeLabel(config.session_verified_at)}`
+    : reading.last_checked_at ? `checked ${timeLabel(reading.last_checked_at)}`
+      : `connected ${reading.connected_at ? timeLabel(reading.connected_at) : "recently"}`;
+  const ready = linkedInSetupReady(reading);
+  const health = linkedInHealth(reading);
+  return linkedInPart("Reading", `Your posts and who engaged · ${mode || "setup not finished"}`, {
+    meta: `Tin for Chrome · your own session · ${checked}`,
+    needs: ready ? "" : `${health.charAt(0).toUpperCase()}${health.slice(1)}.`,
+    action: `<button class="linkedin-part-action" type="button" data-linkedin-turn-off>Turn off</button>`,
+  });
+}
+
+// Sending connection requests (#450) adds its row here.
+function linkedInSendingRow(_card) {
+  return "";
+}
+
+function linkedInSendingSummary(_card) {
+  return "";
+}
+
+function renderLinkedInExpanded(card) {
+  const { posting, reading } = card;
+  const rows = [posting ? linkedInPostingPart(posting) : "", reading ? linkedInReadingPart(reading) : "", linkedInSendingRow(card)];
+  const connected = Boolean(posting?.connection_id || reading?.connection_id);
+  return `<div class="integration-expanded linkedin-expanded">
+    ${rows.join("")}
+    ${connected ? `<div class="integration-control-footer">
+      <span class="linkedin-footnote">${reading ? "Reading and sending use your own LinkedIn; each teammate turns on theirs." : ""}</span>
+      ${reading?.connection_id ? `<button type="button" class="integration-reconnect" data-integration-connect="network.linkedin">${linkedInSetupReady(reading) ? "Settings" : "Finish setup"}</button>` : ""}
+      <button type="button" class="integration-disconnect" data-linkedin-disconnect>Disconnect LinkedIn</button>
+      <button type="button" class="integration-done" data-integration-expand="linkedin">Done</button>
+    </div>` : ""}
   </div>`;
 }
 
 function renderIntegrationExpanded(integration) {
-  if (integration.key === "network.linkedin") {
-    const permission = integration.configuration?.collection_permission;
-    const mode = {cloud_preferred:"Cloud with browser backup",cloud_only:"Cloud only",local_only:"This browser only"}[permission?.mode];
-    return `<div class="integration-expanded">
-      <div class="integration-detail-row"><span class="integration-detail-label">Account</span><span class="integration-detail-value">${escapeHtml(linkedInAccountLabel(integration))}</span></div>
-      <div class="integration-detail-row"><span class="integration-detail-label">Collection</span><span class="integration-detail-value">${escapeHtml(mode || "Not set up")}</span></div>
-      <div class="integration-detail-row"><span class="integration-detail-label">Access</span><span class="integration-detail-value">Read selected connections</span></div>
-      <div class="integration-detail-row"><span class="integration-detail-label">Unlocks</span><span class="integration-detail-value is-muted">${escapeHtml((integration.unlocks || []).join(" · "))}</span></div>
-      <div class="integration-control-footer">
-      <span>connected ${escapeHtml(integration.connected_at ? timeLabel(integration.connected_at) : "recently")} · via Tin extension</span>
-      <button type="button" class="integration-reconnect" data-integration-connect="network.linkedin">${linkedInSetupReady(integration) ? "Settings" : "Finish setup"}</button>
-      <button type="button" class="integration-disconnect" data-integration-disconnect="network.linkedin">Disconnect</button>
-      <button type="button" class="integration-done" data-integration-expand="network.linkedin">Done</button></div></div>`;
-  }
   if (integration.key === "payments.stripe") return renderStripeExpanded(integration);
   if (integration.key === "social.x") return renderXIntegrationExpanded(integration);
-  if (integration.key === "social.linkedin") return renderLinkedInPostingExpanded(integration);
   const selected = integrationSelection(integration) || "";
   const isPostHog = integration.key === "analytics.posthog";
   const resourceLabel = integration.key === "infra.github" ? "Website repository" : isPostHog ? "PostHog project" : "Search property";
@@ -7439,6 +7577,56 @@ async function connectIntegration(providerKey, capabilities = null) {
   }
 }
 
+async function turnOffLinkedInReading() {
+  const posting = state.integrations.find((item) => item.key === "social.linkedin");
+  await removeConnections(["network.linkedin"], {
+    question: `Turn off reading your LinkedIn in ${state.project?.name || "this project"}? Tin deletes your saved LinkedIn session here.${posting?.connection_id ? " Posting stays connected." : ""}`,
+    done: "LinkedIn reading turned off.",
+  });
+}
+
+async function disconnectLinkedIn() {
+  const posting = state.integrations.find((item) => item.key === "social.linkedin");
+  const reading = state.integrations.find((item) => item.key === "network.linkedin");
+  const keys = [posting, reading].filter((part) => part?.connection_id).map((part) => part.key);
+  const accounts = posting?.connection_id ? linkedInPostingAccounts(posting).map((account) => account.name).filter(Boolean) : [];
+  const removes = [
+    posting?.connection_id ? `Tin stops posting${accounts.length ? ` as ${accounts.join(", ")}` : ""} for everyone in this project.` : "",
+    reading?.connection_id ? "Tin deletes your saved LinkedIn session here." : "",
+  ].filter(Boolean).join(" ");
+  await removeConnections(keys, {
+    question: `Disconnect LinkedIn from ${state.project?.name || "this project"}? ${removes}`,
+    done: "LinkedIn disconnected.",
+  });
+}
+
+// Removes connections one by one after one confirmation; a refusal names the part it hit.
+async function removeConnections(keys, { question, done }) {
+  if (!keys.length || !window.confirm(question)) return;
+  const context = currentProjectContext();
+  try {
+    for (const key of keys) {
+      await api(`/api/projects/${encodeURIComponent(context.projectId)}/integrations/${encodeURIComponent(key)}`, { method: "DELETE" });
+      if (!isCurrentProjectContext(context)) return;
+    }
+    state.expandedIntegration = null;
+    state.linkedInManaging = false;
+    state.integrations = await api(`/api/projects/${encodeURIComponent(context.projectId)}/integrations`);
+    if (!isCurrentProjectContext(context)) return;
+    showToast(done);
+    renderIntegrations();
+  } catch (error) {
+    if (!isCurrentProjectContext(context)) return;
+    showToast(`Could not disconnect LinkedIn: ${error.message}`);
+    try {
+      state.integrations = await api(`/api/projects/${encodeURIComponent(context.projectId)}/integrations`);
+      if (isCurrentProjectContext(context)) renderIntegrations();
+    } catch (_ignored) {
+      // The toast already says what failed; the list refreshes on the next load.
+    }
+  }
+}
+
 async function disconnectIntegration(providerKey) {
   const integration = state.integrations.find((item) => item.key === providerKey);
   if (!window.confirm(`Disconnect ${integration?.name || "this integration"} from this project?`)) return;
@@ -7446,7 +7634,8 @@ async function disconnectIntegration(providerKey) {
   try {
     await api(`/api/projects/${encodeURIComponent(context.projectId)}/integrations/${encodeURIComponent(providerKey)}`, { method: "DELETE" });
     if (!isCurrentProjectContext(context)) return;
-    state.expandedIntegration = null;
+    state.expandedIntegration = LINKEDIN_PARTS.includes(providerKey) ? state.expandedIntegration : null;
+    state.linkedInManaging = false;
     const integrations = await api(`/api/projects/${encodeURIComponent(context.projectId)}/integrations`);
     if (!isCurrentProjectContext(context)) return;
     state.integrations = integrations;

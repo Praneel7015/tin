@@ -278,6 +278,9 @@ async def test_a_pre_approved_page_publishes_directly(publication_db, monkeypatc
     feed = await f.db.list_product_activity(project_id=f.project.id)
     merged = [event for event in feed if event.event_type == "website_change_merged"]
     assert [event.run_id for event in merged] == [run.id]
+    # Named by the workflow, not by the executor that ran it (codex.procedure).
+    assert merged[0].workflow_key == "website.change"
+    assert merged[0].workflow_title == "Change the website"
     status = await f.delivery.status(run)
     assert status["merged"] is True and status["pull_request"]["url"] == PR_URL
     assert status["change_id"] == website_change.page_change_id(page.id)
@@ -814,6 +817,35 @@ async def test_http_and_mcp_approve_or_decline_one_change_row(publication_db, mo
                 "request_id": str(uuid4()),
             },
         )
+
+
+async def test_mcp_lists_every_open_decision_in_one_call(publication_db, monkeypatch):
+    f = await fixture(publication_db, monkeypatch)
+    page = await answer_page(f)
+    sha = "d" * 64
+    rows = [
+        ChangeRow(f"oa_{n * 20}", "planned", "noindex", f"Hide {n}", (f"/{n}",), sha)
+        for n in ("6", "7")
+    ]
+    await website_change.propose(f.db, project_id=f.project.id, rows=rows)
+    server = mcp(f, monkeypatch)
+    await server.call_tool(
+        "decline_website_change",
+        {
+            "project_id": str(f.project.id),
+            "change_id": rows[1].change_id,
+            "content_sha256": sha,
+            "request_id": str(uuid4()),
+        },
+    )
+    listed = structured(
+        await server.call_tool("list_open_decisions", {"project_id": str(f.project.id)})
+    )
+    assert [item["run_id"] for item in listed["reviews"]] == [str(page.id)]
+    assert listed["reviews"][0]["files"][0].startswith("content/answers/")
+    assert [item["change_id"] for item in listed["website_changes"]] == [rows[0].change_id]
+    assert listed["judgment_calls"] == []
+    assert listed["paid_ads_proposals"] == []
 
 
 # The project's protected pages: a setting in Postgres, on top of defaults no one can remove.

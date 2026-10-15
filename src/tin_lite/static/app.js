@@ -5144,6 +5144,20 @@ function decisionItems() {
   return [...state.decisions, ...changes, ...calls];
 }
 
+// The list shows each kind under its own heading, in decisionItems' order: what to approve
+// first, then what changes the site, then what the coding agent will answer.
+const DECISION_GROUPS = [
+  { title: "Reviews", has: (item) => item.kind !== "website_change" && item.kind !== "judgment_call" },
+  { title: "Website changes", has: (item) => item.kind === "website_change" },
+  { title: "Questions", has: (item) => item.kind === "judgment_call" },
+];
+
+function decisionGroups(items) {
+  return DECISION_GROUPS
+    .map(({ title, has }) => ({ title, items: items.filter(has) }))
+    .filter((group) => group.items.length);
+}
+
 async function fetchWebsiteChanges(projectId) {
   const id = encodeURIComponent(projectId);
   const [changes, questions] = await Promise.all([
@@ -5480,11 +5494,14 @@ function renderDecisions() {
   main.innerHTML = `<section class="product-view decisions-view">
     <header class="decisions-header"><h1>Decisions</h1>${decisionsPace() ? `<code>${escapeHtml(decisionsPace())}</code>` : ""}</header>
     ${items.length ? `<div class="decisions-layout">
-      <div class="decision-list">${items.map((item) => `<button class="decision-list-item ${item.id === decision.id ? "is-active" : ""}" type="button" data-decision-id="${escapeHtml(item.id)}">
+      <div class="decision-list">${decisionGroups(items).map(({ title, items: grouped }) => `<section class="decision-group" aria-label="${escapeHtml(title)}">
+        <h2 class="decision-group-title">${escapeHtml(title)}<code>${grouped.length}</code></h2>
+        ${grouped.map((item) => `<button class="decision-list-item ${item.id === decision.id ? "is-active" : ""}" type="button" data-decision-id="${escapeHtml(item.id)}">
         <span class="activity-marker is-needs-you" aria-hidden="true"></span>
         <span><strong>${escapeHtml(decisionListTitle(item))}</strong></span>
         <code>${escapeHtml(waitingLabel(item.created_at))}</code>
-      </button>`).join("")}</div>
+      </button>`).join("")}
+      </section>`).join("")}</div>
       ${detail}
     </div>` : '<div class="decisions-empty"><strong>Nothing needs you.</strong><span>When a workflow needs review or an answer, it will appear here.</span><button class="button-secondary" type="button" data-open-system>Open System</button></div>'}
   </section>`;
@@ -5700,6 +5717,14 @@ function activityKind(event) {
   return "runs";
 }
 
+// Events no workflow wrote are named by where they came from.
+function activitySource(event) {
+  const type = String(event.event_type || "");
+  if (type.startsWith("integration_")) return "Integrations";
+  if (type.startsWith("project_files_")) return "Files";
+  return "Project";
+}
+
 function activityStatus(event) {
   const type = String(event.event_type || "").toLowerCase();
   const status = String(event.details?.status || "").toLowerCase();
@@ -5778,7 +5803,10 @@ function safeHttpsUrl(value) {
 
 function activityItem(event) {
   const status = activityStatus(event);
-  const workflow = event.workflow_key || "project";
+  const workflow = event.workflow_title || event.workflow_key || activitySource(event);
+  const workflowHint = event.workflow_key && event.workflow_key !== workflow
+    ? `${workflow} (${event.workflow_key})`
+    : workflow;
   const runRef = event.run_id ? shortRunId(event.run_id) : String(event.details?.ref || "record");
   const plainSummary = event.summary || humanize(event.event_type);
   const startedBy = event.run_id ? systemStartedBy({
@@ -5794,7 +5822,7 @@ function activityItem(event) {
     <article class="activity-ledger-row is-${status}">
       <time datetime="${escapeHtml(event.created_at)}">${escapeHtml(ledgerTime(event.created_at))}</time>
       <span class="activity-marker is-${status}" aria-label="${escapeHtml(status.replaceAll("-", " "))}">${status === "failed" ? "×" : ""}</span>
-      <code class="activity-workflow" title="${escapeHtml(workflow)}">${escapeHtml(workflow)}</code>
+      <span class="activity-workflow" title="${escapeHtml(workflowHint)}">${escapeHtml(workflow)}</span>
       <p>${escapeHtml(summary)}</p>
       <span class="activity-action">${activityAction(event)}</span>
       ${run

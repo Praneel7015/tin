@@ -1,8 +1,9 @@
 "use strict";
 
-// People (Paper PEOPLE-A1, C1 and C1b): everyone this project keeps a record of, as a grid
-// with segments, and one person in a side panel with their fields, timeline and Forget.
-// Tin's workflows write the records; this view reads them and forgets a person on request.
+// People (Paper PEOPLE-A1, C1, C1b, E1–E3, N1 and N1b): everyone this project keeps a record of,
+// as a grid with segments and the newest note, and one person in a side panel. A member picks
+// their ICP (which no run replaces), marks a customer, writes notes and forgets them. Tin's
+// workflows write the rest, and read the notes the next time they score the person.
 window.TinPeople = (() => {
   const PAGE = 50;
   const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -22,9 +23,11 @@ window.TinPeople = (() => {
     fit: (a, b) => fitOf(a) - fitOf(b),
     touch: (a, b) => touchOf(a) - touchOf(b),
   };
+  const NOT_A_FIT = "none";
   const ARROW = '<svg aria-hidden="true" viewBox="0 0 8 10"><path d="M4 1v8M1.2 6.2 4 9l2.8-2.8" /></svg>';
   const OUT = '<svg aria-hidden="true" viewBox="0 0 10 10"><path d="M3 2h5v5M8 2 2.5 7.5" /></svg>';
   const CLOSE = '<svg aria-hidden="true" viewBox="0 0 14 14"><path d="M3 3l8 8M11 3l-8 8" /></svg>';
+  const CHEVRON = '<svg class="person-pick-chevron" aria-hidden="true" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" /></svg>';
 
   let view = null;
   let hover = null;
@@ -36,6 +39,7 @@ window.TinPeople = (() => {
     return typeof value === "number" ? value : -1;
   };
   const touchOf = (person) => (person.last_touch ? Date.parse(person.last_touch.at) : 0);
+  const peoplePath = (id = "") => `/api/projects/${encodeURIComponent(view.projectId)}/people${id ? `/${encodeURIComponent(id)}` : ""}`;
 
   function day(value) {
     const date = new Date(value);
@@ -47,20 +51,40 @@ window.TinPeople = (() => {
   // "ICP 1: founders who need growth done" reads as "ICP 1" beside a score.
   function icpShort(text) {
     if (!text) return "";
-    if (text === "none") return "no ICP";
+    if (text === NOT_A_FIT) return "no ICP";
     const numbered = text.match(/^(ICP\s*\d+)\s*[:–—-]/i);
     if (numbered) return numbered[1];
     return text.length > 22 ? `${text.slice(0, 21)}…` : text;
   }
 
   function icpText(value) {
-    if (!value) return { text: "—", muted: true };
-    if (value === "none") return { text: "None", muted: true };
-    return { text: value, muted: false };
+    if (!value) return { text: "—", short: "—", muted: true };
+    if (value === NOT_A_FIT) return { text: "None", short: "None", muted: true };
+    const numbered = value.match(/^(ICP\s*\d+)\s*[:–—-]/i);
+    return { text: value, short: numbered ? numbered[1] : value, muted: false };
   }
 
-  function staleNote(value) {
+  // A value a member set, rather than a run: no run replaces it.
+  const memberValue = (value) => value.by === "you" || value.by === "a teammate";
+  // Who set a value, as the grid marks it beside a score: "you", or a teammate.
+  const setMark = (value) => (value.by === "you" ? "you" : "team");
+  const firstName = (person) => (person.name || "").split(/\s+/)[0] || "this person";
+
+  function staleNote(value, person) {
+    if (value.stale_reason === "note") {
+      const newest = person?.notes?.[0] || person?.note;
+      const whose = newest?.by === "a teammate" ? "A teammate’s note" : "Your note";
+      return `${whose} came after this score. The next run reads it and rescores.`;
+    }
     return `Scored before ${value.definition || "the ICP file"} or Tin’s scoring changed. The next run rescores it.`;
+  }
+
+  // A member's pick, with the score of Tin's it replaced.
+  function setNote(value) {
+    const who = value.by === "you" ? "Set by you." : "Set by a teammate.";
+    const previous = value.previous;
+    if (!previous || typeof previous.value !== "number") return who;
+    return `${who} Tin scored ${previous.value.toFixed(2)}${previous.reason ? `: ${previous.reason}` : "."}`;
   }
 
   function mount(main, options) {
@@ -68,10 +92,11 @@ window.TinPeople = (() => {
     if (fresh) {
       close();
       view = {
-        ...options, people: null, error: null, fitShown: 0.6, segment: "all", query: "",
+        ...options, people: null, error: null, fitShown: 0.6, profiles: [], segment: "all", query: "",
         sort: { key: "fit", descending: true }, page: 0,
         openId: new URLSearchParams(window.location.search).get("person"),
         person: null, personError: null, confirming: false, forgetting: false, forgetError: null,
+        ...personState(),
       };
     } else {
       Object.assign(view, options);
@@ -84,19 +109,26 @@ window.TinPeople = (() => {
     else renderPanel();
   }
 
+  // What belongs to one open person: an open menu, a save in flight, a note being written.
+  function personState() {
+    return { menu: null, saving: false, fieldError: null, draft: "", editing: null, editDraft: "", noteError: null };
+  }
+
   async function load() {
     const current = view;
     try {
-      const listed = await current.api(`/api/projects/${encodeURIComponent(current.projectId)}/people`);
+      const listed = await current.api(peoplePath());
       if (view !== current || !current.active) return;
       current.people = listed.people;
       current.fitShown = listed.fit_shown;
+      current.profiles = listed.profiles || [];
       current.error = null;
     } catch (error) {
       if (view !== current || !current.active) return;
       current.error = error.message;
     }
     renderShell();
+    if (current.openId) renderPanel();
   }
 
   function segmentPeople(key) {
@@ -109,7 +141,7 @@ window.TinPeople = (() => {
   function shown() {
     const query = view.query.trim().toLowerCase();
     const people = segmentPeople(view.segment).filter((person) => !query ||
-      [person.name, person.headline, field(person, "icp")?.value].some((text) => (text || "").toLowerCase().includes(query)));
+      [person.name, person.headline, field(person, "icp")?.value, person.notes_text].some((text) => (text || "").toLowerCase().includes(query)));
     const compare = SORTS[view.sort.key];
     return [...people].sort((a, b) => {
       const order = view.sort.descending ? compare(b, a) : compare(a, b);
@@ -194,10 +226,11 @@ window.TinPeople = (() => {
             <th class="is-headline" scope="col">Headline</th>
             <th class="is-icp" scope="col">ICP</th>
             ${header("fit", "ICP fit")}
+            <th class="is-notes" scope="col">Notes</th>
             <th class="is-linkedin" scope="col">LinkedIn</th>
             ${header("touch", "Last touch")}
           </tr></thead>
-          <tbody>${visible.length ? visible.map(row).join("") : `<tr class="is-none"><td colspan="6">${view.query.trim() ? `No one matches “${escape(view.query.trim())}”.` : "No one here yet."}</td></tr>`}</tbody>
+          <tbody>${visible.length ? visible.map(row).join("") : `<tr class="is-none"><td colspan="7">${view.query.trim() ? `No one matches “${escape(view.query.trim())}”.` : "No one here yet."}</td></tr>`}</tbody>
         </table>
       </div>
       <footer class="people-pager">
@@ -223,15 +256,20 @@ window.TinPeople = (() => {
     const icp = field(person, "icp");
     const fit = field(person, "icp_fit");
     const relationship = field(person, "linkedin_relationship")?.value;
+    const customer = field(person, "customer")?.value === "yes";
     const icpLabel = icpText(icp?.value);
     const fitValue = typeof fit?.value === "number" ? fit.value : null;
+    const memberSet = fit && memberValue(fit);
     const fitClass = fitValue === null || fit.stale ? "is-muted" : fitValue >= view.fitShown ? "" : "is-secondary";
+    const mark = fit?.stale && fitValue !== null ? "old" : memberSet ? setMark(fit) : "";
     const touch = person.last_touch;
+    const note = person.note;
     return `<tr tabindex="0" data-person="${escape(person.id)}" class="${person.id === view.openId ? "is-selected" : ""}" aria-label="${escape(person.name || "Unnamed")}">
-      <td class="is-name"><span>${escape(person.name || "Unnamed")}</span></td>
+      <td class="is-name"><span class="people-name"><span>${escape(person.name || "Unnamed")}</span>${customer ? "<small>customer</small>" : ""}</span></td>
       <td class="is-headline"><span>${escape(person.headline)}</span></td>
-      <td class="is-icp ${icpLabel.muted ? "is-muted" : ""}"><span>${escape(icpLabel.text)}</span></td>
-      <td class="is-fit ${fitClass}" ${fit ? `data-fit="${escape(person.id)}"` : ""}>${fit?.stale && fitValue !== null ? "<small>old</small>" : ""}<span>${fitValue === null ? "—" : fitValue.toFixed(2)}</span></td>
+      <td class="is-icp ${icpLabel.muted ? "is-muted" : ""}" title="${escape(icpLabel.muted ? "" : icpLabel.text)}"><span class="is-short">${escape(icpLabel.short)}</span><span class="is-full">${escape(icpLabel.text)}</span></td>
+      <td class="is-fit ${fitClass}" ${fit ? `data-fit="${escape(person.id)}"` : ""}>${mark ? `<small>${mark}</small>` : ""}<span>${fitValue === null ? "—" : fitValue.toFixed(2)}</span></td>
+      <td class="is-notes" ${note ? `data-note="${escape(person.id)}"` : ""}><span>${note ? escape(note.body.split("\n")[0]) : ""}</span></td>
       <td class="is-linkedin"><span>${escape(RELATIONSHIP[relationship] || "—")}</span></td>
       <td class="is-touch"><span>${touch ? `${escape(day(touch.at))} · ${escape(touch.kind)}` : "—"}</span></td>
     </tr>`;
@@ -263,22 +301,40 @@ window.TinPeople = (() => {
       });
     });
     body.querySelectorAll("td[data-fit]").forEach((cell) => {
-      cell.addEventListener("pointerenter", () => showHover(cell));
+      cell.addEventListener("pointerenter", () => showHover(cell, fitHover(cell.dataset.fit)));
+      cell.addEventListener("pointerleave", hideHover);
+    });
+    body.querySelectorAll("td[data-note]").forEach((cell) => {
+      cell.addEventListener("pointerenter", () => showHover(cell, noteHover(cell.dataset.note)));
       cell.addEventListener("pointerleave", hideHover);
     });
   }
 
   // The reason behind a score, its lineage, and whether it's out of date (PEOPLE-A1 hover).
-  function showHover(cell) {
-    const person = view.people?.find((item) => item.id === cell.dataset.fit);
+  function fitHover(id) {
+    const person = view.people?.find((item) => item.id === id);
     const fit = person && field(person, "icp_fit");
-    if (!fit) return;
+    if (!fit) return "";
     const icp = field(person, "icp");
+    const line = [typeof fit.value === "number" ? fit.value.toFixed(2) : "", icpShort(icp?.value), day(fit.at)].filter(Boolean).join(" · ");
+    const reason = memberValue(fit) ? setNote(fit) : fit.reason;
+    return `${reason ? `<p>${escape(reason)}</p>` : ""}<code>${escape(line)}</code>${fit.stale ? `<small>${escape(staleNote(fit, person))}</small>` : ""}`;
+  }
+
+  // The newest note in full (PEOPLE-N1b hover).
+  function noteHover(id) {
+    const note = view.people?.find((item) => item.id === id)?.note;
+    if (!note) return "";
+    const line = [note.by, day(note.at), note.count > 1 ? `latest of ${note.count} notes` : ""].filter(Boolean).join(" · ");
+    return `<p class="is-note">${escape(note.body)}</p><code>${escape(line)}</code>`;
+  }
+
+  function showHover(cell, html) {
+    if (!html) return;
     hover ||= Object.assign(document.createElement("div"), { className: "people-hover", role: "tooltip" });
     if (!hover.isConnected) document.body.append(hover);
-    const line = [typeof fit.value === "number" ? fit.value.toFixed(2) : "", icpShort(icp?.value), day(fit.at)].filter(Boolean).join(" · ");
-    hover.innerHTML = `${fit.reason ? `<p>${escape(fit.reason)}</p>` : ""}<code>${escape(line)}</code>${fit.stale ? `<small>${escape(staleNote(fit))}</small>` : ""}`;
-    // Under the score, its right edge on the cell's.
+    hover.innerHTML = html;
+    // Under the cell, its right edge on the cell's.
     const rect = cell.getBoundingClientRect();
     hover.style.left = `${Math.max(16, rect.right - 300)}px`;
     hover.style.top = `${rect.bottom - 4}px`;
@@ -305,13 +361,14 @@ window.TinPeople = (() => {
     if (switching || !current.person || current.person.id !== id) {
       current.person = current.people?.find((item) => item.id === id) || null;
       current.personError = null;
+      Object.assign(current, personState());
     }
     setPersonParam(id);
     renderPanel();
     syncSelection();
     if (focus) document.getElementById("person-panel")?.focus({ preventScroll: true });
     try {
-      const person = await current.api(`/api/projects/${encodeURIComponent(current.projectId)}/people/${encodeURIComponent(id)}`);
+      const person = await current.api(peoplePath(id));
       if (view !== current || !current.active || current.openId !== id) return;
       current.person = person;
     } catch (error) {
@@ -327,6 +384,7 @@ window.TinPeople = (() => {
     view.openId = null;
     view.person = null;
     view.confirming = false;
+    Object.assign(view, personState());
     setPersonParam(null);
     renderPanel();
     syncSelection();
@@ -337,15 +395,29 @@ window.TinPeople = (() => {
     view.main.querySelectorAll("tbody tr[data-person]").forEach((tr) => tr.classList.toggle("is-selected", tr.dataset.person === view.openId));
   }
 
-  function fieldRow(label, value, lineage, extra = "") {
-    return `<div class="person-field">
-      <div class="person-field-line"><span>${label}</span>${value}<code>${escape(lineage)}</code></div>
+  function fieldRow(label, value, lineage, extra = "", key = "") {
+    return `<div class="person-field ${view.menu === key && key ? "is-open" : ""}" ${key ? `data-field="${key}"` : ""}>
+      <div class="person-field-line"><span>${label}</span>${value}${lineage && view.menu !== key ? `<code>${escape(lineage)}</code>` : ""}</div>
       ${extra}
     </div>`;
   }
 
   function lineage(value) {
-    return [value.by, day(value.at)].filter(Boolean).join(" · ");
+    return value ? [value.by, day(value.at)].filter(Boolean).join(" · ") : "";
+  }
+
+  // A value a member can change: it reads as text and opens a menu (PEOPLE-E1).
+  function pick(key, label, muted) {
+    const open = view.menu === key;
+    return `<button class="person-pick ${muted ? "is-muted" : ""} ${open ? "is-open" : ""}" type="button" data-pick="${key}" aria-haspopup="listbox" aria-expanded="${open}" ${view.saving ? "disabled" : ""}><span>${escape(label)}</span>${CHEVRON}</button>`;
+  }
+
+  function menu(key, options, note = "") {
+    if (view.menu !== key) return "";
+    return `<div class="tin-select-menu person-menu" role="listbox" aria-label="${key === "icp" ? "ICP" : "Customer"}">
+      ${options.map((option) => `<button class="tin-select-option ${option.selected ? "is-selected" : ""}" type="button" role="option" aria-selected="${Boolean(option.selected)}" data-choose="${escape(option.value)}"><span>${escape(option.label)}</span>${option.tag ? `<code>${escape(option.tag)}</code>` : '<span class="tin-select-marker" aria-hidden="true"></span>'}</button>`).join("")}
+      ${note ? `<p>${escape(note)}</p>` : ""}
+    </div>`;
   }
 
   function fieldsHtml(person) {
@@ -353,21 +425,88 @@ window.TinPeople = (() => {
     const icp = field(person, "icp");
     const fit = field(person, "icp_fit");
     const relationship = field(person, "linkedin_relationship");
-    if (icp) {
-      const label = icpText(icp.value);
-      rows.push(fieldRow("ICP", `<strong class="${label.muted ? "is-muted" : ""}">${escape(label.text)}</strong>`, lineage(icp)));
+    const customer = field(person, "customer");
+    const memberFit = fit && memberValue(fit);
+    const profiles = view.profiles || [];
+    if (icp || profiles.length) {
+      const label = icpText(icp?.value);
+      // Tin's own pick is tagged with its score; a member's pick is the selected one.
+      const tinScore = !memberFit && fit && typeof fit.value === "number" ? `Tin ${fit.value.toFixed(2)}` : "";
+      const options = [...profiles, NOT_A_FIT].map((value) => ({
+        value,
+        label: value === NOT_A_FIT ? "Not a fit" : value,
+        tag: !memberFit && icp?.value === value ? tinScore : "",
+        selected: memberFit && icp?.value === value,
+      }));
+      const value = profiles.length ? pick("icp", label.text, label.muted) : `<strong class="${label.muted ? "is-muted" : ""}">${escape(label.text)}</strong>`;
+      rows.push(fieldRow("ICP", value, lineage(icp), menu("icp", options, "Your pick replaces Tin’s score, and later runs keep it."), "icp"));
     }
     if (fit) {
       const number = typeof fit.value === "number" ? fit.value.toFixed(2) : "—";
       const value = `<strong class="is-mono ${fit.stale || fit.value === null ? "is-muted" : ""}">${fit.stale && fit.value !== null ? "<small>old</small> " : ""}${number}</strong>`;
-      const notes = [fit.reason ? `<p>${escape(fit.reason)}</p>` : "", fit.stale ? `<p>${escape(staleNote(fit))}</p>` : ""].join("");
-      rows.push(fieldRow("ICP fit", value, lineage(fit), notes ? `<div class="person-field-notes">${notes}</div>` : ""));
+      const lines = [];
+      if (memberFit) {
+        lines.push(`<p>${escape(setNote(fit))}</p>`);
+        lines.push(`<button class="person-field-action" type="button" data-use-tin-score ${view.saving ? "disabled" : ""}>Use Tin’s score</button>`);
+      } else {
+        if (fit.reason) lines.push(`<p>${escape(fit.reason)}</p>`);
+        if (fit.stale) lines.push(`<p class="is-quiet">${escape(staleNote(fit, person))}</p>`);
+      }
+      rows.push(fieldRow("ICP fit", value, lineage(fit), lines.length ? `<div class="person-field-notes">${lines.join("")}</div>` : ""));
     }
     if (relationship) {
       rows.push(fieldRow("LinkedIn", `<strong>${escape(RELATIONSHIP[relationship.value] || "—")}</strong>`, lineage(relationship)));
     }
-    if (!rows.length) return "";
-    return `<section class="person-section"><h3>Fields <span>${rows.length}</span></h3>${rows.join("")}</section>`;
+    const isCustomer = customer?.value === "yes";
+    rows.push(fieldRow(
+      "Customer",
+      pick("customer", isCustomer ? "Yes" : "No", !isCustomer),
+      customer ? lineage(customer) : "",
+      [
+        menu("customer", [
+          { value: "yes", label: "Yes", selected: isCustomer },
+          { value: "no", label: "No", selected: Boolean(customer) && !isCustomer },
+        ]),
+        isCustomer ? '<div class="person-field-notes"><p>Tin leaves customers out of invitations and reach lists.</p></div>' : "",
+      ].join(""),
+      "customer",
+    ));
+    const error = view.fieldError ? `<p class="person-error" role="alert">${escape(view.fieldError)}</p>` : "";
+    return `<section class="person-section"><h3>Fields <span>${rows.length}</span></h3>${rows.join("")}${error}</section>`;
+  }
+
+  // Notes the team wrote about the person, newest first (PEOPLE-N1).
+  function notesHtml(person) {
+    if (!person.notes) return "";
+    const writing = view.draft.trim().length > 0;
+    const composer = `<div class="person-note-composer ${writing ? "is-writing" : ""}">
+      <textarea data-note-draft rows="${writing ? 3 : 1}" aria-label="Add a note" placeholder="Add a note about ${escape(firstName(person))}…" maxlength="2000">${escape(view.draft)}</textarea>
+      ${writing ? `<div class="person-note-actions">
+        <button class="person-note-cancel" type="button" data-note-cancel>Cancel</button>
+        <button class="button person-note-save" type="button" data-note-save ${view.saving ? "disabled" : ""}>${view.saving ? "Saving…" : "Save note"}</button>
+      </div>` : ""}
+    </div>`;
+    const notes = person.notes.map((note) => {
+      if (view.editing === note.id) {
+        return `<div class="person-note is-editing" data-note-id="${escape(note.id)}">
+          <textarea data-note-edit rows="3" aria-label="Edit note" maxlength="2000">${escape(view.editDraft)}</textarea>
+          <div class="person-note-actions">
+            <button class="person-note-cancel" type="button" data-note-edit-cancel>Cancel</button>
+            <button class="button person-note-save" type="button" data-note-edit-save ${view.saving ? "disabled" : ""}>${view.saving ? "Saving…" : "Save"}</button>
+          </div>
+        </div>`;
+      }
+      const meta = [note.by, day(note.at), note.edited ? "edited" : ""].filter(Boolean).join(" · ");
+      return `<div class="person-note" data-note-id="${escape(note.id)}">
+        <p>${escape(note.body)}</p>
+        <div class="person-note-meta"><code>${escape(meta)}</code>${note.mine ? `<span>
+          <button type="button" data-note-edit-start ${view.saving ? "disabled" : ""}>Edit</button>
+          <button type="button" data-note-delete ${view.saving ? "disabled" : ""}>Delete</button>
+        </span>` : ""}</div>
+      </div>`;
+    }).join("");
+    const error = view.noteError ? `<p class="person-error" role="alert">${escape(view.noteError)}</p>` : "";
+    return `<section class="person-section person-notes"><h3>Notes ${person.notes.length ? `<span>${person.notes.length}</span>` : ""}</h3>${composer}${error}${notes}</section>`;
   }
 
   function eventText(event) {
@@ -402,7 +541,7 @@ window.TinPeople = (() => {
       return `<footer class="person-forget">
         <div>
           <strong>Forget ${escape(name)}?</strong>
-          <p>Tin deletes this person’s fields and timeline in ${escape(view.projectName || "this project")} and won’t add them again, even when they react to a later post.${files}</p>
+          <p>Tin deletes this person’s fields, notes and timeline in ${escape(view.projectName || "this project")} and won’t add them again, even when they react to a later post.${files}</p>
           ${view.forgetError ? `<p class="person-forget-error" role="alert">${escape(view.forgetError)}</p>` : ""}
         </div>
         <div class="person-forget-actions">
@@ -430,16 +569,38 @@ window.TinPeople = (() => {
       panel.tabIndex = -1;
       panel.setAttribute("aria-labelledby", "person-panel-name");
       panel.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") closePerson();
+        if (event.key !== "Escape") return;
+        // Escape closes what is open inside the panel first: a menu, then a note being edited.
+        if (view.menu) {
+          const key = view.menu;
+          view.menu = null;
+          renderPanel();
+          document.querySelector(`#person-panel [data-pick="${key}"]`)?.focus();
+        } else if (view.editing) {
+          view.editing = null;
+          renderPanel();
+        } else if (event.target.matches("[data-note-draft]") && view.draft.trim()) {
+          // A note being written stays; Escape only leaves the box.
+          event.target.blur();
+        } else {
+          closePerson();
+        }
+      });
+      panel.addEventListener("pointerdown", (event) => {
+        if (view.menu && !event.target.closest(".person-field.is-open, [data-pick]")) {
+          view.menu = null;
+          renderPanel();
+        }
       });
       document.body.append(panel);
     }
     document.body.classList.add("has-person-panel");
+    const scroll = panel.querySelector(".person-panel-body")?.scrollTop || 0;
     if (!person) {
       panel.innerHTML = `<header><div class="person-panel-title"><h2 id="person-panel-name">${view.personError ? "Not found" : "Loading…"}</h2><button class="diagram-panel-close" type="button" data-close-person aria-label="Close this person">${CLOSE}</button></div>
         ${view.personError ? `<p>${escape(view.personError)}</p>` : ""}</header>`;
     } else {
-      const body = [fieldsHtml(person), timelineHtml(person)].join("");
+      const body = [fieldsHtml(person), notesHtml(person), timelineHtml(person)].join("");
       panel.innerHTML = `<header>
           <div class="person-panel-title"><h2 id="person-panel-name">${escape(person.name || "Unnamed")}</h2><button class="diagram-panel-close" type="button" data-close-person aria-label="Close this person">${CLOSE}</button></div>
           ${person.headline ? `<p>${escape(person.headline)}</p>` : ""}
@@ -447,7 +608,13 @@ window.TinPeople = (() => {
         </header>
         <div class="person-panel-body">${body}${view.personError ? `<p class="person-quiet">${escape(view.personError)}</p>` : ""}</div>
         ${footerHtml(person)}`;
+      const scroller = panel.querySelector(".person-panel-body");
+      if (scroller) scroller.scrollTop = scroll;
     }
+    bindPanel(panel, person);
+  }
+
+  function bindPanel(panel, person) {
     panel.querySelector("[data-close-person]").addEventListener("click", () => closePerson());
     panel.querySelector("[data-person-forget]")?.addEventListener("click", () => {
       view.confirming = true;
@@ -462,6 +629,135 @@ window.TinPeople = (() => {
       panel.querySelector("[data-person-forget]")?.focus();
     });
     panel.querySelector("[data-person-confirm]")?.addEventListener("click", () => forget(person));
+    if (!person) return;
+
+    panel.querySelectorAll("[data-pick]").forEach((button) => button.addEventListener("click", () => {
+      const key = button.dataset.pick;
+      view.menu = view.menu === key ? null : key;
+      view.fieldError = null;
+      renderPanel();
+      document.querySelector(`#person-panel .person-field.is-open .tin-select-option`)?.focus();
+    }));
+    panel.querySelectorAll("[data-choose]").forEach((option) => option.addEventListener("click", () => {
+      const key = view.menu;
+      const value = option.dataset.choose;
+      view.menu = null;
+      if (key === "icp") change({ fit: { icp: value === NOT_A_FIT ? null : value } });
+      else if (key === "customer") change({ customer: value === "yes" });
+    }));
+    panel.querySelectorAll(".person-menu").forEach((list) => list.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      event.preventDefault();
+      const options = [...list.querySelectorAll(".tin-select-option")];
+      const index = options.indexOf(document.activeElement);
+      const next = (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[next]?.focus();
+    }));
+    panel.querySelector("[data-use-tin-score]")?.addEventListener("click", () => change({ fit: null }));
+
+    const draft = panel.querySelector("[data-note-draft]");
+    draft?.addEventListener("input", () => {
+      const was = view.draft.trim().length > 0;
+      view.draft = draft.value;
+      // The buttons appear with the first words, and go with the last.
+      if (was !== view.draft.trim().length > 0) {
+        renderPanel();
+        const again = document.querySelector("#person-panel [data-note-draft]");
+        again?.focus();
+        again?.setSelectionRange(again.value.length, again.value.length);
+      }
+    });
+    draft?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        saveNote();
+      }
+    });
+    panel.querySelector("[data-note-save]")?.addEventListener("click", saveNote);
+    panel.querySelector("[data-note-cancel]")?.addEventListener("click", () => {
+      view.draft = "";
+      view.noteError = null;
+      renderPanel();
+    });
+    panel.querySelectorAll("[data-note-edit-start]").forEach((button) => button.addEventListener("click", () => {
+      const id = button.closest("[data-note-id]").dataset.noteId;
+      view.editing = id;
+      view.editDraft = person.notes.find((note) => note.id === id)?.body || "";
+      view.noteError = null;
+      renderPanel();
+      const box = document.querySelector("#person-panel [data-note-edit]");
+      box?.focus();
+      box?.setSelectionRange(box.value.length, box.value.length);
+    }));
+    const edit = panel.querySelector("[data-note-edit]");
+    edit?.addEventListener("input", () => { view.editDraft = edit.value; });
+    edit?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        saveEdit();
+      }
+    });
+    panel.querySelector("[data-note-edit-save]")?.addEventListener("click", saveEdit);
+    panel.querySelector("[data-note-edit-cancel]")?.addEventListener("click", () => {
+      view.editing = null;
+      renderPanel();
+    });
+    panel.querySelectorAll("[data-note-delete]").forEach((button) => button.addEventListener("click", () => {
+      const id = button.closest("[data-note-id]").dataset.noteId;
+      write(`${peoplePath(person.id)}/notes/${encodeURIComponent(id)}`, { method: "DELETE" }, "noteError", "Note deleted.");
+    }));
+  }
+
+  function change(body) {
+    write(peoplePath(view.person.id), { method: "PATCH", body: JSON.stringify(body) }, "fieldError");
+  }
+
+  function saveNote() {
+    if (!view.draft.trim() || view.saving) return;
+    write(`${peoplePath(view.person.id)}/notes`, { method: "POST", body: JSON.stringify({ body: view.draft }) }, "noteError")
+      .then((saved) => { if (saved) view.draft = ""; renderPanel(); });
+  }
+
+  function saveEdit() {
+    if (!view.editing || view.saving) return;
+    write(`${peoplePath(view.person.id)}/notes/${encodeURIComponent(view.editing)}`, { method: "PATCH", body: JSON.stringify({ body: view.editDraft }) }, "noteError")
+      .then((saved) => { if (saved) view.editing = null; renderPanel(); });
+  }
+
+  // One change to the open person. The answer is the person as they now are, which also
+  // updates their row in the grid.
+  async function write(path, options, errorKey, done = "") {
+    const current = view;
+    const id = current.openId;
+    current.saving = true;
+    current[errorKey] = null;
+    renderPanel();
+    let person;
+    try {
+      person = await current.api(path, options);
+    } catch (error) {
+      if (view !== current) return false;
+      current.saving = false;
+      current[errorKey] = error.message;
+      if (current.active && current.openId === id) renderPanel();
+      return false;
+    }
+    if (view !== current) return false;
+    current.saving = false;
+    if (current.openId === id) current.person = person;
+    const notes = person.notes || [];
+    current.people = (current.people || []).map((item) => (item.id !== person.id ? item : {
+      ...item,
+      fields: person.fields,
+      note: notes[0] ? { body: notes[0].body, by: notes[0].by, at: notes[0].at, count: notes.length } : null,
+      notes_text: notes.map((note) => note.body).join(" \n"),
+    }));
+    if (done) current.toast?.(done);
+    if (!current.active) return true;
+    renderBody();
+    syncSelection();
+    renderPanel();
+    return true;
   }
 
   async function forget(person) {
@@ -470,7 +766,7 @@ window.TinPeople = (() => {
     current.forgetError = null;
     renderPanel();
     try {
-      await current.api(`/api/projects/${encodeURIComponent(current.projectId)}/people/${encodeURIComponent(person.id)}`, { method: "DELETE" });
+      await current.api(peoplePath(person.id), { method: "DELETE" });
     } catch (error) {
       if (view !== current) return;
       current.forgetting = false;
@@ -490,7 +786,7 @@ window.TinPeople = (() => {
   // Leaving the view: the open person, the panel and the hover card go with it.
   function close() {
     hideHover();
-    if (view) Object.assign(view, { active: false, openId: null, person: null, personError: null, confirming: false });
+    if (view) Object.assign(view, { active: false, openId: null, person: null, personError: null, confirming: false, ...personState() });
     document.getElementById("person-panel")?.remove();
     document.body.classList.remove("has-person-panel");
   }

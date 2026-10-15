@@ -186,6 +186,16 @@ async def test_values_keep_lineage_and_a_members_edit(publication_db):
                 )
         fields = (await records.people(conn, project_id))[0]["fields"]
     assert fields["name"].pop("set_at")
+    # A member's value keeps the run's value it replaced.
+    replaced = fields["name"].pop("previous")
+    assert replaced.pop("set_at")
+    assert replaced == {
+        "text": "Jane Doe",
+        "number": None,
+        "reason": "",
+        "set_by": RUN,
+        "definition": "icp-1",
+    }
     assert fields["name"] == {
         "text": "Jane",
         "number": None,
@@ -194,6 +204,7 @@ async def test_values_keep_lineage_and_a_members_edit(publication_db):
         "set_by_kind": "member",
         "set_by": "u1",
     }
+    assert fields["icp_fit"]["previous"] is None
     assert fields["icp_fit"]["number"] == 0.82 and fields["icp_fit"]["definition"] == "icp-2"
     assert fields["headline"]["text"] is None
     assert fields["headline"]["reason"] == "LinkedIn showed no headline"

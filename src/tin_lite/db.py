@@ -6940,9 +6940,11 @@ class Database:
             "DELETE FROM linkedin_post_readings WHERE project_id = $1",
             "DELETE FROM linkedin_posts WHERE project_id = $1",
             "DELETE FROM linkedin_follower_counts WHERE project_id = $1",
-            # People records: other people's names and headlines, the timeline and who was
-            # forgotten. Children first; merged records point at others in the same project.
+            # People records: other people's names and headlines, the timeline, members' notes
+            # and who was forgotten. Children first; merged records point at others in the same
+            # project.
             "DELETE FROM record_events WHERE project_id = $1",
+            "DELETE FROM record_notes WHERE project_id = $1",
             "DELETE FROM record_values WHERE project_id = $1",
             "DELETE FROM record_identifiers WHERE project_id = $1",
             "DELETE FROM records WHERE project_id = $1",

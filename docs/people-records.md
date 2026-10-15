@@ -42,13 +42,29 @@ Each value records:
 
 An empty value can still carry a reason, such as an ICP score the model couldn't support.
 A run never replaces a value a member set. A write that changes nothing keeps the earlier
-value and its time.
+value and its time, unless the writer asks for a new time: the engagers run does when it scores
+someone again after a note, so the score counts as newer than the note even when unchanged.
+
+A member's value keeps the run's value it replaced in `previous`. `restore_run_values` puts
+that value back ("Use Tin's score"); a member's value with no run value behind it is removed, so
+the next run fills the field.
 
 The built-in fields are:
 - `name`, `headline` (text);
 - `linkedin_relationship` (`connected`, `pending` or `none`);
-- `icp` (which named profile in the ICP file);
-- `icp_fit` (a number from 0 to 1).
+- `icp` (which named profile in the ICP file, or `none`);
+- `icp_fit` (a number from 0 to 1);
+- `customer` (`yes` or `no`), which only members set.
+
+## Notes
+
+`record_notes` holds what members write about a person: up to 2,000 characters each, with the
+author and when. Only the author edits or deletes a note. A merge moves notes to the survivor.
+
+The engagers run sends a person's five newest notes with their name and headline when it scores
+them, and the instructions weigh a note above the headline. A note newer than a run's score
+makes that score stale: the view marks it, and `unscored` picks the person up again. A fit a
+member set is never sent to the model.
 
 ## Events
 
@@ -59,37 +75,60 @@ event written to a record that later merged counts under the survivor.
 ## The People view
 
 `/people` lists a project's people for its members (`src/tin_lite/static/people.js`, Paper
-boards PEOPLE-A1, C1 and C1b). It reads `GET /api/projects/{project_id}/people`
-(`people_records.directory`), at most 5,000 people, newest first; the page sorts, searches,
-segments and pages them.
+boards PEOPLE-A1, C1, C1b, E1–E3, N1 and N1b). It reads `GET /api/projects/{project_id}/people`
+(`people_records.directory`), at most 5,000 people, newest first, with the ICP file's profiles;
+the page sorts, searches, segments and pages them. The HTTP routes (`people_api.py`) and the MCP
+tools share `people_service.People`.
 
-- **Grid:** name, headline, ICP, ICP fit, LinkedIn (connected or not) and last touch.
+- **Grid:** name (with "customer" for a customer), headline, ICP, ICP fit, notes, LinkedIn
+  (connected or not) and last touch.
+  - The full grid names an ICP by its short label ("ICP 1"), with the heading on hover; beside
+    the panel it reads in full.
+  - Notes shows the start of the newest note; hovering shows it whole, with who wrote it and
+    how many notes there are. Search covers every note.
   - Last touch is the latest event. LinkedIn gives no time for a reaction, so a reaction counts
     on the post's date.
   - The segments are all people, ICP fit (0.6 or more) and not connected yet.
 - **Score hover:** the reason, the score, the ICP and when it was set.
   - A score computed under an earlier `strategy/ICP.md`, or by an earlier version of the
     scoring, reads "old": the view compares each value's `definition` with the current one
-    (`linkedin_engagers.read_icp`), and the next engagers run rescores it.
+    (`linkedin_engagers.read_icp`), and the next engagers run rescores it. So does a score
+    older than the person's newest note.
+  - A member's fit reads "you" (or "team") beside the number, and the hover gives Tin's score
+    it replaced.
 - **Person panel:** `GET …/people/{person_id}` adds the timeline. The address keeps the person
   (`?person=`), so a reload opens them again.
   - Each field says who set it: the workflow's short name ("engagers"), or "you" and
     "a teammate" for a member's value.
   - A reaction says whose post it was: the run read the LinkedIn of the member who started it.
+- **Correcting a person:** `PATCH …/people/{person_id}`.
+  - `{"fit": {"icp": "<profile>"}}` picks an ICP from the ICP file and sets the fit to 1;
+    `{"fit": {"icp": null}}` is not a fit (0); `{"fit": null}` uses Tin's score again.
+  - `{"customer": true}` marks a customer. The panel says Tin leaves customers out of
+    invitations and reach lists, which the sending phase must honour.
+  - In the panel, the ICP and Customer values open a menu.
+- **Notes:** `POST …/people/{person_id}/notes`, `PATCH` and `DELETE …/notes/{note_id}` for the
+  author. The panel lists them between Fields and Timeline under a box to add one; ⌘/Ctrl+Enter
+  saves.
 - **Forget:** `DELETE …/people/{person_id}` runs `forget` after a confirmation in the panel's
   footer. The engagers list in Files drops the person at its next run. A person forgotten while
   a run scores them is skipped, not an error.
 
 The menu shows People where the project is offered a workflow that finds people (today only
 `social.linkedin_engagers`, which is gated per project), and on `/people` itself. Any project
-member can read and forget the project's people; other users get 404.
+member can read, correct, annotate and forget the project's people; other users get 404.
+
+MCP gives a member's coding agent the same: `list_people` (segments, a search over notes),
+`get_person`, `update_person` (an ICP, not a fit, Tin's score again, customer),
+`add_person_note`, `delete_person_note` (the caller's own) and `forget_person`, which needs the
+person's exact name.
 
 ## Forgetting and deletion
 
-`forget` deletes the person and every record merged into them, with their values, events and
-identifiers. It keeps a SHA-256 of each identifier, salted with the project ID, so the next
+`forget` deletes the person and every record merged into them, with their values, events,
+notes and identifiers. It keeps a SHA-256 of each identifier, salted with the project ID, so the next
 read refuses them; `upsert_person` returns `None` for that person. Forgetting is per project.
 
-Deleting a project purges all six tables (`purge_project_data`).
+Deleting a project purges all seven tables (`purge_project_data`).
 `tests/test_project_purge.py` fails if a new table that holds project data is missing from
 the purge.

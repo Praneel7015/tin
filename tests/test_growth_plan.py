@@ -994,6 +994,7 @@ def test_definition_pins_the_contract_and_the_assets_stay_consistent():
             "social.linkedin_publish",
             "social.linkedin_listen",
             "social.linkedin_results",
+            "social.linkedin_engagers",
         }
     )
     # content.plan's planning agent runs only inside content.plan.

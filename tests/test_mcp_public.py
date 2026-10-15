@@ -648,6 +648,7 @@ def test_reviewed_public_catalog_coverage_and_explicit_exclusions():
         "social.linkedin_publish",
         "social.linkedin_listen",
         "social.linkedin_results",
+        "social.linkedin_engagers",
         "project.task",
         "growth.onboarding",
         "growth.onboarding_plan",

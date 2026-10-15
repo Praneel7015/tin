@@ -18,6 +18,7 @@ from tin_lite import (
     content_repository_delivery,
     growth_onboarding,
     growth_plan,
+    linkedin_engagers,
     linkedin_listening,
     linkedin_posts,
     organic_system,
@@ -1671,6 +1672,79 @@ BUILTIN_WORKFLOWS = (
         integration_requirements=(
             IntegrationRequirement(
                 LINKEDIN_POSTING_PROVIDER, ("linkedin.posts.publish",), required=True
+            ),
+        ),
+    ),
+    BuiltinWorkflow(
+        id=linkedin_engagers.WORKFLOW_ID,
+        key=linkedin_engagers.KEY,
+        title="People who engaged with your LinkedIn posts",
+        description=(
+            "Read your own LinkedIn posts from the last 90 days and everyone who reacted to "
+            "them, keep each person in People with whether you're already connected, score "
+            "them against strategy/ICP.md, and list them best fit first in "
+            "people/linkedin-engagers.csv. Reads with your saved LinkedIn session; sends "
+            "nothing."
+        ),
+        executor=linkedin_engagers.KEY,
+        version_label="1.0.0",
+        presentation=WorkflowDiagram(
+            direction="TD",
+            nodes=(
+                DiagramNode(
+                    "session",
+                    "store",
+                    "Your saved LinkedIn session",
+                    "from Tin for Chrome, with cloud reading on",
+                ),
+                DiagramNode(
+                    "posts",
+                    "surface",
+                    "Read your posts",
+                    "your own, from the last 90 days",
+                ),
+                DiagramNode(
+                    "reactions",
+                    "surface",
+                    "Read who reacted",
+                    "ten at a time, pausing between pages",
+                ),
+                DiagramNode(
+                    "people",
+                    "store",
+                    "People records",
+                    "name, headline, connected or not, the post",
+                ),
+                DiagramNode(
+                    "score",
+                    "step",
+                    "Score against your ICP",
+                    "each person, with a reason",
+                ),
+                DiagramNode(
+                    "files",
+                    "receipt",
+                    "The list in project Files",
+                    "people/linkedin-engagers.csv and a summary",
+                ),
+            ),
+            edges=(
+                DiagramEdge("session", "posts"),
+                DiagramEdge("posts", "reactions"),
+                DiagramEdge("reactions", "people"),
+                DiagramEdge("people", "reactions", label="next page or post"),
+                DiagramEdge("people", "score"),
+                DiagramEdge("score", "files"),
+            ),
+        ),
+        schedule_modes=("on_demand",),
+        system=LINKEDIN_SYSTEM,
+        input_schema=linkedin_engagers.INPUT_SCHEMA,
+        model_route=linkedin_engagers.ROUTE,
+        integration_requirements=(
+            IntegrationRequirement(
+                provider_key=connection_collection.PROVIDER,
+                capabilities=(connection_collection.CAPABILITY,),
             ),
         ),
     ),

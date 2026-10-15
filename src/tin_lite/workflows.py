@@ -25,6 +25,7 @@ from tin_lite.domain import (
     CODEX_PROCEDURE_EXECUTOR,
     CREATIVE_CHARACTER_WORKFLOW_NAME,
     EMAIL_CAMPAIGN_WORKFLOW_NAME,
+    LINKEDIN_ENGAGERS_WORKFLOW_NAME,
     LINKEDIN_LISTEN_CHECKPOINTS,
     LINKEDIN_LISTEN_READ_ATTEMPTS,
     LINKEDIN_LISTEN_WORKFLOW_NAME,
@@ -1834,6 +1835,60 @@ class LinkedInResultsWorkflow:
             raise
 
 
+@workflow.defn(name=LINKEDIN_ENGAGERS_WORKFLOW_NAME)
+class LinkedInEngagersWorkflow:
+    """Read the founder's own posts, then each post's reactions a few pages at a time; score
+    the people against the ICP file and write the list. History holds post URNs, page
+    offsets and counts; names, headlines and scores stay in Postgres."""
+
+    @workflow.run
+    async def run(self, run_id: str) -> None:
+        async def call(name, argument=run_id, *, minutes=5):
+            return await workflow.execute_activity(
+                name,
+                argument,
+                start_to_close_timeout=timedelta(minutes=minutes),
+                heartbeat_timeout=timedelta(minutes=2) if minutes > 5 else None,
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=30),
+                    maximum_attempts=3,
+                    non_retryable_error_types=[
+                        "IntegrationAuthorizationError",
+                        "WorkflowInputError",
+                        "BillingError",
+                    ],
+                ),
+            )
+
+        try:
+            await call("linkedin_engagers_prepare")
+            posts = await call("linkedin_engagers_posts", minutes=8)
+            notes = {"posts": len(posts), "reactions": 0, "unread": 0, "capped": False}
+            for post in posts:
+                start = 0
+                while start is not None:
+                    page = await call(
+                        "linkedin_engagers_reactions",
+                        {"run_id": run_id, **post, "start": start},
+                        minutes=8,
+                    )
+                    notes["reactions"] += page["people"]
+                    notes["capped"] = notes["capped"] or page["capped"]
+                    start = page["next_start"]
+                    if page["outcome"] == "unread":
+                        notes["unread"] += 1
+                    if page["outcome"] == "stopped":
+                        notes["stopped"] = page["reason"]
+                        break
+                if notes.get("stopped"):
+                    break
+            await call("linkedin_engagers_score", minutes=20)
+            await call("linkedin_engagers_publish", {"run_id": run_id, "notes": notes})
+        except BaseException as exc:
+            await call("linkedin_engagers_failure", failure_input(run_id, exc))
+            raise
+
+
 @workflow.defn(name="growth.onboarding_plan")
 class GrowthOnboardingPlanWorkflow:
     """Read, write, save. Only the run identifier enters history; activities hold every result."""
@@ -1970,6 +2025,7 @@ def registered_workflows() -> list[type]:
         LinkedInPublishWorkflow,
         LinkedInListenWorkflow,
         LinkedInResultsWorkflow,
+        LinkedInEngagersWorkflow,
         OrganicTrafficSystemWorkflow,
         GrowthOnboardingWorkflow,
         GrowthOnboardingPlanWorkflow,
@@ -2011,6 +2067,7 @@ def registered_workflow_implementations() -> dict[str, type]:
         "social.linkedin_publish": LinkedInPublishWorkflow,
         LINKEDIN_LISTEN_WORKFLOW_NAME: LinkedInListenWorkflow,
         LINKEDIN_RESULTS_WORKFLOW_NAME: LinkedInResultsWorkflow,
+        LINKEDIN_ENGAGERS_WORKFLOW_NAME: LinkedInEngagersWorkflow,
         "organic.traffic_system": OrganicTrafficSystemWorkflow,
         "growth.onboarding": GrowthOnboardingWorkflow,
         "growth.onboarding_plan": GrowthOnboardingPlanWorkflow,

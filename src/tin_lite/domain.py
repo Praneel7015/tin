@@ -34,6 +34,7 @@ PAYMENT_RECOVERY_WORKFLOW_NAME = "revenue.payment_recovery"
 PAYMENT_RECOVERY_DECISION_DAYS = 6
 LINKEDIN_LISTEN_WORKFLOW_NAME = "social.linkedin_listen"
 LINKEDIN_RESULTS_WORKFLOW_NAME = "social.linkedin_results"
+LINKEDIN_ENGAGERS_WORKFLOW_NAME = "social.linkedin_engagers"
 # When Tin reads a post it published, in hours after posting; see linkedin_listening.py.
 LINKEDIN_LISTEN_CHECKPOINTS = (("1h", 1), ("4h", 4), ("24h", 24), ("72h", 72))
 # A reading LinkedIn doesn't answer after this many attempts is skipped, not failed.

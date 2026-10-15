@@ -325,8 +325,12 @@ def view_url(value: str, page: int) -> str:
     return urlunsplit((u.scheme, u.netloc, u.path, urlencode(values), ""))
 
 
+# Workflows that read LinkedIn with a project's saved session: shown where collection is on.
+SESSION_EXECUTORS = frozenset({KEY, "social.linkedin_engagers"})
+
+
 def visible(settings, workflow, project_id):
-    return workflow.executor != KEY or enabled(settings, project_id)
+    return workflow.executor not in SESSION_EXECUTORS or enabled(settings, project_id)
 
 
 def cloud_ready(settings):

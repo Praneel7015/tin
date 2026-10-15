@@ -17,6 +17,22 @@ from tin_lite.connection_collection import (
 )
 from tin_lite.usage_capture import observe_sandbox
 
+ENGAGEMENT_OPERATION = "linkedin_engagement_v1"
+# What the runner may answer instead of a result; anything else is cloud_failed.
+ENGAGEMENT_ERRORS = frozenset(
+    {
+        "session_expired",
+        "account_changed",
+        "access_denied",
+        "challenge",
+        "rate_limited",
+        "unsupported_contract",
+        "unsupported_identity",
+        "unsupported_search_contract",
+        "cloud_failed",
+    }
+)
+
 
 class LinkedInCloud:
     def __init__(self, database, settings):
@@ -223,3 +239,74 @@ class LinkedInCloud:
             saved["supplier_usage"] = "recorded_separately"
             await self.db.complete_effect(conn, execution_key=key, result=saved)
             return saved["response"]
+
+    async def engagement(self, conn, *, execution_key, run_id, session, packet, seconds=270):
+        """One engagement read (the member's posts, or a post's reactions) in a fresh sandbox.
+
+        The caller holds the read's effect lock and has started its receipt. This saves the
+        sandbox before the session reaches it, so an interrupted read is cleaned up and never
+        silently bought again. The caller validates the answer for its kind.
+        """
+
+        template = getattr(self.settings, "linkedin_cloud_template", None)
+        if self.key is None or not template:
+            raise CollectionError("cloud_unavailable")
+        saved = {"template": template, "run_id": str(run_id), "supplier_usage": "unconfirmed"}
+        await self.db.save_effect_progress(conn, execution_key=execution_key, result=saved)
+        sandbox = None
+        try:
+            sandbox = await AsyncSandbox.create(
+                template,
+                timeout=seconds + 30,
+                lifecycle={"on_timeout": "kill", "auto_resume": False},
+                metadata={
+                    "run_id": str(run_id),
+                    "execution_key": execution_key,
+                    "profile": "linkedin_engagement_v1",
+                },
+                network={
+                    "allow_out": ["www.linkedin.com"],
+                    "deny_out": lambda context: [context.all_traffic],
+                },
+                api_key=self.key,
+            )
+            saved["sandbox_id"] = sandbox.sandbox_id
+            await self.db.save_effect_progress(conn, execution_key=execution_key, result=saved)
+            await observe_sandbox(self.db, sandbox.sandbox_id, info=await sandbox.get_info())
+            request = {
+                **packet,
+                "session": session,
+                "expires_at": (datetime.now(UTC) + timedelta(seconds=seconds)).timestamp(),
+            }
+            # A root-only file, as for collection: the session is never a shell argument,
+            # an environment value, stdout or a project artifact.
+            await sandbox.files.write(
+                "/run/tin-collection/request.json", canonical_json(request), user="root"
+            )
+            await sandbox.commands.run(
+                "chmod 600 /run/tin-collection/request.json && python "
+                "/opt/tin-collection/runner.py",
+                user="root",
+                timeout=seconds + 10,
+            )
+            raw = await sandbox.files.read("/run/tin-collection/result.json", user="root")
+            if not isinstance(raw, str) or len(raw.encode()) > 400_000:
+                raise CollectionError("cloud_failed")
+            value = json.loads(raw)
+        except CollectionError:
+            raise
+        except Exception:
+            raise CollectionError("cloud_failed") from None
+        finally:
+            if sandbox is not None:
+                try:
+                    async with asyncio.timeout(20):
+                        await self.cleanup(sandbox.sandbox_id)
+                except Exception:
+                    raise CollectionError("cloud_cleanup_pending") from None
+        if isinstance(value, dict) and set(value) == {"error"}:
+            code = value["error"]
+            raise CollectionError(code if code in ENGAGEMENT_ERRORS else "cloud_failed")
+        if not isinstance(value, dict):
+            raise CollectionError("cloud_failed")
+        return value

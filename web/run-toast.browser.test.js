@@ -10,12 +10,12 @@ test("a manual run's toast names the workflow, not its key", {timeout: 120000}, 
   const browser = await chromium.launch({headless: true});
   try {
     const {page, context, errors} = await openApp(browser, base, {url: "/system"});
-    await page.getByRole("button", {name: "Draft an answer page"}).first().click();
+    await page.getByRole("button", {name: "Draft planned content"}).first().click();
     await page.getByRole("button", {name: "Manual run", exact: true}).click();
     // The toast element is always in the page; wait for this run's words in it.
     const toast = page.locator(".toast", {hasText: "started."});
     await toast.waitFor();
-    assert.equal(await toast.textContent(), "Draft an answer page started.");
+    assert.equal(await toast.textContent(), "Draft planned content started.");
     assert.deepEqual(errors, []);
     await context.close();
   } finally {

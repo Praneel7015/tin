@@ -62,7 +62,8 @@ test("a batch waits first in Decisions, and approving sends only the ticked peop
     assert.match(await card.innerText(), /one at a time on its own schedule, never together/);
     // The window is the project's time zone, named when it isn't the viewer's.
     assert.match(await card.innerText(), /weekdays 9:00–17:00 Europe\/Berlin, at most 15 a day/);
-    assert.match(await card.innerText(), /The first goes out around \d+:\d\d today, the last on/);
+    // An hour from now is tomorrow late in the day.
+    assert.match(await card.innerText(), /The first goes out around \d+:\d\d (today|tomorrow), the last on/);
     assert.equal(await card.locator(".request-row").count(), 3);
     await card.getByRole("checkbox").nth(2).uncheck();
     const approve = card.getByRole("button", {name: "Approve 2 requests"});
@@ -71,7 +72,7 @@ test("a batch waits first in Decisions, and approving sends only the ticked peop
     const write = served.requestWrites.find(item => item.path.endsWith("/approve"));
     assert.deepEqual(write.body.people, ["p-1", "p-2"]);
     assert.match(write.body.request_id, /^[0-9a-f-]{36}$/);
-    assert.equal(await page.locator(".requests-card").count(), 0);
+    await page.locator(".requests-card").waitFor({state: "detached"});
   });
 });
 
@@ -125,6 +126,7 @@ test("with reading in this browser only, sending waits for cloud reading", {time
 
 test("a warning from LinkedIn pauses sending until you resume it", {timeout: 120000}, async () => {
   await open({url: "/integrations", state: requests({on: true, held: true})}, async (page, served) => {
+    await page.locator(".linkedin-card").waitFor();
     assert.deepEqual(await page.locator("[data-integration-filter]").allInnerTexts(), ["All 2", "Connected 0", "Needs you 1", "Available 1"]);
     assert.match(await page.locator(".linkedin-card .integration-health").innerText(), /sending paused/);
     await page.locator(".linkedin-card").getByRole("button", {name: "Configure"}).click();

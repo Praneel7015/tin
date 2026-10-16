@@ -72,7 +72,7 @@ test("a batch waits first in Decisions, and approving sends only the ticked peop
     const write = served.requestWrites.find(item => item.path.endsWith("/approve"));
     assert.deepEqual(write.body.people, ["p-1", "p-2"]);
     assert.match(write.body.request_id, /^[0-9a-f-]{36}$/);
-    assert.equal(await page.locator(".requests-card").count(), 0);
+    await page.locator(".requests-card").waitFor({state: "detached"});
   });
 });
 

@@ -231,7 +231,8 @@ test("a member picks the ICP from a menu, and can give Tin's score back", {timeo
 
     await panel.getByRole("button", {name: "Use Tin’s score"}).click();
     await page.locator('td[data-fit="p-lea"]', {hasText: "0.15"}).waitFor();
-    assert.match(await panel.locator(".person-field").nth(1).innerText(), /ICP fit\s*0\.15\s*engagers · oct 15/);
+    // Back to Tin's score; the fixture dates it by the edit, so the day depends on the clock.
+    assert.match(await panel.locator(".person-field").nth(1).innerText(), /ICP fit\s*0\.15\s*engagers · [a-z]{3} \d{1,2}/);
     assert.equal(await page.getByRole("tab", {name: /^ICP fit/}).textContent(), "ICP fit 3");
     assert.deepEqual(errors, []);
     await context.close();
